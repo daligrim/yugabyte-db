@@ -16,6 +16,7 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.Lists;
 import com.google.inject.Inject;
 import com.google.inject.Singleton;
+import com.yugabyte.operator.OperatorConfig;
 import com.yugabyte.yw.common.AlertManager;
 import com.yugabyte.yw.common.PlatformScheduler;
 import com.yugabyte.yw.common.metrics.MetricService;
@@ -49,7 +50,7 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 import lombok.Value;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.commons.collections.MapUtils;
+import org.apache.commons.collections4.MapUtils;
 import org.apache.commons.lang3.StringUtils;
 
 @Singleton
@@ -102,9 +103,17 @@ public class QueryAlerts {
 
   @VisibleForTesting
   void scheduleRunner() {
+
     try {
+      boolean COMMUNITY_OP_ENABLED = OperatorConfig.getOssMode();
+      if (COMMUNITY_OP_ENABLED) {
+        log.debug("Skipping alert query as community edition is enabled");
+        resolveAllAlerts();
+        return;
+      }
       if (HighAvailabilityConfig.isFollower()) {
-        log.debug("Skipping querying for alerts for follower platform");
+        log.debug("Resolving all the alerts on the standby instance and skipping alerts query");
+        resolveAllAlerts();
         return;
       }
       try {
@@ -130,8 +139,7 @@ public class QueryAlerts {
     metricService.setMetric(
         buildMetricTemplate(PlatformMetrics.ALERT_QUERY_TOTAL_ALERTS), alerts.size());
     List<AlertData> validAlerts =
-        alerts
-            .stream()
+        alerts.stream()
             .filter(alertData -> getCustomerUuid(alertData) != null)
             .filter(alertData -> getConfigurationUuid(alertData) != null)
             .filter(alertData -> getDefinitionUuid(alertData) != null)
@@ -147,8 +155,7 @@ public class QueryAlerts {
         alerts.size() - validAlerts.size());
 
     List<AlertData> activeAlerts =
-        validAlerts
-            .stream()
+        validAlerts.stream()
             .filter(alertData -> alertData.getState() != AlertState.pending)
             .collect(Collectors.toList());
     metricService.setMetric(
@@ -157,8 +164,7 @@ public class QueryAlerts {
 
     List<AlertData> deduplicatedAlerts =
         new ArrayList<>(
-            activeAlerts
-                .stream()
+            activeAlerts.stream()
                 .collect(
                     Collectors.toMap(
                         this::getAlertKey,
@@ -171,8 +177,7 @@ public class QueryAlerts {
     List<UUID> activeAlertUuids = new ArrayList<>();
     for (List<AlertData> batch : Lists.partition(deduplicatedAlerts, ALERTS_BATCH)) {
       Set<UUID> definitionUuids =
-          batch
-              .stream()
+          batch.stream()
               .map(this::getDefinitionUuid)
               .map(UUID::fromString)
               .collect(Collectors.toSet());
@@ -183,36 +188,27 @@ public class QueryAlerts {
               .states(State.getFiringStates())
               .build();
       Map<AlertKey, Alert> existingAlertsByKey =
-          alertService
-              .list(alertFilter)
-              .stream()
+          alertService.list(alertFilter).stream()
               .collect(Collectors.toMap(this::getAlertKey, Function.identity()));
 
       AlertDefinitionFilter definitionFilter =
           AlertDefinitionFilter.builder().uuids(definitionUuids).build();
       Map<UUID, AlertDefinition> existingDefinitionsByUuid =
-          alertDefinitionService
-              .list(definitionFilter)
-              .stream()
+          alertDefinitionService.list(definitionFilter).stream()
               .collect(Collectors.toMap(AlertDefinition::getUuid, Function.identity()));
 
       Set<UUID> configurationUuids =
-          existingDefinitionsByUuid
-              .values()
-              .stream()
+          existingDefinitionsByUuid.values().stream()
               .map(AlertDefinition::getConfigurationUUID)
               .collect(Collectors.toSet());
       AlertConfigurationFilter configurationFilter =
           AlertConfigurationFilter.builder().uuids(configurationUuids).build();
       Map<UUID, AlertConfiguration> existingConfigsByUuid =
-          alertConfigurationService
-              .list(configurationFilter)
-              .stream()
+          alertConfigurationService.list(configurationFilter).stream()
               .collect(Collectors.toMap(AlertConfiguration::getUuid, Function.identity()));
 
       List<Alert> toSave =
-          batch
-              .stream()
+          batch.stream()
               .map(
                   data ->
                       processAlert(
@@ -241,7 +237,14 @@ public class QueryAlerts {
   }
 
   private void resolveAlerts(List<UUID> activeAlertsUuids) {
-    AlertFilter toResolveFilter = AlertFilter.builder().excludeUuids(activeAlertsUuids).build();
+    resolveAlerts(AlertFilter.builder().excludeUuids(activeAlertsUuids).build());
+  }
+
+  private void resolveAllAlerts() {
+    resolveAlerts(AlertFilter.builder().build());
+  }
+
+  private void resolveAlerts(AlertFilter toResolveFilter) {
     List<Alert> resolved = alertService.markResolved(toResolveFilter);
     if (!resolved.isEmpty()) {
       log.info("Resolved {} alerts", resolved.size());
@@ -363,10 +366,7 @@ public class QueryAlerts {
     String message = alertData.getAnnotations().get(SUMMARY_ANNOTATION_NAME);
 
     List<AlertLabel> labels =
-        alertData
-            .getLabels()
-            .entrySet()
-            .stream()
+        alertData.getLabels().entrySet().stream()
             .map(e -> new AlertLabel(e.getKey(), e.getValue()))
             .sorted(Comparator.comparing(AlertLabel::getName))
             .collect(Collectors.toList());

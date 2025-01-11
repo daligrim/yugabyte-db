@@ -17,7 +17,7 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.yb.util.YBTestRunnerNonTsanOnly;
+import org.yb.YBTestRunner;
 import static org.yb.AssertionWrappers.*;
 
 import java.sql.ResultSet;
@@ -25,11 +25,20 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.Map;
 
-@RunWith(value=YBTestRunnerNonTsanOnly.class)
+@RunWith(value=YBTestRunner.class)
 public class TestPgPortalLeak extends BasePgSQLTest {
   private static final Logger LOG = LoggerFactory.getLogger(TestPgPortalLeak.class);
 
   private final int rowCount = 4000;
+
+  @Override
+  protected Map<String, String> getTServerFlags() {
+    Map<String, String> flags = super.getTServerFlags();
+    // TODO(#21956): In RC isolation, testNoPortalLeak fails because there actually seems to be a
+    // memory leak.
+    flags.put("yb_enable_read_committed_isolation", "false");
+    return flags;
+  }
 
   private void createTable(String tableName) throws Exception {
     try (Statement statement = connection.createStatement()) {
@@ -106,21 +115,11 @@ public class TestPgPortalLeak extends BasePgSQLTest {
     }
   }
 
-  // This test case will be run with default setting where there should be no leak.
-  //   "ysql_disable_portal_run_context == true".
+  // Test that there is no leak.
   @Test
   public void testNoPortalLeak() throws Exception {
     String tableName = "tableExpectPgPortalHasNoLeak";
     createTable(tableName);
     selectBatches(tableName, true /* expectNoLeak */);
-  }
-
-  // This test case will be run in TestPgFlags() module where leaking is expected.
-  //   "ysql_disable_portal_run_context == true".
-  public static void testPgPortalLeakFlag() throws Exception {
-    String tableName = "tableExpectPgPortalHasLeak";
-    TestPgPortalLeak testCase = new TestPgPortalLeak();
-    testCase.createTable(tableName);
-    testCase.selectBatches(tableName, false /* expectNoLeak */);
   }
 }

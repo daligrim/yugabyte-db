@@ -13,6 +13,8 @@
 
 package org.yb.pgsql;
 
+import static org.yb.AssertionWrappers.*;
+
 import org.hamcrest.CoreMatchers;
 import org.junit.Ignore;
 import org.junit.Test;
@@ -21,11 +23,12 @@ import com.yugabyte.util.PSQLException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.yb.minicluster.MiniYBCluster;
-import org.yb.util.MiscUtil.ThrowingRunnable;
-import org.yb.util.YBTestRunnerNonTsanOnly;
+import org.yb.util.ThrowingRunnable;
+import org.yb.YBTestRunner;
 
 import java.sql.Connection;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.Arrays;
 import java.util.HashSet;
@@ -35,9 +38,7 @@ import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
-import static org.yb.AssertionWrappers.*;
-
-@RunWith(value = YBTestRunnerNonTsanOnly.class)
+@RunWith(value = YBTestRunner.class)
 public class TestPgCacheConsistency extends BasePgSQLTest {
   private static final Logger LOG = LoggerFactory.getLogger(TestPgCacheConsistency.class);
 
@@ -279,17 +280,25 @@ public class TestPgCacheConsistency extends BasePgSQLTest {
           .map(Optional::get)
           .collect(Collectors.toList());
 
-      // At least half the select statements should fail.
-      assertGreaterThanOrEqualTo(
-          String.format(
-              "Expected at least %d failures out of %d attempts, got %d",
-              attempts / 2,
-              attempts,
-              errors.size()
-          ),
-          errors.size(),
-          attempts / 2
-      );
+      if (isTestRunningWithConnectionManager()) {
+        // Due to DDL sleeps with Connection Manager, all select statements
+        // should succeed.
+        assertEquals("No failures are expected with Connection Manager enabled",
+         errors.size(),
+         0);
+      } else {
+        // At least half the select statements should fail.
+        assertGreaterThanOrEqualTo(
+            String.format(
+                "Expected at least %d failures out of %d attempts, got %d",
+                attempts / 2,
+                attempts,
+                errors.size()
+              ),
+            errors.size(),
+            attempts / 2
+          );
+      }
 
       // All errors should be catalog version mismatches.
       for (Throwable error : errors) {
@@ -433,7 +442,7 @@ public class TestPgCacheConsistency extends BasePgSQLTest {
           statement2,
           "EXPLAIN (COSTS OFF) SELECT u FROM test_table WHERE u = 1",
           new Row("Seq Scan on test_table"),
-          new Row("  Filter: (u = 1)")
+          new Row("  Storage Filter: (u = 1)")
       );
     }
   }
@@ -600,6 +609,111 @@ public class TestPgCacheConsistency extends BasePgSQLTest {
         stmt2.execute("END");
       }
 
+      // Test that dropping a partition in one connection is reflected in the other.
+      stmt1.executeUpdate("DROP TABLE prt_p1");
+      waitForTServerHeartbeat();
+      final String error_msg = "no partition of relation \"prt\" found for row";
+      runInvalidQuery(stmt2, "INSERT INTO prt VALUES (1)", error_msg);
+
+      // Test that attaching a partition in one connection is reflected in the other.
+      stmt1.executeUpdate("CREATE TABLE prt_p1 (a int, b varchar)");
+      stmt1.executeUpdate("ALTER TABLE prt ATTACH PARTITION prt_p1 FOR VALUES FROM (0) TO (10)");
+      waitForTServerHeartbeat();
+      stmt2.executeUpdate("INSERT INTO prt VALUES (1)");
+
+      // Test whether detaching a partition in one connection is reflected in the other.
+      stmt1.executeUpdate("ALTER TABLE prt DETACH PARTITION prt_p1");
+      waitForTServerHeartbeat();
+      runInvalidQuery(stmt2, "INSERT INTO prt VALUES (1)", error_msg);
+
+      // Test that adding a default partition in one connection is reflected in the other.
+      stmt1.executeUpdate("CREATE TABLE prt_default (a int, b varchar)");
+      stmt1.executeUpdate("ALTER TABLE prt ATTACH PARTITION prt_default DEFAULT");
+      waitForTServerHeartbeat();
+      stmt2.executeUpdate("INSERT INTO prt VALUES (1)");
+
+      // Test that dropping a default partition in one connection is reflected in the other.
+      stmt1.executeUpdate("DROP TABLE prt_default");
+      waitForTServerHeartbeat();
+      runInvalidQuery(stmt2, "INSERT INTO prt VALUES (1)", error_msg);
+
+      // Test adding a new partitioned table as a partition.
+      stmt1.executeUpdate("CREATE TABLE prt2 (a int, b varchar) PARTITION BY RANGE(a)");
+      stmt1.executeUpdate("CREATE TABLE prt2_p1 PARTITION OF prt2 FOR VALUES FROM (2) TO (8)");
+      stmt1.executeUpdate("ALTER TABLE prt ATTACH PARTITION prt2 FOR VALUES FROM (0) TO (10)");
+      waitForTServerHeartbeat();
+      stmt2.executeUpdate("INSERT INTO prt VALUES (3)");
+
+      // Test adding a subpartition.
+      stmt1.executeUpdate("CREATE TABLE prt2_p2 PARTITION OF prt2 FOR VALUES FROM (8) TO (10)");
+      waitForTServerHeartbeat();
+      stmt2.executeUpdate("INSERT INTO prt VALUES (9)");
+
+      // Test dropping a subpartition.
+      stmt1.executeUpdate("DROP TABLE prt2_p2");
+      waitForTServerHeartbeat();
+      final String error_msg2 = "no partition of relation \"prt2\" found for row";
+      runInvalidQuery(stmt2, "INSERT INTO prt VALUES (9)", error_msg2);
+
+      // Test adding a default subpartition
+      stmt1.executeUpdate("CREATE TABLE prt2_default PARTITION OF prt2 DEFAULT");
+      waitForTServerHeartbeat();
+      stmt2.executeUpdate("INSERT INTO prt VALUES (9)");
+
+      // Test dropping a default subpartition
+      stmt1.executeUpdate("ALTER TABLE prt2 DETACH PARTITION prt2_default");
+      waitForTServerHeartbeat();
+      runInvalidQuery(stmt2, "INSERT INTO prt VALUES (9)", error_msg2);
+
+      // Test dropping child partitioned table.
+      stmt1.executeUpdate("DROP TABLE prt2");
+      waitForTServerHeartbeat();
+      runInvalidQuery(stmt2, "INSERT INTO prt VALUES (3)", error_msg);
+    }
+  }
+
+  @Test
+  public void testDefaultPartitionConsistency() throws Exception {
+    try (Connection connection1 = getConnectionBuilder().withTServer(0).connect();
+         Connection connection2 = getConnectionBuilder().withTServer(1).connect();
+         Statement stmt1 = connection1.createStatement();
+         Statement stmt2 = connection2.createStatement()) {
+
+      // Create a partitioned table and and a default partition in connection1.
+      stmt1.executeUpdate("CREATE TABLE prt (a int, b varchar) PARTITION BY RANGE(a)");
+      stmt1.executeUpdate("CREATE TABLE prt_default PARTITION OF prt DEFAULT");
+
+      // Concurrently create/attach a new partition in connection 2 while inserting data into the
+      // parent partitioned table in connection 1. Verify that the insert transaction gets aborted
+      // due to concurrent DDL.
+      final String[] abort_errors =
+        { "expired or aborted by a conflict", "Transaction aborted: kAborted" };
+      for (int part_idx = 0; part_idx < 50; ++part_idx) {
+        final int startPartition = 10 * part_idx;
+        final int endPartition = 10 * (part_idx + 1);
+
+        stmt1.execute("BEGIN");
+        stmt1.executeUpdate(String.format("INSERT INTO prt(a,b) VALUES (%d, 'abc')",
+                                          startPartition + 1));
+
+        // Alternatively test creating a new partition and attaching a new partition.
+        if (part_idx % 2 == 0) {
+          stmt2.executeUpdate(String.format("CREATE TABLE prt_p%d (a int, b varchar)",
+                                            part_idx + 1));
+          stmt2.executeUpdate(String.format(
+              "ALTER TABLE prt ATTACH PARTITION prt_p%d FOR VALUES FROM (%d) TO (%d)",
+              part_idx + 1, startPartition, endPartition));
+        } else {
+          stmt2.executeUpdate(String.format(
+                  "CREATE TABLE prt_p%d PARTITION OF prt FOR VALUES FROM (%d) TO (%d)",
+                  part_idx + 1, startPartition, endPartition));
+        }
+
+        runInvalidQuery(stmt1, "COMMIT", abort_errors);
+
+        // There should be no rows in the default partition.
+        assertEquals(getRowList(stmt1, "SELECT * FROM prt_default WHERE a>0").size(), 0);
+      }
     }
   }
 
@@ -609,6 +723,55 @@ public class TestPgCacheConsistency extends BasePgSQLTest {
       return Optional.empty();
     } catch (Throwable t) {
       return Optional.of(t);
+    }
+  }
+
+  // Check that an error message contains all the relevant error information with the Catalog
+  // Version Mismatch message appended.
+  @Test
+  public void testCatalogVersionLogging() throws Exception {
+    try (Connection connection1 = getConnectionBuilder().withTServer(0).connect();
+         Connection connection2 = getConnectionBuilder().withTServer(1).connect();
+         Statement statement1 = connection1.createStatement();
+         Statement statement2 = connection2.createStatement()) {
+
+      statement1.execute("CREATE TABLE test_table(id int, x0 int)");
+
+      waitForTServerHeartbeat();
+
+      // Force a cache refresh on connection 2.
+      statement2.execute("SELECT * FROM test_table");
+
+      statement1.execute("ALTER TABLE test_table ADD COLUMN x1 int");
+
+      try {
+        // Immediately try selecting row from connection 2.
+        String query = "SELECT x1 FROM test_table";
+        statement2.execute(query);
+
+        // Connection Manager enabled runs will not fail due to DDL sleeps.
+        if (!isTestRunningWithConnectionManager()) {
+          fail(String.format("Statement did not fail: %s", query));
+        }
+      } catch (SQLException error) {
+        if (isTestRunningWithConnectionManager()) {
+          fail("Connection Manager enabled run should not have failed");
+        }
+        LOG.info(error.getMessage());
+        assertThat(
+          error.getMessage(),
+          CoreMatchers.containsString("Catalog Version Mismatch")
+        );
+        assertThat(
+          error.getMessage(),
+          CoreMatchers.containsString("Hint: Perhaps you meant to reference the column " +
+            "\"test_table.x0\"")
+        );
+        assertThat(
+          error.getMessage(),
+          CoreMatchers.not(CoreMatchers.containsString("(null)"))
+        );
+      }
     }
   }
 }

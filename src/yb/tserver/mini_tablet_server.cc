@@ -37,17 +37,14 @@
 #include <string>
 #include <utility>
 
-#include <glog/logging.h>
+#include "yb/util/logging.h"
 
-#include "yb/common/index.h"
-#include "yb/common/partition.h"
+#include "yb/qlexpr/index.h"
+#include "yb/dockv/partition.h"
 #include "yb/common/schema.h"
 
 #include "yb/consensus/consensus.pb.h"
-
-#include "yb/encryption/encrypted_file_factory.h"
-#include "yb/encryption/header_manager_impl.h"
-#include "yb/encryption/universe_key_manager.h"
+#include "yb/consensus/consensus_util.h"
 
 #include "yb/rocksutil/rocksdb_encrypted_file_factory.h"
 
@@ -63,20 +60,18 @@
 #include "yb/tserver/tablet_server.h"
 #include "yb/tserver/ts_tablet_manager.h"
 
-#include "yb/util/flag_tags.h"
+#include "yb/util/flags.h"
 #include "yb/util/net/sockaddr.h"
 #include "yb/util/net/tunnel.h"
 #include "yb/util/scope_exit.h"
 #include "yb/util/status.h"
+#include "yb/util/thread.h"
 
 using std::pair;
+using std::string;
 
-using yb::consensus::Consensus;
-using yb::consensus::ConsensusOptions;
 using yb::consensus::RaftPeerPB;
 using yb::consensus::RaftConfigPB;
-using yb::log::Log;
-using strings::Substitute;
 using yb::tablet::TabletPeer;
 
 DECLARE_bool(rpc_server_allow_ephemeral_ports);
@@ -95,11 +90,7 @@ MiniTabletServer::MiniTabletServer(const std::vector<std::string>& wal_paths,
                                    const TabletServerOptions& extra_opts, int index)
   : started_(false),
     opts_(extra_opts),
-    index_(index + 1),
-    universe_key_manager_(new encryption::UniverseKeyManager()),
-    encrypted_env_(NewEncryptedEnv(encryption::DefaultHeaderManager(universe_key_manager_.get()))),
-    rocksdb_encrypted_env_(
-      NewRocksDBEncryptedEnv(encryption::DefaultHeaderManager(universe_key_manager_.get()))) {
+    index_(index + 1) {
 
   // Start RPC server on loopback.
   FLAGS_rpc_server_allow_ephemeral_ports = true;
@@ -118,9 +109,6 @@ MiniTabletServer::MiniTabletServer(const std::vector<std::string>& wal_paths,
   }
   opts_.fs_opts.wal_paths = wal_paths;
   opts_.fs_opts.data_paths = data_paths;
-  opts_.universe_key_manager = universe_key_manager_.get();
-  opts_.env = encrypted_env_.get();
-  opts_.rocksdb_env = rocksdb_encrypted_env_.get();
 }
 
 MiniTabletServer::MiniTabletServer(const string& fs_root,
@@ -140,10 +128,18 @@ Result<std::unique_ptr<MiniTabletServer>> MiniTabletServer::CreateMiniTabletServ
   return std::make_unique<MiniTabletServer>(fs_root, rpc_port, *options_result, index);
 }
 
-Status MiniTabletServer::Start() {
-  CHECK(!started_);
+Result<std::unique_ptr<MiniTabletServer>> MiniTabletServer::CreateMiniTabletServer(
+    const std::vector<string>& fs_roots, uint16_t rpc_port, int index) {
+  auto options_result = TabletServerOptions::CreateTabletServerOptions();
+  RETURN_NOT_OK(options_result);
+  return std::make_unique<MiniTabletServer>(fs_roots, fs_roots, rpc_port, *options_result, index);
+}
 
-  std::unique_ptr<TabletServer> server(new enterprise::TabletServer(opts_));
+Status MiniTabletServer::Start(WaitTabletsBootstrapped wait_tablets_bootstrapped) {
+  CHECK(!started_);
+  TEST_SetThreadPrefixScoped prefix_se(ToString());
+
+  std::unique_ptr<TabletServer> server(new TabletServer(opts_));
   RETURN_NOT_OK(server->Init());
 
   RETURN_NOT_OK(server->Start());
@@ -153,8 +149,10 @@ Status MiniTabletServer::Start() {
   RETURN_NOT_OK(Reconnect());
 
   started_ = true;
-  return Status::OK();
+  return wait_tablets_bootstrapped ? WaitStarted() : Status::OK();
 }
+
+string MiniTabletServer::ToString() const { return Format("ts-$0", index_); }
 
 void MiniTabletServer::Isolate() {
   server::TEST_Isolate(server_->messenger());
@@ -192,6 +190,7 @@ Status MiniTabletServer::WaitStarted() {
 }
 
 void MiniTabletServer::Shutdown() {
+  TEST_SetThreadPrefixScoped prefix_se(Format("ts-$0", index_));
   if (tunnel_) {
     tunnel_->Shutdown();
   }
@@ -229,10 +228,11 @@ Status MiniTabletServer::FlushTablets(tablet::FlushMode mode, tablet::FlushFlags
     return Status::OK();
   }
   return ForAllTablets(this, [mode, flags](TabletPeer* tablet_peer) -> Status {
-    if (!tablet_peer->tablet()) {
+    auto tablet = tablet_peer->shared_tablet();
+    if (!tablet) {
       return Status::OK();
     }
-    return tablet_peer->tablet()->Flush(mode, flags);
+    return tablet->Flush(mode, flags);
   });
 }
 
@@ -240,17 +240,22 @@ Status MiniTabletServer::CompactTablets(docdb::SkipFlush skip_flush) {
   if (!server_) {
     return Status::OK();
   }
-  return ForAllTablets(this, [skip_flush](TabletPeer* tablet_peer) {
-    if (tablet_peer->tablet()) {
-      tablet_peer->tablet()->TEST_ForceRocksDBCompact(skip_flush);
+  return ForAllTablets(this, [skip_flush](TabletPeer* tablet_peer) -> Status {
+    auto tablet = tablet_peer->shared_tablet();
+    if (!tablet) {
+      return Status::OK();
     }
-    return Status::OK();
+    return tablet->ForceManualRocksDBCompact(skip_flush);
   });
 }
 
 Status MiniTabletServer::SwitchMemtables() {
-  return ForAllTablets(this, [](TabletPeer* tablet_peer) {
-    return tablet_peer->tablet()->TEST_SwitchMemtable();
+  return ForAllTablets(this, [](TabletPeer* tablet_peer) -> Status {
+    auto tablet = tablet_peer->shared_tablet();
+    if (!tablet) {
+      return Status::OK();
+    }
+    return tablet->TEST_SwitchMemtable();
   });
 }
 
@@ -267,12 +272,12 @@ Status MiniTabletServer::CleanTabletLogs() {
 Status MiniTabletServer::Restart() {
   CHECK(started_);
   Shutdown();
-  return Start();
+  return Start(WaitTabletsBootstrapped::kFalse);
 }
 
 Status MiniTabletServer::RestartStoppedServer() {
   Shutdown();
-  return Start();
+  return Start(WaitTabletsBootstrapped::kFalse);
 }
 
 RaftConfigPB MiniTabletServer::CreateLocalConfig() const {
@@ -303,11 +308,13 @@ Status MiniTabletServer::AddTestTablet(const std::string& ns_id,
                                        TableType table_type) {
   CHECK(started_) << "Must Start()";
   Schema schema_with_ids = SchemaBuilder(schema).Build();
-  pair<PartitionSchema, Partition> partition = tablet::CreateDefaultPartition(schema_with_ids);
+  auto partition = tablet::CreateDefaultPartition(schema_with_ids);
 
   auto table_info = std::make_shared<tablet::TableInfo>(
-      tablet::Primary::kTrue, table_id, ns_id, table_id, table_type, schema_with_ids, IndexMap(),
-      boost::none /* index_info */, 0 /* schema_version */, partition.first);
+      consensus::MakeTabletLogPrefix(tablet_id, server_->permanent_uuid()), tablet::Primary::kTrue,
+      table_id, ns_id, table_id, table_type, schema_with_ids, qlexpr::IndexMap(),
+      std::nullopt /* index_info */, 0 /* schema_version */, partition.first, "" /* pg_table_id */,
+      tablet::SkipTableTombstoneCheck::kFalse);
 
   return ResultToStatus(server_->tablet_manager()->CreateNewTablet(
       table_info, tablet_id, partition.second, config));
@@ -348,6 +355,21 @@ std::string MiniTabletServer::bound_rpc_addr_str() const {
 FsManager& MiniTabletServer::fs_manager() const {
   CHECK(started_);
   return *server_->fs_manager();
+}
+
+MetricEntity& MiniTabletServer::metric_entity() const {
+  CHECK(started_);
+  return *server_->metric_entity();
+}
+
+const MemTrackerPtr& MiniTabletServer::mem_tracker() const {
+  CHECK(started_);
+  return server_->mem_tracker();
+}
+
+HybridTime MiniTabletServer::Now() const {
+  CHECK(started_);
+  return server_->clock()->Now();
 }
 
 } // namespace tserver

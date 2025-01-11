@@ -5,7 +5,8 @@ import AuthenticatedComponent from './AuthenticatedComponent';
 import {
   fetchUniverseList,
   fetchUniverseListResponse,
-  resetUniverseList
+  resetUniverseList,
+  setUniverseMetrics
 } from '../../actions/universe';
 import {
   getProviderList,
@@ -31,35 +32,51 @@ import {
   fetchSoftwareVersions,
   fetchSoftwareVersionsSuccess,
   fetchSoftwareVersionsFailure,
+  fetchDBVersions,
+  fetchDBVersionsSuccess,
+  fetchDBVersionsFailure,
   fetchYugaWareVersion,
   fetchYugaWareVersionResponse,
   fetchCustomerConfigs,
   fetchCustomerConfigsResponse,
+  fetchRunTimeConfigsKeyInfo,
+  fetchRunTimeConfigsKeyInfoResponse,
   getTlsCertificates,
   getTlsCertificatesResponse,
-  insecureLogin,
-  insecureLoginResponse,
   fetchUser,
   fetchUserSuccess,
-  fetchUserFailure
+  fetchUserFailure,
+  fetchAdminNotifications,
+  fetchAdminNotificationsResponse
 } from '../../actions/customers';
 import {
   fetchCustomerTasks,
   fetchCustomerTasksSuccess,
   fetchCustomerTasksFailure
 } from '../../actions/tasks';
-import { setUniverseMetrics } from '../../actions/universe';
+
 import { queryMetrics } from '../../actions/graph';
 import Cookies from 'js-cookie';
 
 const mapDispatchToProps = (dispatch) => {
   return {
+    // Remove - 2024.2
     fetchSoftwareVersions: () => {
       dispatch(fetchSoftwareVersions()).then((response) => {
         if (response.payload.status !== 200) {
           dispatch(fetchSoftwareVersionsFailure(response.payload));
         } else {
           dispatch(fetchSoftwareVersionsSuccess(response.payload));
+        }
+      });
+    },
+
+    fetchDBVersions: () => {
+      dispatch(fetchDBVersions()).then((response) => {
+        if (response.payload.status !== 200) {
+          dispatch(fetchDBVersionsFailure(response.payload));
+        } else {
+          dispatch(fetchDBVersionsSuccess(response.payload));
         }
       });
     },
@@ -125,13 +142,15 @@ const mapDispatchToProps = (dispatch) => {
     getProviderListItems: () => {
       dispatch(getProviderList()).then((response) => {
         if (response.payload.status === 200) {
-          Promise.all(response.payload.data.map((provider) => {
-            return dispatch(listAccessKeys(provider.uuid)).then((response) => {
-              dispatch(listAccessKeysResponse(response.payload));
-            });
-          })).then(()=>{
-            dispatch(listAccessKeysReqCompleted())
-          })
+          Promise.all(
+            response.payload.data.map((provider) => {
+              return dispatch(listAccessKeys(provider.uuid)).then((response) => {
+                dispatch(listAccessKeysResponse(response.payload));
+              });
+            })
+          ).then(() => {
+            dispatch(listAccessKeysReqCompleted());
+          });
         }
         dispatch(getProviderListResponse(response.payload));
       });
@@ -156,28 +175,32 @@ const mapDispatchToProps = (dispatch) => {
       });
     },
 
-    fetchInsecureLogin: () => {
-      dispatch(insecureLogin()).then((response) => {
-        if (response.payload.status === 200) {
-          dispatch(insecureLoginResponse(response));
-        }
-      });
-    },
-
     fetchCustomerConfigs: () => {
       dispatch(fetchCustomerConfigs()).then((response) => {
         dispatch(fetchCustomerConfigsResponse(response.payload));
       });
     },
 
+    fetchRuntimeConfigKeyInfo: () => {
+      dispatch(fetchRunTimeConfigsKeyInfo()).then((response) => {
+        dispatch(fetchRunTimeConfigsKeyInfoResponse(response.payload));
+      });
+    },
+
     fetchUser: () => {
-      const userId = Cookies.get('userId') || localStorage.getItem('userId');
+      const userId = Cookies.get('userId') ?? localStorage.getItem('userId');
       dispatch(fetchUser(userId)).then((userResponse) => {
         if (userResponse.payload.status === 200) {
           dispatch(fetchUserSuccess(userResponse));
         } else {
           dispatch(fetchUserFailure(userResponse.payload.error));
         }
+      });
+    },
+
+    fetchAdminNotifications: () => {
+      dispatch(fetchAdminNotifications()).then((response) => {
+        dispatch(fetchAdminNotificationsResponse(response.payload));
       });
     }
   };
@@ -190,7 +213,8 @@ const mapStateToProps = (state) => {
     universe: state.universe,
     tasks: state.tasks,
     fetchMetadata: state.cloud.fetchMetadata,
-    fetchUniverseMetadata: state.universe.fetchUniverseMetadata
+    fetchUniverseMetadata: state.universe.fetchUniverseMetadata,
+    adminNotifications: state.customer.adminNotifications
   };
 };
 

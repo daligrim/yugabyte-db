@@ -11,7 +11,9 @@ import {
   updateBackupState,
   updateBackupStateResponse,
   fetchReleasesByProvider,
-  fetchReleasesResponse
+  fetchReleasesResponse,
+  fetchUniverseLbState,
+  fetchUniverseLbStateResponse
 } from '../../../actions/universe';
 import {
   abortTask,
@@ -20,32 +22,42 @@ import {
   fetchCustomerTasksSuccess,
   fetchCustomerTasksFailure
 } from '../../../actions/tasks';
-
 import {
   fetchRunTimeConfigs,
   fetchRunTimeConfigsResponse,
+  fetchProviderRunTimeConfigs,
+  fetchProviderRunTimeConfigsResponse,
   getAlerts,
   getAlertsSuccess,
   getAlertsFailure
 } from '../../../actions/customers';
-
 import { openDialog, closeDialog } from '../../../actions/modal';
-
 import {
   fetchUniverseTables,
   fetchUniverseTablesSuccess,
   fetchUniverseTablesFailure,
   resetTablesList
 } from '../../../actions/tables';
-import { getPrimaryCluster } from '../../../utils/UniverseUtils';
 import { isDefinedNotNull, isNonEmptyObject } from '../../../utils/ObjectUtils';
 import { toast } from 'react-toastify';
+import {
+  compareYBSoftwareVersions,
+  getPrimaryCluster,
+  isVersionStable
+} from '../../../utils/universeUtilsTyped';
+import { RuntimeConfigKey } from '../../../redesign/helpers/constants';
 
 const mapDispatchToProps = (dispatch) => {
   return {
     getUniverseInfo: (uuid) => {
       return dispatch(fetchUniverseInfo(uuid)).then((response) => {
         return dispatch(fetchUniverseInfoResponse(response.payload));
+      });
+    },
+
+    getUniverseLbState: (uuid) => {
+      return dispatch(fetchUniverseLbState(uuid)).then((response) => {
+        return dispatch(fetchUniverseLbStateResponse(response.payload));
       });
     },
 
@@ -77,6 +89,12 @@ const mapDispatchToProps = (dispatch) => {
     showGFlagsModal: () => {
       dispatch(openDialog('gFlagsModal'));
     },
+    showGFlagsNewModal: () => {
+      dispatch(openDialog('gFlagsNewModal'));
+    },
+    showHelmOverridesModal: () => {
+      dispatch(openDialog('helmOverridesModal'));
+    },
     showManageKeyModal: () => {
       dispatch(openDialog('manageKeyModal'));
     },
@@ -88,6 +106,15 @@ const mapDispatchToProps = (dispatch) => {
     },
     showSoftwareUpgradesModal: () => {
       dispatch(openDialog('softwareUpgradesModal'));
+    },
+    showLinuxSoftwareUpgradeModal: () => {
+      dispatch(openDialog('linuxVersionUpgradeModal'));
+    },
+    showSoftwareUpgradesNewModal: () => {
+      dispatch(openDialog('softwareUpgradesNewModal'));
+    },
+    showRollbackModal: () => {
+      dispatch(openDialog('rollbackModal'));
     },
     showVMImageUpgradeModal: () => {
       dispatch(openDialog('vmImageUpgradeModal'));
@@ -113,7 +140,21 @@ const mapDispatchToProps = (dispatch) => {
     showThirdpartyUpgradeModal: () => {
       dispatch(openDialog('thirdpartyUpgradeModal'));
     },
-
+    showEnableYSQLModal: () => {
+      dispatch(openDialog('enableYSQLModal'));
+    },
+    showEnableYCQLModal: () => {
+      dispatch(openDialog('enableYCQLModal'));
+    },
+    showPGCompatibilityModal: () => {
+      dispatch(openDialog('enablePGCompatibility'));
+    },
+    showConnectionPoolModal: () => {
+      dispatch(openDialog('enableConnectionPooling'));
+    },
+    showInstallNodeAgentModal: () => {
+      dispatch(openDialog('installNodeAgentModal'));
+    },
     updateBackupState: (universeUUID, flag) => {
       dispatch(updateBackupState(universeUUID, flag)).then((response) => {
         if (response.error) {
@@ -155,7 +196,7 @@ const mapDispatchToProps = (dispatch) => {
         }
       });
     },
-    abortCurrentTask: (taskUUID) => {
+    abortTask: (taskUUID) => {
       return dispatch(abortTask(taskUUID)).then((response) => {
         return dispatch(abortTaskResponse(response.payload));
       });
@@ -170,25 +211,17 @@ const mapDispatchToProps = (dispatch) => {
       return dispatch(fetchRunTimeConfigs(universeUUID, true)).then((response) =>
         dispatch(fetchRunTimeConfigsResponse(response.payload))
       );
+    },
+    fetchProviderRunTimeConfigs: (providerUUID) => {
+      return dispatch(fetchProviderRunTimeConfigs(providerUUID, true)).then((response) =>
+        dispatch(fetchProviderRunTimeConfigsResponse(response.payload))
+      );
     }
   };
 };
 
-function mapStateToProps(state, ownProps) {
-  // Detect if software update is available for this universe
-  const isUpdateAvailable = (state) => {
-    const isFirstVersionOlder = (first, second) => {
-      for (let idx = 0; idx < first.length; idx++) {
-        const first_ = parseInt(first[idx], 10);
-        const second_ = parseInt(second[idx], 10);
-        if (first_ < second_) {
-          return true;
-        } else if (first_ > second_) {
-          return false;
-        }
-      }
-      return false;
-    };
+function mapStateToProps(state) {
+  const getAvailableSoftwareUpdateCount = (state) => {
     try {
       if (
         isDefinedNotNull(state.universe.currentUniverse.data) &&
@@ -197,31 +230,61 @@ function mapStateToProps(state, ownProps) {
         const primaryCluster = getPrimaryCluster(
           state.universe.currentUniverse.data.universeDetails.clusters
         );
-        const currentversion =
-          primaryCluster && (primaryCluster.userIntent.ybSoftwareVersion || undefined);
-        if (currentversion && state.customer.softwareVersions.length) {
-          for (let idx = 0; idx < state.customer.softwareVersions.length; idx++) {
-            const current = currentversion.split('-');
-            const iterator = state.customer.softwareVersions[idx].split('-');
 
-            const currentVersion = current[0];
-            const iteratorVersion = iterator[0];
-            const currentBuild = current[1] ? parseInt(current[1].substr(1), 10) : '';
-            const iteratorBuild = iterator[1] ? parseInt(iterator[1].substr(1), 10) : '';
-
-            // Compare versions till current won't be founded or founded an older one and compare release codes separately because "b9" > "b13"
-            if (
-              isFirstVersionOlder(iteratorVersion.split('.'), currentVersion.split('.')) ||
-              (iteratorVersion === currentVersion && iteratorBuild <= currentBuild)
-            )
-              return idx;
+        const currentVersion = primaryCluster?.userIntent?.ybSoftwareVersion ?? null;
+        // Display the number of upgrades available in the respective track
+        // regardless of skipVersionCheck runtime flag
+        // If current version belongs to the stable track, see available upgrades only in the stable track
+        // vice versa for preview version
+        const isCurrentVersionStable = isVersionStable(currentVersion);
+        if (currentVersion) {
+          let supportedSoftwareVersions;
+          const softwareVersions = state.customer?.dbVersionsWithMetadata;
+          if (isCurrentVersionStable) {
+            supportedSoftwareVersions =
+              Object.keys(softwareVersions)
+                ?.filter((version) => isVersionStable(version))
+                ?.toSorted((versionA, versionB) =>
+                  compareYBSoftwareVersions({
+                    versionA: versionB,
+                    versionB: versionA,
+                    options: {
+                      suppressFormatError: true,
+                      requireOrdering: true
+                    }
+                  })
+                ) ?? [];
+          } else {
+            supportedSoftwareVersions =
+              Object.keys(softwareVersions)
+                ?.filter((version) => !isVersionStable(version))
+                ?.toSorted((versionA, versionB) =>
+                  compareYBSoftwareVersions({
+                    versionA: versionB,
+                    versionB: versionA,
+                    options: {
+                      suppressFormatError: true,
+                      requireOrdering: true
+                    }
+                  })
+                ) ?? [];
           }
+          // supportedSoftwareVersions contain versions of the same track,
+          // compareYBSoftwareVersions function will work with newer releases as well
+          const matchIndex = supportedSoftwareVersions.findIndex(
+            (version) =>
+              compareYBSoftwareVersions({
+                versionA: currentVersion,
+                versionB: version
+              }) >= 0
+          );
+          return matchIndex === -1 ? 0 : matchIndex;
         }
       }
-      return false;
+      return 0;
     } catch (err) {
-      console.log('Versions comparison failed with: ' + err);
-      return false;
+      console.error('Versions comparison failed with: ' + err);
+      return 0;
     }
   };
 
@@ -232,9 +295,10 @@ function mapStateToProps(state, ownProps) {
     universeTables: state.tables.universeTablesList,
     modal: state.modal,
     providers: state.cloud.providers,
-    updateAvailable: isUpdateAvailable(state),
+    updateAvailable: getAvailableSoftwareUpdateCount(state),
     featureFlags: state.featureFlags,
-    accessKeys: state.cloud.accessKeys
+    accessKeys: state.cloud.accessKeys,
+    graph: state.graph
   };
 }
 

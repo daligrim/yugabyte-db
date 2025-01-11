@@ -41,8 +41,7 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 
-#ifndef YB_UTIL_LOGGING_H
-#define YB_UTIL_LOGGING_H
+#pragma once
 
 #include <mutex>
 #include <string>
@@ -59,8 +58,47 @@
 #include "yb/util/monotime.h"
 
 ////////////////////////////////////////////////////////////////////////////////
+// Yugabyte VLOG
+////////////////////////////////////////////////////////////////////////////////
+
+// Undefine the standard glog macros.
+#undef VLOG
+#undef VLOG_IF
+#undef VLOG_EVERY_N
+#undef VLOG_IF_EVERY_N
+
+// VLOG show up as regular INFO messages. These are similar to the standard glog macros, but they
+// include the VLOG level. This helps identify log spew from enabling higher verbosity levels.
+// Ex: I1011 20:44:27.393563 1874145280 cdc_service.cc:2792] vlog3: List of tablets with checkpoint
+// info read from cdc_state table: 1
+#define VERBOSITY_LEVEL_STR(verboselevel) "vlog" BOOST_PP_STRINGIZE(verboselevel) ": "
+
+#define VLOG(verboselevel) \
+  LOG_IF(INFO, VLOG_IS_ON(verboselevel)) << VERBOSITY_LEVEL_STR(verboselevel)
+
+#define VLOG_IF(verboselevel, condition) \
+  LOG_IF(INFO, (condition) && VLOG_IS_ON(verboselevel)) << VERBOSITY_LEVEL_STR(verboselevel)
+
+#define VLOG_EVERY_N(verboselevel, n) \
+  LOG_IF_EVERY_N(INFO, VLOG_IS_ON(verboselevel), n) << VERBOSITY_LEVEL_STR(verboselevel)
+
+#define VLOG_IF_EVERY_N(verboselevel, condition, n) \
+  LOG_IF_EVERY_N(INFO, (condition) && VLOG_IS_ON(verboselevel), n) \
+      << VERBOSITY_LEVEL_STR(verboselevel)
+
+////////////////////////////////////////////////////////////////////////////////
 // Throttled logging support
 ////////////////////////////////////////////////////////////////////////////////
+
+// Logs every n secs unless VLOG is on at a level higher than verboselevel (in which case it logs
+// every time).
+// If verboselevel is -1 then VLOG is not used.
+#define YB_LOG_EVERY_N_SECS_OR_VLOG(severity, n_secs, verboselevel) \
+  static yb::logging_internal::LogThrottler BOOST_PP_CAT(LOG_THROTTLER_, __LINE__); \
+  if (int should_vlog = (verboselevel > -1 && VLOG_IS_ON(verboselevel)), cnt = 0; \
+      should_vlog || (cnt = BOOST_PP_CAT(LOG_THROTTLER_, __LINE__).ShouldLog(n_secs)) >= 0) \
+  BOOST_PP_CAT(GOOGLE_LOG_, severity)(cnt).stream() \
+      << (should_vlog ? VERBOSITY_LEVEL_STR(verboselevel) : "")
 
 // Logs a message throttled to appear at most once every 'n_secs' seconds to
 // the given severity.
@@ -71,9 +109,7 @@
 // Example usage:
 //   YB_LOG_EVERY_N_SECS(WARNING, 1) << "server is low on memory" << THROTTLE_MSG;
 #define YB_LOG_EVERY_N_SECS(severity, n_secs) \
-  static yb::logging_internal::LogThrottler BOOST_PP_CAT(LOG_THROTTLER_, __LINE__); \
-  if (int num = BOOST_PP_CAT(LOG_THROTTLER_, __LINE__).ShouldLog(n_secs) ; num >= 0) \
-    BOOST_PP_CAT(GOOGLE_LOG_, severity)(num).stream()
+    YB_LOG_EVERY_N_SECS_OR_VLOG(severity, n_secs, -1)
 
 #define YB_LOG_WITH_PREFIX_EVERY_N_SECS(severity, n_secs) \
     YB_LOG_EVERY_N_SECS(severity, n_secs) << LogPrefix()
@@ -247,13 +283,14 @@ class LogThrottler {
   // Returns the number of suppressed messages if it should log, otherwise -1.
   int ShouldLog(int n_secs) {
     MicrosecondsInt64 ts = GetMonoTimeMicros();
-    if (ts - last_ts_ < n_secs * 1e6) {
-      base::subtle::NoBarrier_AtomicIncrement(&num_suppressed_, 1);
-      return -1;
+    if (ts - last_ts_ >= n_secs * 1e6) {
+      last_ts_ = ts;
+      return base::subtle::NoBarrier_AtomicExchange(&num_suppressed_, 0);
     }
-    last_ts_ = ts;
-    return base::subtle::NoBarrier_AtomicExchange(&num_suppressed_, 0);
+    base::subtle::NoBarrier_AtomicIncrement(&num_suppressed_, 1);
+    return -1;
   }
+
  private:
   Atomic32 num_suppressed_ = 0;
   uint64_t last_ts_ = 0;
@@ -285,8 +322,7 @@ std::ostream& operator<<(std::ostream &os, const PRIVATE_ThrottleMsg&);
 // There must be a LogPrefixUnlocked()/LogPrefixLocked() method available in the current
 // scope in order to use these macros.
 #define LOG_WITH_PREFIX_UNLOCKED(severity) LOG(severity) << LogPrefixUnlocked()
-#define VLOG_WITH_PREFIX_UNLOCKED(verboselevel) LOG_IF(INFO, VLOG_IS_ON(verboselevel)) \
-  << LogPrefixUnlocked()
+#define VLOG_WITH_PREFIX_UNLOCKED(verboselevel) VLOG(verboselevel) << LogPrefixUnlocked()
 
 // Same as the above, but obtain the lock.
 #define LOG_WITH_PREFIX(severity) LOG(severity) << LogPrefix()
@@ -297,10 +333,15 @@ std::ostream& operator<<(std::ostream &os, const PRIVATE_ThrottleMsg&);
 #define VLOG_WITH_FUNC(verboselevel) VLOG(verboselevel) << __func__ << ": "
 #define DVLOG_WITH_FUNC(verboselevel) DVLOG(verboselevel) << __func__ << ": "
 #define VLOG_WITH_PREFIX_AND_FUNC(verboselevel) VLOG_WITH_PREFIX(verboselevel) << __func__ << ": "
+#define DVLOG_WITH_PREFIX_AND_FUNC(verboselevel) DVLOG_WITH_PREFIX(verboselevel) << __func__ << ": "
 
 #define DVLOG_WITH_PREFIX(verboselevel) DVLOG(verboselevel) << LogPrefix()
 #define LOG_IF_WITH_PREFIX(severity, condition) LOG_IF(severity, condition) << LogPrefix()
 #define VLOG_IF_WITH_PREFIX(verboselevel, condition) VLOG_IF(verboselevel, condition) << LogPrefix()
+#define VLOG_IF_WITH_FUNC(verboselevel, condition) VLOG_IF(verboselevel, condition) << __func__ \
+  << ": "
+#define LOG_IF_WITH_PREFIX_AND_FUNC(severity, condition) LOG_IF_WITH_PREFIX(severity, condition) \
+    << __func__ << ": "
 
 // DCHECK_ONLY_NOTNULL is like DCHECK_NOTNULL, but does not result in an unused expression in
 // release mode, so it is suitable for being used as a stand-alone statement. In other words, use
@@ -317,12 +358,17 @@ std::ostream& operator<<(std::ostream &os, const PRIVATE_ThrottleMsg&);
 #ifndef NDEBUG
 #define DCHECK_ONLY_NOTNULL(expr) do { DCHECK_NOTNULL(expr); } while(false)
 #define DCHECK_BETWEEN(val, lower_bound, upper_bound) CHECK_BETWEEN(val, lower_bound, upper_bound)
+#define DCHECK_OK(s)  CHECK_OK(s)
 #else
 #define DCHECK_ONLY_NOTNULL(expr) do {} while(false)
 #define DCHECK_BETWEEN(val, lower_bound, upper_bound) \
   GLOG_MSVC_PUSH_DISABLE_WARNING(4127) \
   while (false) \
     GLOG_MSVC_POP_WARNING() CHECK_BETWEEN(val, lower_bound, upper_bound)
+#define DCHECK_OK(s) \
+  GLOG_MSVC_PUSH_DISABLE_WARNING(4127) \
+  while (false) \
+    GLOG_MSVC_POP_WARNING() CHECK_OK(s)
 #endif
 
 // Unlike plain LOG(FATAL), here the compiler always knows we're not returning.
@@ -338,7 +384,7 @@ void DisableCoreDumps();
 // trace). This is based on the --fatal_details_path_prefix flag and the
 // YB_FATAL_DETAILS_PATH_PREFIX environment variable. If neither of those are set, the result is
 // based on the FATAL log path.
-string GetFatalDetailsPathPrefix();
+std::string GetFatalDetailsPathPrefix();
 
 // Implements special handling for LOG(FATAL) and CHECK failures, such as disabling core dumps and
 // printing the failure stack trace into a separate file.
@@ -351,8 +397,6 @@ class LogFatalHandlerSink : public google::LogSink {
             size_t message_len) override;
 };
 
-#define EXPR_VALUE_FOR_LOG(expr) BOOST_PP_STRINGIZE(expr) << "=" << (yb::ToString(expr))
+#define EXPR_VALUE_FOR_LOG(expr) BOOST_PP_STRINGIZE(expr) << "=" << (::yb::ToString(expr))
 
 } // namespace yb
-
-#endif // YB_UTIL_LOGGING_H

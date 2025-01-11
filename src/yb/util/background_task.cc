@@ -12,9 +12,9 @@
 //
 
 #include "yb/util/background_task.h"
-
-#include "yb/util/status.h"
+#include "yb/util/callsite_profiling.h"
 #include "yb/util/status_log.h"
+#include "yb/util/status.h"
 #include "yb/util/thread.h"
 
 namespace yb {
@@ -35,29 +35,43 @@ Status BackgroundTask::Init() {
   return Status::OK();
 }
 
+void BackgroundTask::SetInterval(std::chrono::milliseconds interval_msec) {
+  std::unique_lock lock(mutex_);
+  interval_ = interval_msec;
+  VLOG(2) << "BackgroundTask interval changed to " << ToString(interval_msec);
+}
+
 // Wait for pending tasks and shut down
 void BackgroundTask::Shutdown() {
+  StartShutdown();
+  CompleteShutdown();
+}
+
+void BackgroundTask::StartShutdown() {
   {
-    std::unique_lock<std::mutex> lock(mutex_);
+    std::unique_lock lock(mutex_);
     if (closing_) {
       VLOG(2) << "BackgroundTask already shut down";
       return;
     }
     closing_ = true;
   }
-  cond_.notify_one();
+  YB_PROFILE(cond_.notify_one());
+}
+
+void BackgroundTask::CompleteShutdown() {
   CHECK_OK(ThreadJoiner(thread_.get()).Join());
 }
 
 Status BackgroundTask::Wake() {
   {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard lock(mutex_);
     if (closing_) {
       return STATUS(ShutdownInProgress, "Task is shutting down.");
     }
     have_job_ = true;
   }
-  cond_.notify_one();
+  YB_PROFILE(cond_.notify_one());
   return Status::OK();
 }
 
@@ -69,8 +83,8 @@ void BackgroundTask::Run() {
 }
 
 bool BackgroundTask::WaitForJob() {
-  std::unique_lock<std::mutex> lock(mutex_);
-  while(true) {
+  std::unique_lock lock(mutex_);
+  while (true) {
     if (closing_) {
       return false;
     }

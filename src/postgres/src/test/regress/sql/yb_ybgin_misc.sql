@@ -3,8 +3,9 @@
 -- elsewhere.
 --
 
--- Disable sequential scan so that index scan is always chosen.
+-- Always choose index scan.
 SET enable_seqscan = off;
+SET yb_test_ybgin_disable_cost_factor = 0.5;
 
 -- Set jsonbs to have jsonb_ops index, not jsonb_path_ops index.
 DROP INDEX jsonbs_j_idx;
@@ -233,3 +234,21 @@ SELECT * FROM garrays WHERE a && '{11}';
 -- Cleanup
 DROP TABLE garrays;
 DROP TABLEGROUP g;
+
+--
+-- ALTER TABLE ... COLUMN
+--
+
+-- Setup
+CREATE TABLE altercoltab (a int[], i int);
+CREATE INDEX NONCONCURRENTLY ON altercoltab USING ybgin (a);
+INSERT INTO altercoltab VALUES ('{1}', 2);
+-- Test
+ALTER TABLE altercoltab DROP COLUMN i;
+SELECT * FROM altercoltab WHERE a && '{1}';
+ALTER TABLE altercoltab ADD COLUMN j int;
+SELECT * FROM altercoltab WHERE a && '{1}';
+ALTER TABLE altercoltab RENAME COLUMN j TO k;
+SELECT * FROM altercoltab WHERE a && '{1}';
+-- Cleanup
+DROP TABLE altercoltab;

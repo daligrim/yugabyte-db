@@ -2,9 +2,9 @@
 title: Synthetic timezones (do not observe DST) [YSQL]
 headerTitle: Synthetic timezones (do not observe Daylight Savings Time)
 linkTitle: Synthetic timezones no DST
-description: Table. [YSQL]
+description: Synthetic timezones no DST table. [YSQL]
 menu:
-  stable:
+  stable_api:
     identifier: canonical-no-country-no-dst
     parent: extended-timezone-names
     weight: 40

@@ -18,7 +18,7 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.yb.util.YBTestRunnerNonTsanOnly;
+import org.yb.YBTestRunner;
 
 import java.sql.Connection;
 import java.sql.ResultSet;
@@ -30,7 +30,7 @@ import java.util.Random;
 
 import static org.yb.AssertionWrappers.*;
 
-@RunWith(value=YBTestRunnerNonTsanOnly.class)
+@RunWith(value=YBTestRunner.class)
 public class TestPgWrapper extends BasePgSQLTest {
   private static final Logger LOG = LoggerFactory.getLogger(TestPgWrapper.class);
 
@@ -260,7 +260,8 @@ public class TestPgWrapper extends BasePgSQLTest {
       statement.execute(
           "CREATE TABLE testnotnullconstraint (k int primary key, v1 text not null)");
       thrown.expect(com.yugabyte.util.PSQLException.class);
-      thrown.expectMessage("null value in column \"v1\" violates not-null constraint");
+      thrown.expectMessage("null value in column \"v1\" of relation \"testnotnullconstraint\"" +
+                           " violates not-null constraint");
       statement.execute("INSERT INTO testnotnullconstraint(k, v1) VALUES (1, null)");
     }
   }

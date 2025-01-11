@@ -31,6 +31,9 @@ import java.util.UUID;
 import javax.inject.Inject;
 import lombok.extern.slf4j.Slf4j;
 import org.yb.CommonNet.CloudInfoPB;
+import org.yb.CommonNet.PlacementBlockPB;
+import org.yb.CommonNet.PlacementInfoPB;
+import org.yb.CommonNet.ReplicationInfoPB;
 import org.yb.client.AbstractModifyMasterClusterConfig;
 import org.yb.client.ProtobufHelper;
 import org.yb.client.YBClient;
@@ -48,6 +51,7 @@ public class UpdatePlacementInfo extends UniverseTaskBase {
   public static class Params extends UniverseTaskParams {
     // If present, then we intend to decommission these nodes.
     public Set<String> blacklistNodes = null;
+    public List<Cluster> targetClusterStates;
   }
 
   @Override
@@ -59,7 +63,7 @@ public class UpdatePlacementInfo extends UniverseTaskBase {
   public String getName() {
     return super.getName()
         + "'("
-        + taskParams().universeUUID
+        + taskParams().getUniverseUUID()
         + " "
         + taskParams().blacklistNodes
         + ")'";
@@ -67,7 +71,7 @@ public class UpdatePlacementInfo extends UniverseTaskBase {
 
   @Override
   public void run() {
-    Universe universe = Universe.getOrBadRequest(taskParams().universeUUID);
+    Universe universe = Universe.getOrBadRequest(taskParams().getUniverseUUID());
     String hostPorts = universe.getMasterAddresses();
     String certificate = universe.getCertificateNodetoNode();
     YBClient client = null;
@@ -76,9 +80,13 @@ public class UpdatePlacementInfo extends UniverseTaskBase {
       client = ybService.getClient(hostPorts, certificate);
 
       ModifyUniverseConfig modifyConfig =
-          new ModifyUniverseConfig(client, taskParams().universeUUID, taskParams().blacklistNodes);
+          new ModifyUniverseConfig(
+              client,
+              taskParams().getUniverseUUID(),
+              taskParams().blacklistNodes,
+              taskParams().targetClusterStates);
       modifyConfig.doCall();
-      if (shouldIncrementVersion(taskParams().universeUUID)) universe.incrementVersion();
+      if (shouldIncrementVersion(taskParams().getUniverseUUID())) universe.incrementVersion();
     } catch (Exception e) {
       log.error("{} hit error : {}", getName(), e.getMessage());
       throw new RuntimeException(e);
@@ -89,17 +97,22 @@ public class UpdatePlacementInfo extends UniverseTaskBase {
 
   // TODO: in future, AbstractModifyMasterClusterConfig.run() should have retries.
   public static class ModifyUniverseConfig extends AbstractModifyMasterClusterConfig {
-    UUID universeUUID;
-    Set<String> blacklistNodes;
+    final UUID universeUUID;
+    final Set<String> blacklistNodes;
+    final List<Cluster> targetClusterStates;
 
-    public ModifyUniverseConfig(YBClient client, UUID universeUUID, Set<String> blacklistNodes) {
+    public ModifyUniverseConfig(
+        YBClient client,
+        UUID universeUUID,
+        Set<String> blacklistNodes,
+        List<Cluster> targetClusterStates) {
       super(client);
       this.universeUUID = universeUUID;
       this.blacklistNodes = blacklistNodes;
+      this.targetClusterStates = targetClusterStates;
     }
 
-    public void generatePlacementInfoPB(
-        CatalogEntityInfo.PlacementInfoPB.Builder placementInfoPB, Cluster cluster) {
+    public void generatePlacementInfoPB(PlacementInfoPB.Builder placementInfoPB, Cluster cluster) {
       PlacementInfo placementInfo = cluster.placementInfo;
       for (PlacementCloud placementCloud : placementInfo.cloudList) {
         Provider cloud = Provider.find.byId(placementCloud.uuid);
@@ -110,11 +123,10 @@ public class UpdatePlacementInfo extends UniverseTaskBase {
             // Create the cloud info object.
             CloudInfoPB.Builder ccb = CloudInfoPB.newBuilder();
             ccb.setPlacementCloud(placementCloud.code)
-                .setPlacementRegion(region.code)
-                .setPlacementZone(az.code);
+                .setPlacementRegion(region.getCode())
+                .setPlacementZone(az.getCode());
 
-            CatalogEntityInfo.PlacementBlockPB.Builder pbb =
-                CatalogEntityInfo.PlacementBlockPB.newBuilder();
+            PlacementBlockPB.Builder pbb = PlacementBlockPB.newBuilder();
             // Set the cloud info.
             pbb.setCloudInfo(ccb);
             // Set the minimum number of replicas in this PlacementAZ.
@@ -129,8 +141,7 @@ public class UpdatePlacementInfo extends UniverseTaskBase {
     }
 
     public void addAffinitizedPlacements(
-        CatalogEntityInfo.ReplicationInfoPB.Builder replicationInfoPB,
-        PlacementInfo placementInfo) {
+        ReplicationInfoPB.Builder replicationInfoPB, PlacementInfo placementInfo) {
       for (PlacementCloud placementCloud : placementInfo.cloudList) {
         Provider cloud = Provider.find.byId(placementCloud.uuid);
         for (PlacementRegion placementRegion : placementCloud.regionList) {
@@ -140,14 +151,24 @@ public class UpdatePlacementInfo extends UniverseTaskBase {
             // Create the cloud info object.
             CloudInfoPB.Builder ccb = CloudInfoPB.newBuilder();
             ccb.setPlacementCloud(placementCloud.code)
-                .setPlacementRegion(region.code)
-                .setPlacementZone(az.code);
+                .setPlacementRegion(region.getCode())
+                .setPlacementZone(az.getCode());
             if (placementAz.isAffinitized) {
               replicationInfoPB.addAffinitizedLeaders(ccb);
             }
           }
         }
       }
+    }
+
+    private Cluster getTargetClusterState(Cluster cluster) {
+      if (targetClusterStates != null) {
+        return targetClusterStates.stream()
+            .filter(c -> c.uuid.equals(cluster.uuid))
+            .findFirst()
+            .orElse(cluster);
+      }
+      return cluster;
     }
 
     @Override
@@ -159,20 +180,21 @@ public class UpdatePlacementInfo extends UniverseTaskBase {
           CatalogEntityInfo.SysClusterConfigEntryPB.newBuilder(config);
 
       // Clear the replication info, as it is no longer valid.
-      CatalogEntityInfo.ReplicationInfoPB.Builder replicationInfoPB =
+      ReplicationInfoPB.Builder replicationInfoPB =
           configBuilder.clearReplicationInfo().getReplicationInfoBuilder();
       // Build the live replicas from the replication info.
-      CatalogEntityInfo.PlacementInfoPB.Builder placementInfoPB =
-          replicationInfoPB.getLiveReplicasBuilder();
+      PlacementInfoPB.Builder placementInfoPB = replicationInfoPB.getLiveReplicasBuilder();
       // Create the placement info for the universe.
-      PlacementInfo placementInfo = universe.getUniverseDetails().getPrimaryCluster().placementInfo;
-      generatePlacementInfoPB(placementInfoPB, universe.getUniverseDetails().getPrimaryCluster());
+      Cluster primaryCluster =
+          getTargetClusterState(universe.getUniverseDetails().getPrimaryCluster());
+
+      PlacementInfo placementInfo = primaryCluster.placementInfo;
+      generatePlacementInfoPB(placementInfoPB, primaryCluster);
 
       List<Cluster> readOnlyClusters = universe.getUniverseDetails().getReadOnlyClusters();
       for (Cluster cluster : readOnlyClusters) {
-        CatalogEntityInfo.PlacementInfoPB.Builder placementInfoReadPB =
-            replicationInfoPB.addReadReplicasBuilder();
-        generatePlacementInfoPB(placementInfoReadPB, cluster);
+        PlacementInfoPB.Builder placementInfoReadPB = replicationInfoPB.addReadReplicasBuilder();
+        generatePlacementInfoPB(placementInfoReadPB, getTargetClusterState(cluster));
       }
 
       addAffinitizedPlacements(replicationInfoPB, placementInfo);
@@ -184,6 +206,10 @@ public class UpdatePlacementInfo extends UniverseTaskBase {
             configBuilder.getServerBlacklistBuilder();
         for (String nodeName : blacklistNodes) {
           NodeDetails node = universe.getNode(nodeName);
+          if (node == null) {
+            log.info("Skipping non existing hosts");
+            continue;
+          }
           if (node.cloudInfo.private_ip != null) {
             blacklistBuilder.addHosts(
                 ProtobufHelper.hostAndPortToPB(

@@ -1,36 +1,25 @@
 ---
-title: Bulk import
-headerTitle: Bulk import for YSQL
-linkTitle: Bulk import
+title: Bulk import YSQL
+headerTitle: Import data
+linkTitle: Import data
 description: Import data from PostgreSQL into YugabyteDB for YSQL.
+tags:
+  other: ysql
 menu:
   preview:
     identifier: manage-bulk-import-ysql
     parent: manage-bulk-import-export
-    weight: 706
+    weight: 729
 type: docs
 ---
 
-<ul class="nav nav-tabs-alt nav-tabs-yb">
-  <li >
-    <a href="../bulk-import-ysql/" class="nav-link active">
-      <i class="icon-postgres" aria-hidden="true"></i>
-      YSQL
-    </a>
-  </li>
-  <li >
-    <a href="../bulk-import-ycql/" class="nav-link">
-      <i class="icon-cassandra" aria-hidden="true"></i>
-      YCQL
-    </a>
-  </li>
-</ul>
+{{<api-tabs>}}
 
-This page describes the following steps to manually migrate PostgreSQL data and applications to YugabyteDB after [exporting PostgreSQL data](../../data-migration/bulk-export-ysql/).
+Use the following steps to manually migrate PostgreSQL data and applications to YugabyteDB after [exporting PostgreSQL data](../../data-migration/bulk-export-ysql/):
 
 - [Prepare a cluster](#prepare-a-cluster)
 - [Import PostgreSQL data](#import-postgresql-data)
-- [Verify a migration](#verify-a-migration)
+- [Verify a migration](../verify-migration-ysql)
 
 ## Prepare a cluster
 
@@ -66,7 +55,7 @@ Following are some recommendations when performing batch loads of data programma
 
 ### Indexes during data load
 
-As of YugabyteDB v2.2, it is recommended to create indexes before loading the data.
+It is recommended to create indexes before loading the data.
 
 {{< note title="Note" >}}
 This recommendation is subject to change in the near future with the introduction of online index rebuilds, which enables creating indexes after loading all the data.
@@ -79,7 +68,7 @@ While loading data that is exported from another RDBMS, the source data set may 
 ## Import PostgreSQL data
 
 {{< tip title="Migrate using YugabyteDB Voyager" >}}
-To automate your migration from PostgreSQL to YugabyteDB, use [YugabyteDB Voyager](../../../migrate/). To learn more, refer to the [import schema](../../../migrate/migrate-steps/#import-schema) and [import data](../../../migrate/migrate-steps/#import-data) steps.
+To automate your migration from PostgreSQL to YugabyteDB, use [YugabyteDB Voyager](/preview/yugabyte-voyager/). To learn more, refer to the [import schema](/preview/yugabyte-voyager/migrate/migrate-steps/#import-schema) and [import data](/preview/yugabyte-voyager/migrate/migrate-steps/#import-data) steps.
 {{< /tip >}}
 
 ### Import data from CSV files
@@ -98,7 +87,7 @@ To further speed up the process, you can import multiple files in a single COPY 
 
 ```sql
 yugabyte=# \! ls t*.txt
-t1.txt	t2.txt	t3.txt
+t1.txt t2.txt t3.txt
 ```
 
 ```output
@@ -153,7 +142,7 @@ For detailed information on the COPY FROM command, refer to the [COPY](../../../
 
 #### Error handling
 
-If the `COPY FROM` command fails during the process, you should try rerunning it. However, you don’t have to rerun the entire file. `COPY FROM` imports data into rows individually, starting from the top of the file. So if you know that some of the rows have been successfully imported prior to the failure, you can safely ignore those rows by adding the `SKIP` parameter.
+If the `COPY FROM` command fails during the process, you should try rerunning it. However, you don't have to rerun the entire file. `COPY FROM` imports data into rows individually, starting from the top of the file. So if you know that some of the rows have been successfully imported prior to the failure, you can safely ignore those rows by adding the `SKIP` parameter.
 
 For example, to skip the first 5000 rows in a file, run the command as follows:
 
@@ -165,88 +154,16 @@ COPY <table_name>
 
 ### Import data from SQL script
 
-To import an entire database from a `pg_dump` or `ysql_dump` export, use `ysqlsh` as follows:
+To import an entire database from a `pg_dump` or `ysql_dump` export, use ysqlsh as follows:
 
 ```sql
 ysqlsh -f <database_name>.sql
 ```
 
 {{< note title="Note" >}}
-
 After the data import step, remember to recreate any constraints and triggers that might have been disabled to speed up loading the data. This ensures that the database will perform relational integrity checking for data going forward.
-
 {{< /note >}}
 
-## Verify a migration
+## Verify migration
 
-Following are some steps that can be verified to ensure that the migration was successful.
-
-### Verify database objects
-
-- Verify that all the tables and indexes have been created in YugabyteDB.
-- Ensure that triggers and constraints are migrated and are working as expected.
-
-### Verify row counts for tables
-
-Run a `COUNT(*)` command to verify that the total number of rows match between the source database and YugabyteDB. This can be done as shown below using a PLPGSQL function.
-
-**Step 1.** Create the following function to print the number of rows in a single table.
-
-```sql
-create function
-cnt_rows(schema text, tablename text) returns integer
-as
-$body$
-declare
-  result integer;
-  query varchar;
-begin
-  query := 'SELECT count(1) FROM ' || schema || '.' || tablename;
-  execute query into result;
-  return result;
-end;
-$body$
-language plpgsql;
-```
-
-**Step 2.** Run the following command to print the sizes of all tables in the database.
-
-```sql
-SELECT cnt_rows(table_schema, table_name)
-    FROM information_schema.tables
-    WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
-    AND table_type='BASE TABLE'
-    ORDER BY 3 DESC;
-```
-
-#### Example
-
-Following is an example illustrating the output of running the previous example on the [Northwind](../../../sample-data/northwind/#about-the-northwind-sample-database) database.
-
-```sql
-example=# SELECT cnt_rows(table_schema, table_name)
-    FROM information_schema.tables
-    WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
-    AND table_type='BASE TABLE'
-    ORDER BY 3 DESC;
-```
-
-```output
- table_schema |       table_name       | cnt_rows
---------------+------------------------+----------
- public       | order_details          |     2155
- public       | orders                 |      830
- public       | customers              |       91
- public       | products               |       77
- public       | territories            |       53
- public       | us_states              |       51
- public       | employee_territories   |       49
- public       | suppliers              |       29
- public       | employees              |        9
- public       | categories             |        8
- public       | shippers               |        6
- public       | region                 |        4
- public       | customer_customer_demo |        0
- public       | customer_demographics  |        0
-(14 rows)
-```
+After the data and schema have been migrated, follow the steps in [Verify migration](../verify-migration-ysql) to ensure the migration was successful.

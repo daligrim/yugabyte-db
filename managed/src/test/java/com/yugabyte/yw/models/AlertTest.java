@@ -19,6 +19,9 @@ import static org.hamcrest.Matchers.nullValue;
 import com.yugabyte.yw.common.FakeDBApplication;
 import com.yugabyte.yw.common.ModelFactory;
 import com.yugabyte.yw.common.alerts.AlertService;
+import com.yugabyte.yw.common.alerts.impl.AlertTemplateService;
+import com.yugabyte.yw.common.alerts.impl.AlertTemplateService.AlertTemplateDescription;
+import com.yugabyte.yw.common.config.RuntimeConfGetter;
 import com.yugabyte.yw.models.Alert.SortBy;
 import com.yugabyte.yw.models.Alert.State;
 import com.yugabyte.yw.models.AlertConfiguration.Severity;
@@ -54,13 +57,24 @@ public class AlertTest extends FakeDBApplication {
 
   private AlertService alertService;
 
+  private AlertTemplateService alertTemplateService;
+
+  private AlertTemplateDescription alertTemplateDescription;
+
+  private RuntimeConfGetter runtimeConfGetter;
+
   @Before
   public void setUp() {
     cust1 = ModelFactory.testCustomer("Customer 1");
-    universe = ModelFactory.createUniverse(cust1.getCustomerId());
+    cust1 = ModelFactory.testCustomer("Customer 1");
+    universe = ModelFactory.createUniverse(cust1.getId());
     configuration = createAlertConfiguration(cust1, universe);
     definition = createDefinition();
     alertService = app.injector().instanceOf(AlertService.class);
+    alertTemplateService = app.injector().instanceOf(AlertTemplateService.class);
+    runtimeConfGetter = app.injector().instanceOf(RuntimeConfGetter.class);
+    alertTemplateDescription =
+        alertTemplateService.getTemplateDescription(configuration.getTemplate());
   }
 
   @Test
@@ -117,7 +131,8 @@ public class AlertTest extends FakeDBApplication {
             alert,
             KnownAlertLabels.UNIVERSE_NAME.labelName(),
             definition.getLabelValue(KnownAlertLabels.UNIVERSE_NAME));
-    AlertFilter filter = AlertFilter.builder().customerUuid(cust1.uuid).label(oldLabel1).build();
+    AlertFilter filter =
+        AlertFilter.builder().customerUuid(cust1.getUuid()).label(oldLabel1).build();
     List<Alert> queriedAlerts = alertService.list(filter);
 
     assertThat(queriedAlerts, hasSize(1));
@@ -143,7 +158,7 @@ public class AlertTest extends FakeDBApplication {
     Alert alert1 = ModelFactory.createAlert(cust1, definition);
 
     Customer cust2 = ModelFactory.testCustomer();
-    Universe universe2 = ModelFactory.createUniverse(cust2.getCustomerId());
+    Universe universe2 = ModelFactory.createUniverse(cust2.getId());
     AlertDefinition definition2 = ModelFactory.createAlertDefinition(cust2, universe2);
     Alert alert2 = ModelFactory.createAlert(cust2, definition2);
 
@@ -166,7 +181,7 @@ public class AlertTest extends FakeDBApplication {
     ModelFactory.createAlert(cust1, definition);
 
     Customer cust2 = ModelFactory.testCustomer();
-    Universe universe2 = ModelFactory.createUniverse(cust2.getCustomerId());
+    Universe universe2 = ModelFactory.createUniverse(cust2.getId());
     AlertDefinition definition2 = ModelFactory.createAlertDefinition(cust2, universe2);
     Alert alert2 = ModelFactory.createAlert(cust2, definition2);
     alert2.setState(Alert.State.RESOLVED);
@@ -330,7 +345,12 @@ public class AlertTest extends FakeDBApplication {
   private Alert createAlert() {
     List<AlertLabel> labels =
         definition
-            .getEffectiveLabels(configuration, null, AlertConfiguration.Severity.SEVERE)
+            .getEffectiveLabels(
+                alertTemplateDescription,
+                configuration,
+                null,
+                AlertConfiguration.Severity.SEVERE,
+                runtimeConfGetter)
             .stream()
             .map(l -> new AlertLabel(l.getName(), l.getValue()))
             .collect(Collectors.toList());
@@ -393,13 +413,20 @@ public class AlertTest extends FakeDBApplication {
             alert,
             KnownAlertLabels.CONFIGURATION_TYPE.labelName(),
             configuration.getTargetType().name());
+    AlertLabel alertTypeLabel =
+        new AlertLabel(
+            alert, KnownAlertLabels.ALERT_TYPE.labelName(), configuration.getTemplate().name());
     AlertLabel severityLabel =
         new AlertLabel(
             alert,
             KnownAlertLabels.SEVERITY.labelName(),
             AlertConfiguration.Severity.SEVERE.name());
     AlertLabel expressionLabel =
-        new AlertLabel(alert, KnownAlertLabels.ALERT_EXPRESSION.labelName(), "query > 1");
+        new AlertLabel(
+            alert,
+            KnownAlertLabels.ALERT_EXPRESSION.labelName(),
+            alertTemplateDescription.getQueryWithThreshold(
+                configuration, definition, Severity.SEVERE, runtimeConfGetter));
     AlertLabel thresholdLabel = new AlertLabel(alert, KnownAlertLabels.THRESHOLD.labelName(), "1");
     AlertLabel definitionUuidLabel =
         new AlertLabel(
@@ -407,7 +434,7 @@ public class AlertTest extends FakeDBApplication {
     AlertLabel definitionNameLabel =
         new AlertLabel(
             alert, KnownAlertLabels.DEFINITION_NAME.labelName(), configuration.getName());
-    assertThat(alert.getCustomerUUID(), is(cust1.uuid));
+    assertThat(alert.getCustomerUUID(), is(cust1.getUuid()));
     assertThat(alert.getSeverity(), is(AlertConfiguration.Severity.SEVERE));
     assertThat(alert.getName(), is("Alert 1"));
     assertThat(alert.getSourceName(), is("Source 1"));
@@ -425,6 +452,7 @@ public class AlertTest extends FakeDBApplication {
             targetUuidLabel,
             targetNameLabel,
             targetTypeLabel,
+            alertTypeLabel,
             groupUuidLabel,
             groupTypeLabel,
             severityLabel,

@@ -77,8 +77,7 @@
 // For a discussion of the many very subtle implementation details, see the FAQ
 // at the end of condition_variable_win.cc.
 
-#ifndef YB_UTIL_CONDITION_VARIABLE_H
-#define YB_UTIL_CONDITION_VARIABLE_H
+#pragma once
 
 #include <pthread.h>
 
@@ -99,14 +98,16 @@ class ConditionVariable {
 
   // Wait() releases the caller's critical section atomically as it starts to
   // sleep, and the reacquires it when it is signaled.
+  // This function may spuriously wake up return even if no other thread has signaled it.
   void Wait() const;
 
   // Like Wait(), but only waits up to a limited amount of time.
   //
-  // Returns true if we were Signal()'ed, or false if 'max_time' elapsed.
+  // Returns true if we were Signal()'ed or spuriously woken up, or false if 'max_time' elapsed.
   bool TimedWait(const MonoDelta& max_time) const;
 
-  // Returns true if we were Signal()'ed, or false if wait_timeout_deadline is reached.
+  // Returns true if we were Signal()'ed or spuriously woken up, and false if wait_timeout_deadline
+  // is reached.
   bool WaitUntil(const MonoTime& wait_timeout_deadline) const;
 
   // Broadcast() revives all waiting threads.
@@ -127,5 +128,3 @@ class ConditionVariable {
 };
 
 }  // namespace yb
-
-#endif  // YB_UTIL_CONDITION_VARIABLE_H

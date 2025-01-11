@@ -3,7 +3,6 @@ title: Row-level geo-partitioning
 linkTitle: Row-level geo-partitioning
 description: Row-level geo-partitioning in YSQL
 headcontent: Pin data to regions for compliance and lower latencies
-image: /images/section_icons/secure/create-roles.png
 menu:
   preview:
     identifier: explore-multi-region-geo-partitioning
@@ -11,15 +10,6 @@ menu:
     weight: 720
 type: docs
 ---
-
-<ul class="nav nav-tabs-alt nav-tabs-yb">
-  <li >
-    <a href="../row-level-geo-partitioning/" class="nav-link active">
-      <i class="icon-postgres" aria-hidden="true"></i>
-      YSQL
-    </a>
-  </li>
-</ul>
 
 Row-level geo-partitioning allows fine-grained control over pinning data in a user table (at a per-row level) to geographic locations, thereby allowing the data residency to be managed at the table-row level. Use-cases requiring low latency multi-region deployments, transactional consistency semantics, and transparent schema change propagation across the regions would benefit from this feature.
 
@@ -86,6 +76,12 @@ First, create tablespaces for each geographic region you wish to partition data 
     );
     ```
 
+To view your tablespaces, you can enter the following command:
+
+```sql
+SELECT * FROM pg_tablespace;
+```
+
 ## Step 2. Create table with partitions
 
 Next, create the parent table that contains a `geo_partition` column which is used to create list-based partitions for each geographic region you want to partition data into as shown in the following diagram:
@@ -105,6 +101,10 @@ Next, create the parent table that contains a `geo_partition` column which is us
         created_at TIMESTAMP DEFAULT NOW()
     ) PARTITION BY LIST (geo_partition);
     ```
+
+    {{< note title="Note" >}}
+You can set geo_partition to be **DEFAULT [yb_server_region()](../../../api/ysql/exprs/geo_partitioning_helper_functions/func_yb_server_region)** to partition based on regions. This way, insertions to the local partitioned table don't have to specify the geo_partition column value.
+    {{< /note >}}
 
 1. Next, create one partition per desired geography under the parent table, and assign each to the  applicable tablespace. Here, you create three table partitions: one for the EU region called `bank_transactions_eu`, another for the India region called `bank_transactions_india,` and a third partition for US region called `bank_transactions_us`. Create any required indexes for each partition, making sure to associate each index with the same tablespace as that of the partition table.
 
@@ -306,7 +306,7 @@ txn_type      | debit
 created_at    | 2020-11-07 21:45:26.067444
 ```
 
-However, if you need to query the local partition without specifying the partition column, you can use the function [yb_is_local_table](../../../api/ysql/exprs/func_yb_is_local_table). To implement the same query as above using `yb_is_local_table`, you can do the following:
+However, if you need to query the local partition without specifying the partition column, you can use the function [yb_is_local_table](../../../api/ysql/exprs/geo_partitioning_helper_functions/func_yb_is_local_table). To implement the same query as above using `yb_is_local_table`, you can do the following:
 
 ```sql
 yugabyte=# select * from bank_transactions where yb_is_local_table(tableoid);
@@ -449,7 +449,7 @@ created_at    | 2020-11-07 22:09:04.8537
 
 So far you've set up replication with 3 copies of the data, which helps tolerate the loss of a single node or zone. However, a regional outage will cause unavailability, because all the nodes are in one region. Placing each replica in a different region helps solve this issue.
 
-Recreate the `us_west_2_tablespace` from earlier, and place one copy each in us-west2, us-west1, and us-east1. Then use `leader_preference` to continue placing all leaders in us-west-2, so that they remain close to the client and provide the best performance. (You can find more information in [Leader preference](../../ysql-language-features/going-beyond-sql/tablespaces/#leader-preference))
+Recreate the `us_west_2_tablespace` from earlier, and place one copy each in us-west2, us-west1, and us-east1. Then use `leader_preference` to continue placing all leaders in us-west-2, so that they remain close to the client and provide the best performance. (You can find more information in [Leader preference](../../going-beyond-sql/tablespaces/#leader-preference))
 
 ```sql
 CREATE TABLESPACE us_west_2_tablespace WITH (

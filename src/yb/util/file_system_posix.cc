@@ -25,11 +25,14 @@
 #include <sys/syscall.h>
 #endif // __linux__
 
+#include "yb/rocksdb/util/coding.h"
+#include "yb/util/coding-inl.h"
 #include "yb/util/coding.h"
 #include "yb/util/debug/trace_event.h"
 #include "yb/util/errno.h"
 #include "yb/util/malloc.h"
 #include "yb/util/result.h"
+#include "yb/util/stack_trace_tracker.h"
 #include "yb/util/stats/iostats_context_imp.h"
 #include "yb/util/test_kill.h"
 #include "yb/util/thread_restrictions.h"
@@ -59,6 +62,11 @@
 #include <linux/falloc.h>
 #endif
 #endif // __linux__
+
+DEFINE_RUNTIME_uint64(rocksdb_check_sst_file_tail_for_zeros, 0,
+    "Size of just written SST data file tail to be checked for being zeros. Check is not performed "
+    "if flag value is zero.");
+TAG_FLAG(rocksdb_check_sst_file_tail_for_zeros, advanced);
 
 DECLARE_bool(never_fsync);
 
@@ -99,6 +107,8 @@ size_t GetUniqueIdFromFile(int fd, uint8_t* id) {
   rid = EncodeVarint64(rid, buf.st_dev);
   rid = EncodeVarint64(rid, buf.st_ino);
   rid = EncodeVarint64(rid, version);
+  InlineEncodeFixed32(rid, static_cast<uint32_t>(buf.st_mtime));
+  rid += sizeof(uint32_t);
   DCHECK_GE(rid, id);
   return rid - id;
 }
@@ -120,6 +130,7 @@ Status PosixSequentialFile::Read(size_t n, Slice* result, uint8_t* scratch) {
   do {
     r = fread_unlocked(scratch, 1, n, file_);
   } while (r == 0 && ferror(file_) && errno == EINTR);
+  TrackStackTrace(StackTraceTrackingGroup::kReadIO, r);
   *result = Slice(scratch, r);
   if (r < n) {
     if (feof(file_)) {
@@ -186,6 +197,7 @@ Status PosixRandomAccessFile::Read(uint64_t offset, size_t n, Slice* result,
       }
       break;
     }
+    TrackStackTrace(StackTraceTrackingGroup::kReadIO, r);
     ptr += r;
     offset += r;
     left -= r;
@@ -270,6 +282,17 @@ Status PosixRandomAccessFile::InvalidateCache(size_t offset, size_t length) {
 #endif
 }
 
+void PosixRandomAccessFile::Readahead(size_t offset, size_t length) {
+#ifdef __linux__
+  auto ret = readahead(fd_, implicit_cast<off64_t>(offset), length);
+  if (ret == 0) {
+    return;
+  }
+  YB_LOG_EVERY_N_SECS(ERROR, 60) << "Readahead error for " << filename_ << " at " << offset
+                                 << ", length=" << length << ": " << ErrnoToString(errno);
+#endif
+}
+
 } // namespace yb
 
 namespace rocksdb {
@@ -301,6 +324,7 @@ Status PosixWritableFile::Append(const Slice& data) {
       }
       return STATUS_IO_ERROR(filename_, errno);
     }
+    yb::TrackStackTrace(yb::StackTraceTrackingGroup::kWriteIO, done);
     left -= done;
     src += done;
   }
@@ -322,8 +346,17 @@ Status PosixWritableFile::Close() {
     // trim the extra space preallocated at the end of the file
     // NOTE(ljin): we probably don't want to surface failure as an IOError,
     // but it will be nice to log these errors.
-    int dummy __attribute__((unused));
-    dummy = ftruncate(fd_, filesize_);
+    if (FLAGS_rocksdb_check_sst_file_tail_for_zeros > 0) {
+      LOG(INFO) << filename_ << " block_size: " << block_size
+                << " last_allocated_block: " << last_allocated_block
+#ifdef ROCKSDB_FALLOCATE_PRESENT
+                << " allow_fallocate_: " << allow_fallocate_
+#endif  // ROCKSDB_FALLOCATE_PRESENT
+                << " filesize_: " << filesize_;
+    }
+    if (ftruncate(fd_, filesize_) != 0) {
+      LOG(ERROR) << STATUS_IO_ERROR(filename_, errno) << " filesize_: " << filesize_;
+    }
 #ifdef ROCKSDB_FALLOCATE_PRESENT
     // in some file systems, ftruncate only trims trailing space if the
     // new file size is smaller than the current size. Calling fallocate
@@ -338,8 +371,13 @@ Status PosixWritableFile::Close() {
     // correctness.
     IOSTATS_TIMER_GUARD(allocate_nanos);
     if (allow_fallocate_) {
-      fallocate(fd_, FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE, filesize_,
-                block_size * last_allocated_block - filesize_);
+      if (fallocate(
+              fd_, FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE, filesize_,
+              block_size * last_allocated_block - filesize_) != 0) {
+        LOG(ERROR) << STATUS_IO_ERROR(filename_, errno) << " block_size: " << block_size
+                   << " last_allocated_block: " << last_allocated_block
+                   << " filesize_: " << filesize_;
+      }
     }
 #endif
   }
@@ -390,8 +428,8 @@ Status PosixWritableFile::InvalidateCache(size_t offset, size_t length) {
 
 #ifdef ROCKSDB_FALLOCATE_PRESENT
 Status PosixWritableFile::Allocate(uint64_t offset, uint64_t len) {
-  assert(yb::std_util::cmp_less_equal(offset, std::numeric_limits<off_t>::max()));
-  assert(yb::std_util::cmp_less_equal(len, std::numeric_limits<off_t>::max()));
+  assert(std::cmp_less_equal(offset, std::numeric_limits<off_t>::max()));
+  assert(std::cmp_less_equal(len, std::numeric_limits<off_t>::max()));
   TEST_KILL_RANDOM("PosixWritableFile::Allocate:0", test_kill_odds);
   IOSTATS_TIMER_GUARD(allocate_nanos);
   int alloc_status = 0;
@@ -408,8 +446,8 @@ Status PosixWritableFile::Allocate(uint64_t offset, uint64_t len) {
 }
 
 Status PosixWritableFile::RangeSync(uint64_t offset, uint64_t nbytes) {
-  assert(yb::std_util::cmp_less_equal(offset, std::numeric_limits<off_t>::max()));
-  assert(yb::std_util::cmp_less_equal(nbytes, std::numeric_limits<off_t>::max()));
+  assert(std::cmp_less_equal(offset, std::numeric_limits<off_t>::max()));
+  assert(std::cmp_less_equal(nbytes, std::numeric_limits<off_t>::max()));
   if (sync_file_range(fd_, static_cast<off_t>(offset),
       static_cast<off_t>(nbytes), SYNC_FILE_RANGE_WRITE) == 0) {
     return Status::OK();

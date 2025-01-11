@@ -7,28 +7,29 @@
 EXPLAIN (COSTS OFF) SELECT count(*) FROM airports WHERE iso_region = 'US-CA';
                       QUERY PLAN
 -------------------------------------------------------
- Aggregate
+ Finalize Aggregate
    ->  Index Only Scan using airports_idx2 on airports
          Index Cond: (iso_region = 'US-CA'::text)
-(3 rows)
+         Partial Aggregate: true
+(4 rows)
 
 EXPLAIN (COSTS OFF) SELECT gps_code FROM airports WHERE iso_region = 'US-CA' AND type = 'small_airport'
           ORDER BY ident;
-                 QUERY PLAN
---------------------------------------------
+                    QUERY PLAN
+--------------------------------------------------
  Index Scan using airports_pkey on airports
    Index Cond: (iso_region = 'US-CA'::text)
-   Filter: (type = 'small_airport'::text)
+   Storage Filter: (type = 'small_airport'::text)
 (3 rows)
 
 EXPLAIN (COSTS OFF) SELECT gps_code FROM airports WHERE iso_region = 'US-CA' AND type = 'small_airport'
           ORDER BY ident LIMIT 1;
-                    QUERY PLAN
---------------------------------------------------
+                       QUERY PLAN
+--------------------------------------------------------
  Limit
    ->  Index Scan using airports_pkey on airports
          Index Cond: (iso_region = 'US-CA'::text)
-         Filter: (type = 'small_airport'::text)
+         Storage Filter: (type = 'small_airport'::text)
 (4 rows)
 
 --
@@ -330,10 +331,10 @@ EXPLAIN (COSTS OFF) SELECT gps_code FROM airports;
 
 -- Use '!=' on hash column.
 EXPLAIN (COSTS OFF) SELECT gps_code FROM airports WHERE iso_region != 'US-CA';
-               QUERY PLAN
------------------------------------------
+                   QUERY PLAN
+-------------------------------------------------
  Seq Scan on airports
-   Filter: (iso_region <> 'US-CA'::text)
+   Storage Filter: (iso_region <> 'US-CA'::text)
 (2 rows)
 
 -- ORDER BY hash column.
@@ -348,35 +349,38 @@ EXPLAIN (COSTS OFF) SELECT gps_code FROM airports WHERE iso_region = 'US-CA' ORD
 
 -- ORDER BY in wrong direction.
 EXPLAIN (COSTS OFF) SELECT gps_code FROM airports ORDER BY iso_region ASC, gps_code DESC LIMIT 1;
-                 QUERY PLAN
----------------------------------------------
+                         QUERY PLAN
+-------------------------------------------------------------
  Limit
-   ->  Sort
+   ->  Incremental Sort
          Sort Key: iso_region, gps_code DESC
-         ->  Seq Scan on airports
-(4 rows)
+         Presorted Key: iso_region
+         ->  Index Only Scan using airports_idx2 on airports
+(5 rows)
 
 EXPLAIN (COSTS OFF) SELECT gps_code FROM airports WHERE iso_region = 'US-CA' AND type = 'small_airport'
           ORDER BY coordinates DESC, ident, name LIMIT 1;
                                          QUERY PLAN
 ---------------------------------------------------------------------------------------------
  Limit
-   ->  Sort
+   ->  Incremental Sort
          Sort Key: coordinates DESC, ident, name
-         ->  Index Only Scan using airports_idx3 on airports
+         Presorted Key: coordinates
+         ->  Index Only Scan Backward using airports_idx3 on airports
                Index Cond: ((iso_region = 'US-CA'::text) AND (type = 'small_airport'::text))
-(5 rows)
+(6 rows)
 
 EXPLAIN (COSTS OFF) SELECT gps_code FROM airports WHERE iso_region = 'US-CA' AND type = 'small_airport'
           ORDER BY coordinates, ident, name DESC LIMIT 1;
                                          QUERY PLAN
 ---------------------------------------------------------------------------------------------
  Limit
-   ->  Sort
+   ->  Incremental Sort
          Sort Key: coordinates, ident, name DESC
+         Presorted Key: coordinates, ident
          ->  Index Only Scan using airports_idx3 on airports
                Index Cond: ((iso_region = 'US-CA'::text) AND (type = 'small_airport'::text))
-(5 rows)
+(6 rows)
 
 -- HASH column is not completely specified while ordering by RANGE column
 EXPLAIN (COSTS OFF) SELECT gps_code FROM airports WHERE iso_region = 'US-CA'

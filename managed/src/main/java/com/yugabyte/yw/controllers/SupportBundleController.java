@@ -6,24 +6,31 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.google.inject.Inject;
 import com.typesafe.config.Config;
 import com.yugabyte.yw.commissioner.Commissioner;
-import com.yugabyte.yw.commissioner.Common.CloudType;
 import com.yugabyte.yw.commissioner.tasks.params.SupportBundleTaskParams;
 import com.yugabyte.yw.common.PlatformServiceException;
 import com.yugabyte.yw.common.SupportBundleUtil;
-import com.yugabyte.yw.common.config.RuntimeConfigFactory;
+import com.yugabyte.yw.common.Util;
+import com.yugabyte.yw.common.rbac.PermissionInfo.Action;
+import com.yugabyte.yw.common.rbac.PermissionInfo.ResourceType;
+import com.yugabyte.yw.controllers.handlers.SupportBundleHandler;
 import com.yugabyte.yw.forms.PlatformResults;
 import com.yugabyte.yw.forms.PlatformResults.YBPSuccess;
 import com.yugabyte.yw.forms.PlatformResults.YBPTask;
 import com.yugabyte.yw.forms.SupportBundleFormData;
+import com.yugabyte.yw.forms.SupportBundleSizeEstimateResponse;
 import com.yugabyte.yw.models.Audit;
 import com.yugabyte.yw.models.Customer;
 import com.yugabyte.yw.models.CustomerTask;
 import com.yugabyte.yw.models.SupportBundle;
 import com.yugabyte.yw.models.SupportBundle.SupportBundleStatusType;
 import com.yugabyte.yw.models.Universe;
-import com.yugabyte.yw.models.helpers.TaskType;
 import com.yugabyte.yw.models.helpers.BundleDetails.ComponentType;
-
+import com.yugabyte.yw.models.helpers.TaskType;
+import com.yugabyte.yw.rbac.annotations.AuthzPath;
+import com.yugabyte.yw.rbac.annotations.PermissionAttribute;
+import com.yugabyte.yw.rbac.annotations.RequiredPermissionOnResource;
+import com.yugabyte.yw.rbac.annotations.Resource;
+import com.yugabyte.yw.rbac.enums.SourceType;
 import io.swagger.annotations.Api;
 import io.swagger.annotations.ApiImplicitParam;
 import io.swagger.annotations.ApiImplicitParams;
@@ -37,6 +44,7 @@ import java.util.UUID;
 import lombok.extern.slf4j.Slf4j;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import play.mvc.Http;
 import play.mvc.Result;
 
 @Api(
@@ -51,7 +59,7 @@ public class SupportBundleController extends AuthenticatedController {
 
   @Inject Commissioner commissioner;
   @Inject SupportBundleUtil supportBundleUtil;
-  @Inject private RuntimeConfigFactory runtimeConfigFactory;
+  @Inject SupportBundleHandler sbHandler;
   @Inject Config config;
 
   @ApiOperation(
@@ -65,42 +73,33 @@ public class SupportBundleController extends AuthenticatedController {
           paramType = "body",
           dataType = "com.yugabyte.yw.forms.SupportBundleFormData",
           required = true))
-  public Result create(UUID customerUUID, UUID universeUUID) {
-    JsonNode requestBody = request().body().asJson();
+  @AuthzPath({
+    @RequiredPermissionOnResource(
+        requiredPermission =
+            @PermissionAttribute(resourceType = ResourceType.UNIVERSE, action = Action.UPDATE),
+        resourceLocation = @Resource(path = Util.UNIVERSES, sourceType = SourceType.ENDPOINT)),
+    @RequiredPermissionOnResource(
+        requiredPermission =
+            @PermissionAttribute(resourceType = ResourceType.OTHER, action = Action.CREATE),
+        resourceLocation = @Resource(path = Util.CUSTOMERS, sourceType = SourceType.ENDPOINT))
+  })
+  public Result create(UUID customerUUID, UUID universeUUID, Http.Request request) {
+    JsonNode requestBody = request.body().asJson();
     SupportBundleFormData bundleData =
         formFactory.getFormDataOrBadRequest(requestBody, SupportBundleFormData.class);
 
     Customer customer = Customer.getOrBadRequest(customerUUID);
-    Universe universe = Universe.getValidUniverseOrBadRequest(universeUUID, customer);
-    // Do not create support bundle when either backup, update, or universe is paused
-    if (universe.getUniverseDetails().backupInProgress
-        || universe.getUniverseDetails().updateInProgress
+    Universe universe = Universe.getOrBadRequest(universeUUID, customer);
+
+    if (universe.getUniverseDetails().updateInProgress
         || universe.getUniverseDetails().universePaused) {
-      throw new PlatformServiceException(
-          BAD_REQUEST,
-          String.format(
-              "Cannot create support bundle since the universe %s"
-                  + "is currently in a locked/paused state or has backup running",
-              universe.universeUUID));
+      log.info(
+          "Trying to create support bundle while universe {} is "
+              + "in a locked/paused state or has backup running.",
+          universe.getName());
     }
 
-    // Support bundle for onprem and k8s universes was originally behind a runtime flag.
-    // Now both are enabled by default.
-    CloudType cloudType = universe.getUniverseDetails().getPrimaryCluster().userIntent.providerType;
-    Boolean k8s_enabled = runtimeConfigFactory.globalRuntimeConf().getBoolean(K8S_ENABLED);
-    Boolean onprem_enabled = runtimeConfigFactory.globalRuntimeConf().getBoolean(ONPREM_ENABLED);
-    if (cloudType == CloudType.onprem && !onprem_enabled) {
-      throw new PlatformServiceException(
-          BAD_REQUEST,
-          "Creating support bundle for on-prem universes is not enabled. "
-              + "Please set onprem_enabled=true to create support bundle");
-    }
-    if (cloudType == CloudType.kubernetes && !k8s_enabled) {
-      throw new PlatformServiceException(
-          BAD_REQUEST,
-          "Creating support bundle for k8s universes is not enabled. "
-              + "Please set k8s_enabled=true to create support bundle");
-    }
+    sbHandler.bundleDataVaidation(bundleData, universe);
 
     SupportBundle supportBundle = SupportBundle.create(bundleData, universe);
     SupportBundleTaskParams taskParams =
@@ -114,7 +113,7 @@ public class SupportBundleController extends AuthenticatedController {
         taskUUID,
         CustomerTask.TargetType.Universe,
         CustomerTask.TaskType.CreateSupportBundle,
-        universe.name);
+        universe.getName());
     log.info(
         "Saved task uuid "
             + taskUUID.toString()
@@ -125,11 +124,10 @@ public class SupportBundleController extends AuthenticatedController {
 
     auditService()
         .createAuditEntryWithReqBody(
-            ctx(),
+            request,
             Audit.TargetType.SupportBundle,
             Objects.toString(supportBundle.getBundleUUID(), null),
             Audit.ActionType.Create,
-            requestBody,
             taskUUID);
     return new YBPTask(taskUUID, supportBundle.getBundleUUID()).asResult();
   }
@@ -139,9 +137,19 @@ public class SupportBundleController extends AuthenticatedController {
       nickname = "downloadSupportBundle",
       response = String.class,
       produces = "application/x-compressed")
+  @AuthzPath({
+    @RequiredPermissionOnResource(
+        requiredPermission =
+            @PermissionAttribute(resourceType = ResourceType.UNIVERSE, action = Action.READ),
+        resourceLocation = @Resource(path = Util.UNIVERSES, sourceType = SourceType.ENDPOINT)),
+    @RequiredPermissionOnResource(
+        requiredPermission =
+            @PermissionAttribute(resourceType = ResourceType.OTHER, action = Action.READ),
+        resourceLocation = @Resource(path = Util.CUSTOMERS, sourceType = SourceType.ENDPOINT))
+  })
   public Result download(UUID customerUUID, UUID universeUUID, UUID bundleUUID) {
     Customer customer = Customer.getOrBadRequest(customerUUID);
-    Universe universe = Universe.getValidUniverseOrBadRequest(universeUUID, customer);
+    Universe.getOrBadRequest(universeUUID, customer);
     SupportBundle bundle = SupportBundle.getOrBadRequest(bundleUUID);
 
     if (bundle.getStatus() != SupportBundleStatusType.Success) {
@@ -149,11 +157,11 @@ public class SupportBundleController extends AuthenticatedController {
           NOT_FOUND, String.format("No bundle found for %s", bundleUUID.toString()));
     }
     InputStream is = SupportBundle.getAsInputStream(bundleUUID);
-    response()
-        .setHeader(
+    return ok(is)
+        .as("application/x-compressed")
+        .withHeader(
             "Content-Disposition",
             "attachment; filename=" + SupportBundle.get(bundleUUID).getFileName());
-    return ok(is).as("application/x-compressed");
   }
 
   @ApiOperation(
@@ -161,7 +169,19 @@ public class SupportBundleController extends AuthenticatedController {
       response = SupportBundle.class,
       responseContainer = "List",
       nickname = "listSupportBundle")
+  @AuthzPath({
+    @RequiredPermissionOnResource(
+        requiredPermission =
+            @PermissionAttribute(resourceType = ResourceType.UNIVERSE, action = Action.READ),
+        resourceLocation = @Resource(path = Util.UNIVERSES, sourceType = SourceType.ENDPOINT)),
+    @RequiredPermissionOnResource(
+        requiredPermission =
+            @PermissionAttribute(resourceType = ResourceType.OTHER, action = Action.READ),
+        resourceLocation = @Resource(path = Util.CUSTOMERS, sourceType = SourceType.ENDPOINT))
+  })
   public Result list(UUID customerUUID, UUID universeUUID) {
+    Customer customer = Customer.getOrBadRequest(customerUUID);
+    Universe.getOrBadRequest(universeUUID, customer);
     int retentionDays = config.getInt("yb.support_bundle.retention_days");
     SupportBundle.setRetentionDays(retentionDays);
     List<SupportBundle> supportBundles = SupportBundle.getAll(universeUUID);
@@ -172,7 +192,19 @@ public class SupportBundleController extends AuthenticatedController {
       value = "Get a support bundle from a universe",
       response = SupportBundle.class,
       nickname = "getSupportBundle")
+  @AuthzPath({
+    @RequiredPermissionOnResource(
+        requiredPermission =
+            @PermissionAttribute(resourceType = ResourceType.UNIVERSE, action = Action.READ),
+        resourceLocation = @Resource(path = Util.UNIVERSES, sourceType = SourceType.ENDPOINT)),
+    @RequiredPermissionOnResource(
+        requiredPermission =
+            @PermissionAttribute(resourceType = ResourceType.OTHER, action = Action.READ),
+        resourceLocation = @Resource(path = Util.CUSTOMERS, sourceType = SourceType.ENDPOINT))
+  })
   public Result get(UUID customerUUID, UUID universeUUID, UUID supportBundleUUID) {
+    Customer customer = Customer.getOrBadRequest(customerUUID);
+    Universe.getOrBadRequest(universeUUID, customer);
     int retentionDays = config.getInt("yb.support_bundle.retention_days");
     SupportBundle.setRetentionDays(retentionDays);
     SupportBundle supportBundle = SupportBundle.getOrBadRequest(supportBundleUUID);
@@ -183,18 +215,36 @@ public class SupportBundleController extends AuthenticatedController {
       value = "Delete a support bundle",
       response = YBPSuccess.class,
       nickname = "deleteSupportBundle")
-  public Result delete(UUID customerUUID, UUID universeUUID, UUID bundleUUID) {
+  @AuthzPath({
+    @RequiredPermissionOnResource(
+        requiredPermission =
+            @PermissionAttribute(resourceType = ResourceType.UNIVERSE, action = Action.READ),
+        resourceLocation = @Resource(path = Util.UNIVERSES, sourceType = SourceType.ENDPOINT)),
+    @RequiredPermissionOnResource(
+        requiredPermission =
+            @PermissionAttribute(resourceType = ResourceType.OTHER, action = Action.DELETE),
+        resourceLocation = @Resource(path = Util.CUSTOMERS, sourceType = SourceType.ENDPOINT))
+  })
+  public Result delete(
+      UUID customerUUID, UUID universeUUID, UUID bundleUUID, Http.Request request) {
     SupportBundle supportBundle = SupportBundle.getOrBadRequest(bundleUUID);
+    Customer customer = Customer.getOrBadRequest(customerUUID);
+    Universe.getOrBadRequest(universeUUID, customer);
 
-    // Deletes row from the support_bundle db table
-    SupportBundle.delete(bundleUUID);
+    // Throw error if support bundle is running.
+    if (SupportBundleStatusType.Running.equals(supportBundle.getStatus())) {
+      throw new PlatformServiceException(BAD_REQUEST, "The support bundle is in running state.");
+    }
 
-    // Delete the actual archive file
-    supportBundleUtil.deleteFile(supportBundle.getPathObject());
+    // Delete file from disk and record from DB.
+    supportBundleUtil.deleteSupportBundle(supportBundle);
 
     auditService()
-        .createAuditEntryWithReqBody(
-            ctx(), Audit.TargetType.SupportBundle, bundleUUID.toString(), Audit.ActionType.Delete);
+        .createAuditEntry(
+            request,
+            Audit.TargetType.SupportBundle,
+            bundleUUID.toString(),
+            Audit.ActionType.Delete);
     log.info("Successfully deleted the support bundle: " + bundleUUID.toString());
     return YBPSuccess.empty();
   }
@@ -204,8 +254,40 @@ public class SupportBundleController extends AuthenticatedController {
       response = ComponentType.class,
       responseContainer = "List",
       nickname = "listSupportBundleComponents")
+  @AuthzPath
   public Result getComponents(UUID customerUUID) {
     EnumSet<ComponentType> components = EnumSet.allOf(ComponentType.class);
     return PlatformResults.withData(components);
+  }
+
+  @ApiOperation(
+      value = "Estimate support bundle size for specific universe",
+      nickname = "estimateSupportBundleSize",
+      response = SupportBundleSizeEstimateResponse.class)
+  @ApiImplicitParams(
+      @ApiImplicitParam(
+          name = "supportBundle",
+          value = "support bundle info",
+          paramType = "body",
+          dataType = "com.yugabyte.yw.forms.SupportBundleFormData",
+          required = true))
+  @AuthzPath({
+    @RequiredPermissionOnResource(
+        requiredPermission =
+            @PermissionAttribute(resourceType = ResourceType.UNIVERSE, action = Action.READ),
+        resourceLocation = @Resource(path = Util.UNIVERSES, sourceType = SourceType.ENDPOINT)),
+  })
+  public Result estimateSize(UUID customerUUID, UUID universeUUID, Http.Request request)
+      throws Exception {
+    JsonNode requestBody = request.body().asJson();
+    SupportBundleFormData bundleData =
+        formFactory.getFormDataOrBadRequest(requestBody, SupportBundleFormData.class);
+
+    Customer customer = Customer.getOrBadRequest(customerUUID);
+    Universe universe = Universe.getOrBadRequest(universeUUID, customer);
+
+    sbHandler.bundleDataVaidation(bundleData, universe);
+
+    return PlatformResults.withData(sbHandler.estimateBundleSize(customer, bundleData, universe));
   }
 }

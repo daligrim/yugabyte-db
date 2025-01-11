@@ -26,22 +26,26 @@
 
 #include "yb/server/server_base_options.h"
 
-#include "yb/util/flag_tags.h"
+#include "yb/util/flags.h"
 #include "yb/util/format.h"
 #include "yb/util/status_format.h"
 #include "yb/util/status_log.h"
 #include "yb/util/string_util.h"
 #include "yb/util/thread_restrictions.h"
 
-DEFINE_uint64(transaction_manager_workers_limit, 50,
+DEFINE_UNKNOWN_uint64(transaction_manager_workers_limit, 50,
               "Max number of workers used by transaction manager");
 
-DEFINE_uint64(transaction_manager_queue_limit, 500,
+DEFINE_UNKNOWN_uint64(transaction_manager_queue_limit, 500,
               "Max number of tasks used by transaction manager");
 
 DEFINE_test_flag(string, transaction_manager_preferred_tablet, "",
                  "For testing only. If non-empty, transaction manager will try to use the status "
                  "tablet with id matching this flag, if present in the list of status tablets.");
+
+DECLARE_string(placement_cloud);
+DECLARE_string(placement_region);
+DECLARE_string(placement_zone);
 
 namespace yb {
 namespace client {
@@ -78,7 +82,7 @@ class TransactionTableState {
 
   void UpdateStatusTablets(uint64_t new_version,
                            TransactionStatusTablets&& tablets) EXCLUDES(mutex_) {
-    std::lock_guard<yb::RWMutex> lock(mutex_);
+    std::lock_guard lock(mutex_);
     if (!initialized_.load() || status_tablets_version_ < new_version) {
       tablets_ = std::move(tablets);
       has_placement_local_tablets_.store(!tablets_.placement_local_tablets.empty());
@@ -92,7 +96,7 @@ class TransactionTableState {
   }
 
   uint64_t GetStatusTabletsVersion() EXCLUDES(mutex_) {
-    std::lock_guard<yb::RWMutex> lock(mutex_);
+    std::lock_guard lock(mutex_);
     return status_tablets_version_;
   }
 
@@ -159,6 +163,20 @@ class TransactionTableState {
   TransactionStatusTablets tablets_ GUARDED_BY(mutex_);
 };
 
+const CloudInfoPB& GetPlacementFromGFlags() {
+  static GoogleOnceType once = GOOGLE_ONCE_INIT;
+  static CloudInfoPB cloud_info;
+  auto set_placement_from_gflags = [](CloudInfoPB* cloud_info) {
+    cloud_info->set_placement_cloud(FLAGS_placement_cloud);
+    cloud_info->set_placement_region(FLAGS_placement_region);
+    cloud_info->set_placement_zone(FLAGS_placement_zone);
+  };
+  GoogleOnceInitArg(
+      &once, static_cast<void (*)(CloudInfoPB*)>(set_placement_from_gflags), &cloud_info);
+
+  return cloud_info;
+}
+
 // Loads transaction tablets list to cache.
 class LoadStatusTabletsTask {
  public:
@@ -200,8 +218,7 @@ class LoadStatusTabletsTask {
 
  private:
   Result<TransactionStatusTablets> GetTransactionStatusTablets() {
-    CloudInfoPB this_pb = yb::server::GetPlacementFromGFlags();
-    return client_->GetTransactionStatusTablets(this_pb);
+    return client_->GetTransactionStatusTablets(GetPlacementFromGFlags());
   }
 
   YBClient* client_;
@@ -244,9 +261,10 @@ class TransactionManager::Impl {
       : client_(client),
         clock_(clock),
         table_state_{std::move(local_tablet_filter)},
-        thread_pool_(
-            "TransactionManager", FLAGS_transaction_manager_queue_limit,
-            FLAGS_transaction_manager_workers_limit),
+        thread_pool_(rpc::ThreadPoolOptions {
+          .name = "TransactionManager",
+          .max_workers = FLAGS_transaction_manager_workers_limit,
+        }),
         tasks_pool_(FLAGS_transaction_manager_queue_limit),
         invoke_callback_tasks_(FLAGS_transaction_manager_queue_limit) {
     CHECK(clock);
@@ -259,6 +277,9 @@ class TransactionManager::Impl {
   void UpdateTransactionTablesVersion(
       uint64_t version, UpdateTransactionTablesVersionCallback callback) {
     if (table_state_.GetStatusTabletsVersion() >= version) {
+      if (callback) {
+        callback(Status::OK());
+      }
       return;
     }
 

@@ -29,8 +29,7 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_UTIL_DEBUG_UTIL_H
-#define YB_UTIL_DEBUG_UTIL_H
+#pragma once
 
 #include <sys/types.h>
 
@@ -40,6 +39,7 @@
 
 #include "yb/gutil/strings/fastmem.h"
 
+#include "yb/util/debug.h"
 #include "yb/util/enums.h"
 #include "yb/util/slice.h"
 #include "yb/util/stack_trace.h"
@@ -104,14 +104,6 @@ std::string GetLogFormatStackTraceHex();
 // may invoke the dynamic loader.
 void HexStackTraceToString(char* buf, size_t size);
 
-constexpr bool IsDebug() {
-#ifdef NDEBUG
-  return false;
-#else
-  return true;
-#endif
-}
-
 class NODISCARD_CLASS ScopeLogger {
  public:
   ScopeLogger(const std::string& msg, std::function<void()> on_scope_bounds);
@@ -122,13 +114,6 @@ class NODISCARD_CLASS ScopeLogger {
   const std::string msg_;
   std::function<void()> on_scope_bounds_;
 };
-
-std::string SymbolizeAddress(
-    void *pc,
-    const StackTraceLineFormat stack_trace_line_format = StackTraceLineFormat::DEFAULT);
-
-// Demangle a C++-mangled identifier.
-std::string DemangleName(const char* name);
 
 #define TEST_PAUSE_IF_FLAG_WITH_PREFIX(flag_name, prefix) \
     if (PREDICT_FALSE(ANNOTATE_UNPROTECTED_READ(BOOST_PP_CAT(FLAGS_, flag_name)))) { \
@@ -146,5 +131,3 @@ std::string DemangleName(const char* name);
   TEST_PAUSE_IF_FLAG_WITH_PREFIX(flag_name, LogPrefix())
 
 } // namespace yb
-
-#endif  // YB_UTIL_DEBUG_UTIL_H

@@ -15,13 +15,13 @@ package org.yb.pgsql;
 
 import org.junit.Test;
 import org.junit.runner.RunWith;
-import org.yb.util.YBTestRunnerNonTsanOnly;
+import org.yb.YBTestRunner;
 
 /**
  * Runs the pg_regress test suite on YB code.
  */
-@RunWith(value=YBTestRunnerNonTsanOnly.class)
-public class TestPgRegressPgStat extends BasePgSQLTest {
+@RunWith(value=YBTestRunner.class)
+public class TestPgRegressPgStat extends BasePgRegressTest {
   @Override
   public int getTestMethodTimeoutSec() {
     return 1800;

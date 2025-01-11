@@ -16,10 +16,17 @@ import {
   getCustomerUsersFailure,
   fetchPasswordPolicy,
   fetchPasswordPolicyResponse,
+  fetchOIDCToken,
+  fetchOIDCTokenResponse,
+  fetchRunTimeConfigs,
+  fetchRunTimeConfigsResponse,
   updateUserProfile,
   updateUserProfileFailure,
-  updateUserProfileSuccess
+  updateUserProfileSuccess,
+  updatePassword,
+  DEFAULT_RUNTIME_GLOBAL_SCOPE
 } from '../../actions/customers';
+import { toast } from 'react-toastify';
 
 const mapDispatchToProps = (dispatch) => {
   return {
@@ -35,6 +42,16 @@ const mapDispatchToProps = (dispatch) => {
           console.error('Error while fetching customer users');
         }
       });
+    },
+    fetchOIDCToken: (userUUID) => {
+      dispatch(fetchOIDCToken(userUUID)).then((response) => {
+          dispatch(fetchOIDCTokenResponse(response.payload));
+      });
+    },
+    fetchGlobalRunTimeConfigs: () => {
+      return dispatch(fetchRunTimeConfigs(DEFAULT_RUNTIME_GLOBAL_SCOPE, true)).then((response) =>
+        dispatch(fetchRunTimeConfigsResponse(response.payload))
+      );
     },
     updateCustomerDetails: (values) => {
       dispatch(updateProfile(values)).then((response) => {
@@ -52,6 +69,13 @@ const mapDispatchToProps = (dispatch) => {
         } else {
           dispatch(updateUserProfileSuccess(response.payload));
         }
+      });
+    },
+    updateUserPassword: (userUUID, values) => {
+      return updatePassword(userUUID, values).then(() => {
+          toast.success("password updated successfully");
+      }).catch((payload)=> {
+        toast.error(payload.response.data.error);
       });
     },
     addCustomerConfig: (config) => {
@@ -83,9 +107,11 @@ const mapDispatchToProps = (dispatch) => {
 function mapStateToProps(state) {
   return {
     customer: state.customer.currentCustomer,
+    runtimeConfigs: state.customer.runtimeConfigs,
     currentUser: state.customer.currentUser,
     users: state.customer.users.data,
     apiToken: state.customer.apiToken,
+    OIDCToken: state.customer.OIDCToken,
     customerProfile: state.customer ? state.customer.profile : null,
     passwordValidationInfo: state.customer.passwordValidationInfo
   };

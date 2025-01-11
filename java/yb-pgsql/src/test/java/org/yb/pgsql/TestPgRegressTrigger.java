@@ -16,13 +16,13 @@ import java.util.Map;
 
 import org.junit.Test;
 import org.junit.runner.RunWith;
-import org.yb.util.YBTestRunnerNonTsanOnly;
+import org.yb.YBTestRunner;
 
 /**
  * Runs the pg_regress test suite on trigger queries.
  */
-@RunWith(value=YBTestRunnerNonTsanOnly.class)
-public class TestPgRegressTrigger extends BasePgSQLTest {
+@RunWith(value=YBTestRunner.class)
+public class TestPgRegressTrigger extends BasePgRegressTest {
 
   private static final String TURN_OFF_COPY_FROM_BATCH_TRANSACTION =
       "yb_default_copy_from_rows_per_transaction=0";
@@ -36,12 +36,16 @@ public class TestPgRegressTrigger extends BasePgSQLTest {
   @Override
   protected Map<String, String> getTServerFlags() {
     Map<String, String> flags = super.getTServerFlags();
-    flags.put("ysql_pg_conf", TURN_OFF_COPY_FROM_BATCH_TRANSACTION);
+    appendToYsqlPgConf(flags, TURN_OFF_COPY_FROM_BATCH_TRANSACTION);
     return flags;
   }
 
   @Test
   public void testPgRegressTrigger() throws Exception {
+    // (DB-12699) Test triggers are not realised on randomly allocated backend
+    // processes when Connection Manager is enabled, allow the test to run
+    // without a warmed up pool of connections.
+    setConnMgrWarmupModeAndRestartCluster(ConnectionManagerWarmupMode.NONE);
     runPgRegressTest("yb_triggers_schedule");
   }
 }

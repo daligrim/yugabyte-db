@@ -1,16 +1,18 @@
 import _ from 'lodash';
-import React from 'react';
 import userEvent from '@testing-library/user-event';
 import { render } from '../../../test-utils';
 import { HAInstances } from './HAInstances';
 import { useLoadHAConfiguration } from '../hooks/useLoadHAConfiguration';
-import { HAConfig } from '../../../redesign/helpers/dtos';
+import { HaConfig, HaInstanceState } from '../dtos';
+import { MOCK_HA_WS_RUNTIME_CONFIG_WITH_PEER_CERTS } from '../replication/mockUtils';
+import { ThemeProvider } from '@material-ui/core';
+import { mainTheme } from '../../../redesign/theme/mainTheme';
 
 jest.mock('../hooks/useLoadHAConfiguration');
 
 type HookReturnType = Partial<ReturnType<typeof useLoadHAConfiguration>>;
 
-const mockConfig: HAConfig = {
+const mockConfig: HaConfig = {
   uuid: 'config-id-1',
   cluster_key: 'fake-key',
   last_failover: 123,
@@ -18,6 +20,7 @@ const mockConfig: HAConfig = {
     {
       uuid: 'instance-id-1',
       config_uuid: 'config-id-1',
+      instance_state: HaInstanceState.AWAITING_REPLICAS,
       address: 'standby-B',
       is_leader: false,
       is_local: false,
@@ -26,6 +29,7 @@ const mockConfig: HAConfig = {
     {
       uuid: 'instance-id-2',
       config_uuid: 'config-id-1',
+      instance_state: HaInstanceState.CONNECTED,
       address: 'active',
       is_leader: true, // means this is an active instance item
       is_local: true, // means user logged into this instance
@@ -34,6 +38,7 @@ const mockConfig: HAConfig = {
     {
       uuid: 'instance-id-3',
       config_uuid: 'config-id-1',
+      instance_state: HaInstanceState.DISCONNECTED,
       address: 'standby-A',
       is_leader: false,
       is_local: false,
@@ -44,7 +49,23 @@ const mockConfig: HAConfig = {
 
 const setup = (hookResponse: HookReturnType) => {
   (useLoadHAConfiguration as jest.Mock<HookReturnType>).mockReturnValue(hookResponse);
-  return render(<HAInstances />);
+  const fetchRuntimeConfigs = jest.fn();
+  const setRuntimeConfig = jest.fn();
+
+  const mockRuntimeConfigPromise = {
+    data: MOCK_HA_WS_RUNTIME_CONFIG_WITH_PEER_CERTS,
+    error: null,
+    promiseState: 'SUCCESS'
+  };
+  return render(
+    <ThemeProvider theme={mainTheme}>
+      <HAInstances
+        fetchRuntimeConfigs={fetchRuntimeConfigs}
+        setRuntimeConfig={setRuntimeConfig}
+        runtimeConfigs={mockRuntimeConfigPromise}
+      />
+    </ThemeProvider>
+  );
 };
 
 describe('HA instances list', () => {

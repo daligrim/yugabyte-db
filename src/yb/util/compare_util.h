@@ -11,8 +11,7 @@
 // under the License.
 //
 
-#ifndef YB_UTIL_COMPARE_UTIL_H
-#define YB_UTIL_COMPARE_UTIL_H
+#pragma once
 
 #include <unordered_map>
 #include <vector>
@@ -102,7 +101,7 @@ bool MapsEqual(const UM& map1, const UM& map2, EqualityFn equality_fn) {
     true YB_FIELDS_EQUALS(BOOST_PP_NIL, __VA_ARGS__)
 
 #define YB_CLASS_EQUALS(...) \
-    true YB_FIELDS_TO_STRING((BOOST_PP_IDENTITY(_)), __VA_ARGS__)
+    true YB_FIELDS_EQUALS((BOOST_PP_IDENTITY(_)), __VA_ARGS__)
 
 #else
 #error "Compiler not supported -- BOOST_PP_VARIADICS is not set. See https://bit.ly/2ZF7rTu."
@@ -110,5 +109,3 @@ bool MapsEqual(const UM& map1, const UM& map2, EqualityFn equality_fn) {
 
 }  // namespace util
 }  // namespace yb
-
-#endif  // YB_UTIL_COMPARE_UTIL_H

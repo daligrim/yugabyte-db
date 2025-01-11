@@ -20,25 +20,18 @@ type: docs
 
 <ul class="nav nav-tabs-alt nav-tabs-yb">
   <li >
-    <a href="{{< relref "./helm-chart.md" >}}" class="nav-link active">
-      <i class="fas fa-cubes" aria-hidden="true"></i>
+    <a href="../helm-chart/" class="nav-link active">
+      <i class="fa-regular fa-dharmachakra" aria-hidden="true"></i>
       Helm chart
     </a>
   </li>
   <li >
-    <a href="{{< relref "./yugabyte-operator.md" >}}" class="nav-link">
-      <i class="fas fa-cubes" aria-hidden="true"></i>
-      YugabyteDB operator
-    </a>
-  </li>
-  <li >
-    <a href="{{< relref "./operator-hub.md" >}}" class="nav-link">
-      <i class="fas fa-cubes" aria-hidden="true"></i>
-      Operator Hub
+    <a href="../yugabyte-operator/" class="nav-link">
+      <i class="fa-solid fa-cubes" aria-hidden="true"></i>
+      Kubernetes Operator
     </a>
   </li>
 </ul>
-
 
 [Helm](https://helm.sh/) is an open source packaging tool that helps install applications and services on Kubernetes. It uses a packaging format called `charts`. A Helm chart is a package containing all resource definitions necessary to create an instance of a Kubernetes application, tool, or service in a Kubernetes cluster.
 
@@ -51,7 +44,7 @@ The YugabyteDB Helm chart has been tested with the following software versions:
 - Kubernetes 1.20 or later with nodes such that a total of 12 CPU cores and 18 GB RAM can be allocated to YugabyteDB. This can be three nodes with 4 CPU core and 6 GB RAM allocated to YugabyteDB.
 - Helm 3.4 or later.
 - YugabyteDB Docker image (yugabytedb/yugabyte) 2.1.0 or later
-- For optimal performance, ensure you have set the appropriate [system limits using `ulimit`](../../../../manual-deployment/system-config/#ulimits) on each node in your Kubernetes cluster.
+- For optimal performance, ensure you have set the appropriate [system limits using `ulimit`](../../../../manual-deployment/system-config/#set-ulimits) on each node in your Kubernetes cluster.
 
 Confirm that `helm` and `kubectl` are configured correctly, as follows:
 
@@ -104,7 +97,7 @@ yugabytedb/yugabyte  {{<yb-version version="preview" format="short">}}          
 
 ### Install YugabyteDB
 
-Install YugabyteDB in the Kubernetes cluster using the commands desribed in the following sections.
+Install YugabyteDB in the Kubernetes cluster using the commands described in the following sections.
 
 #### On multi-node Kubernetes
 
@@ -131,7 +124,7 @@ helm install yb-demo yugabytedb/yugabyte \
 resource.tserver.requests.cpu=0.5,resource.tserver.requests.memory=0.5Gi --namespace yb-demo
 ```
 
-Note that in Minikube, the LoadBalancers for `yb-master-ui` and `yb-tserver-service` will remain in pending state since load balancers are not available in a Minikube environment. If you would like to disable these services, pass the `enableLoadBalancer=False` flag, as follows:
+Note that in Minikube, the LoadBalancers for `yb-master-ui` and `yb-tserver-service` will remain in pending state as load balancers are not available in a Minikube environment. If you would like to disable these services, pass the `enableLoadBalancer=False` flag, as follows:
 
 ```sh
 helm install yb-demo yugabytedb/yugabyte \
@@ -236,13 +229,13 @@ REVISION  UPDATED                   STATUS    CHART           APP VERSION   DESC
 
 ## Connect using YugabyteDB shells
 
-To connect and use the YSQL Shell (`ysqlsh`), run the following command:
+To connect and use the YSQL Shell (ysqlsh), run the following command:
 
 ```sh
 kubectl exec -n yb-demo -it yb-tserver-0 -- ysqlsh -h yb-tserver-0.yb-tservers.yb-demo
 ```
 
-To connect and use the YCQL Shell (`ycqlsh`), run the following command:
+To connect and use the YCQL Shell (ycqlsh), run the following command:
 
 ```sh
 kubectl exec -n yb-demo -it yb-tserver-0 -- ycqlsh yb-tserver-0.yb-tservers.yb-demo
@@ -250,7 +243,7 @@ kubectl exec -n yb-demo -it yb-tserver-0 -- ycqlsh yb-tserver-0.yb-tservers.yb-d
 
 ## Connect using external clients
 
-To connect an external program, get the load balancer `EXTERNAL-IP` IP address of the `yb-tserver-service` service and connect to the 5433 / 9042 ports for YSQL / YCQL services respectively, as follows:
+To connect an external program, get the load balancer `EXTERNAL-IP` address of the `yb-tserver-service` service and connect using port 5433 for YSQL or port 9042 for YCQL, as follows:
 
 ```sh
 kubectl get services --namespace yb-demo
@@ -259,7 +252,7 @@ kubectl get services --namespace yb-demo
 Expect output similar to the following:
 
 ```output
-NAME                 TYPE           CLUSTER-IP      EXTERNAL-IP   PORT(S)                                        AGE
+NAME                 TYPE           CLUSTER-IP      EXTERNAL-IP        PORT(S)                                        AGE
 ...
 yb-tserver-service   LoadBalancer   10.98.36.163    35.225.153.214     6379:30929/TCP,9042:30975/TCP,5433:30048/TCP   10s
 ...
@@ -321,6 +314,46 @@ Replica count can be changed using the following command. Note that only the YB-
 helm upgrade --set replicas.tserver=5 yb-demo ./yugabyte
 ```
 
+### Readiness probes
+
+Readiness probes provide readiness checks for your Kubernetes deployment. Probes are compatible with both direct Helm deployments and [YugabyteDB Anywhere-managed deployments](../../../../../yugabyte-platform/create-deployments/create-universe-multi-zone-kubernetes/#configure-helm-overrides), and work with TLS enabled or restricted authorization environments. Use the probes to ensure pods are ready before being marked as available. The probes verify connectivity using ysqlsh for YSQL and ycqlsh for YCQL.
+
+The following probes are available:
+
+- YSQL Readiness. Uses ysqlsh to verify connectivity via local socket for credentialed setups.
+
+- YCQL Readiness. Uses ycqlsh to validate connectivity.
+
+- Master Readiness. Uses `httpGet` to probe master.
+
+- Custom Readiness. Supports custom readiness probe parameters, such as delays, timeouts, and thresholds.
+
+- Startup probes to delay enforcing of readiness probes.
+
+Readiness probes are disabled by default for compatibility.
+
+Enable probes via `values.yaml` or using Kubernetes overrides.
+
+```yaml
+master:
+  readinessProbe:
+    enabled: true
+
+tserver:
+  readinessProbe:
+    enabled: true
+```
+
+The following is example of custom readiness parameters:
+
+```yaml
+tserver:
+  customReadinessProbe:
+    initialDelaySeconds: 30
+    periodSeconds: 20
+    timeoutSeconds: 10
+```
+
 ### Independent LoadBalancers
 
 By default, the YugabyteDB Helm chart exposes the client API endpoints and master UI endpoint using two load balancers. If you want to expose the client APIs using independent LoadBalancers, you can execute the following command:
@@ -351,7 +384,6 @@ serviceEndpoints:
     type: "LoadBalancer"
     ports:
       tcp-yql-port: "9042"
-      tcp-yedis-port: "6379"
       tcp-ysql-port: "5433"
 ```
 
@@ -387,12 +419,21 @@ gflags.tserver.placement_cloud=myk8s-cloud,gflags.tserver.placement_region=myk8s
  --namespace yb-demo
 ```
 
-## Upgrade cluster
+## Upgrade the software version of YugabyteDB
 
-You can perform rolling upgrades on the YugabyteDB cluster with the following command. Change the `Image.tag` value to any valid tag from [YugabyteDB's listing on the Docker Hub registry](https://hub.docker.com/r/yugabytedb/yugabyte/tags/). By default, the installation uses the `latest` Docker image. In the following example, the Docker image specified is `2.1.6.0-b17`:
+You can upgrade the software on the YugabyteDB cluster with the following command. By default, this performs a [rolling update](https://github.com/yugabyte/charts/blob/853d7ac744cf6d637b5877f4681940825beda8f6/stable/yugabyte/values.yaml#L60) of the pods.
 
 ```sh
-helm upgrade yb-demo yugabytedb/yugabyte --set Image.tag=2.1.6.0-b17 --wait -n yb-demo
+helm repo update
+helm upgrade yb-demo yugabytedb/yugabyte --version {{<yb-version version="preview" format="short">}} --wait -n yb-demo
+```
+
+## Update the configuration of YugabyteDB pods
+
+You can update most settings in the helm chart by running a `helm upgrade` with the new values. By default, this performs a [rolling update](https://github.com/yugabyte/charts/blob/853d7ac744cf6d637b5877f4681940825beda8f6/stable/yugabyte/values.yaml#L60) of the pods.
+
+```sh
+helm upgrade yb-demo yugabytedb/yugabyte --set resource.tserver.requests.cpu=4 --wait -n yb-demo
 ```
 
 ## Delete cluster

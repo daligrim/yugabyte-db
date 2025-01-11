@@ -20,16 +20,19 @@ import static org.junit.Assert.assertFalse;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyMap;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 import static play.test.Helpers.contentAsString;
 
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import com.fasterxml.jackson.databind.JsonNode;
-import com.yugabyte.yw.common.FakeApiHelper;
 import com.yugabyte.yw.common.FakeDBApplication;
 import com.yugabyte.yw.common.ModelFactory;
 import com.yugabyte.yw.common.ShellResponse;
 import com.yugabyte.yw.common.TestHelper;
+import com.yugabyte.yw.common.ha.PlatformInstanceClient;
+import com.yugabyte.yw.common.ha.PlatformInstanceClientFactory;
 import com.yugabyte.yw.common.ha.PlatformReplicationManager;
 import com.yugabyte.yw.models.Customer;
 import com.yugabyte.yw.models.HighAvailabilityConfig;
@@ -42,12 +45,24 @@ import java.util.function.Predicate;
 import org.apache.commons.lang3.StringUtils;
 import org.junit.Before;
 import org.junit.Test;
+import play.inject.Bindings;
+import play.inject.guice.GuiceApplicationBuilder;
 import play.libs.Json;
 import play.mvc.Result;
 
 public class PlatformInstanceControllerTest extends FakeDBApplication {
   Customer customer;
   Users user;
+  private PlatformInstanceClientFactory mockPlatformInstanceClientFactory =
+      mock(PlatformInstanceClientFactory.class);
+
+  @Override
+  protected GuiceApplicationBuilder configureApplication(GuiceApplicationBuilder builder) {
+    return super.configureApplication(
+        builder.overrides(
+            Bindings.bind(PlatformInstanceClientFactory.class)
+                .toInstance(mockPlatformInstanceClientFactory)));
+  }
 
   @Before
   public void setup() {
@@ -58,7 +73,7 @@ public class PlatformInstanceControllerTest extends FakeDBApplication {
   private String createClusterKey() {
     String authToken = user.createAuthToken();
     Result createClusterKeyResult =
-        FakeApiHelper.doRequestWithAuthToken("GET", "/api/settings/ha/generate_key", authToken);
+        doRequestWithAuthToken("GET", "/api/settings/ha/generate_key", authToken);
     assertOk(createClusterKeyResult);
 
     return Json.parse(contentAsString(createClusterKeyResult)).get("cluster_key").asText();
@@ -69,7 +84,7 @@ public class PlatformInstanceControllerTest extends FakeDBApplication {
     String uri = "/api/settings/ha/config";
     String clusterKey = createClusterKey();
     JsonNode body = Json.newObject().put("cluster_key", clusterKey);
-    Result createResult = FakeApiHelper.doRequestWithAuthTokenAndBody("POST", uri, authToken, body);
+    Result createResult = doRequestWithAuthTokenAndBody("POST", uri, authToken, body);
     assertOk(createResult);
 
     return Json.parse(contentAsString(createResult));
@@ -84,14 +99,14 @@ public class PlatformInstanceControllerTest extends FakeDBApplication {
             .put("address", address)
             .put("is_local", isLocal)
             .put("is_leader", isLeader);
-    return FakeApiHelper.doRequestWithAuthTokenAndBody("POST", uri, authToken, body);
+    return doRequestWithAuthTokenAndBody("POST", uri, authToken, body);
   }
 
   private Result deletePlatformInstance(UUID configUUID, UUID instanceUUID) {
     String authToken = user.createAuthToken();
     String uri =
         "/api/settings/ha/config/" + configUUID.toString() + "/instance/" + instanceUUID.toString();
-    return FakeApiHelper.doRequestWithAuthToken("DELETE", uri, authToken);
+    return doRequestWithAuthToken("DELETE", uri, authToken);
   }
 
   private Result demotePlatformInstance(UUID configUUID, UUID instanceUUID) {
@@ -102,7 +117,7 @@ public class PlatformInstanceControllerTest extends FakeDBApplication {
             + "/instance/"
             + instanceUUID.toString()
             + "/demote";
-    return FakeApiHelper.doRequestWithAuthToken("POST", uri, authToken);
+    return doRequestWithAuthToken("POST", uri, authToken);
   }
 
   @Test
@@ -145,10 +160,32 @@ public class PlatformInstanceControllerTest extends FakeDBApplication {
   public void testCreatePlatformInstanceWithLocalLeader() {
     JsonNode haConfigJson = createHAConfig();
     UUID configUUID = UUID.fromString(haConfigJson.get("uuid").asText());
+    PlatformInstanceClient mockPlatformInstanceClient = mock(PlatformInstanceClient.class);
+    when(mockPlatformInstanceClientFactory.getClient(anyString(), anyString(), anyMap()))
+        .thenReturn(mockPlatformInstanceClient);
+    when(mockPlatformInstanceClient.testConnection()).thenReturn(true);
     Result createResult = createPlatformInstance(configUUID, "http://abc.com/", true, true);
     assertOk(createResult);
     createResult = createPlatformInstance(configUUID, "http://abcdef.com/", false, false);
     assertOk(createResult);
+  }
+
+  @Test
+  public void testCreateRemotePlatformInstanceNoConnection() {
+    JsonNode haConfigJson = createHAConfig();
+    UUID configUUID = UUID.fromString(haConfigJson.get("uuid").asText());
+    PlatformInstanceClient mockPlatformInstanceClient = mock(PlatformInstanceClient.class);
+    when(mockPlatformInstanceClientFactory.getClient(anyString(), anyString(), anyMap()))
+        .thenReturn(mockPlatformInstanceClient);
+    when(mockPlatformInstanceClient.testConnection()).thenReturn(true);
+    Result createResult = createPlatformInstance(configUUID, "http://abc.com/", true, true);
+    assertOk(createResult);
+    when(mockPlatformInstanceClient.testConnection()).thenReturn(false);
+    createResult =
+        assertPlatformException(
+            () -> createPlatformInstance(configUUID, "http://abcdef.com/", false, false));
+    assertBadRequest(
+        createResult, "Standby YBA instance is unreachable or hasn't been configured yet");
   }
 
   @Test
@@ -192,6 +229,10 @@ public class PlatformInstanceControllerTest extends FakeDBApplication {
   public void testDeleteRemotePlatformInstanceWithLocalLeader() {
     JsonNode haConfigJson = createHAConfig();
     UUID configUUID = UUID.fromString(haConfigJson.get("uuid").asText());
+    PlatformInstanceClient mockPlatformInstanceClient = mock(PlatformInstanceClient.class);
+    when(mockPlatformInstanceClientFactory.getClient(anyString(), anyString(), anyMap()))
+        .thenReturn(mockPlatformInstanceClient);
+    when(mockPlatformInstanceClient.testConnection()).thenReturn(true);
     Result createResult = createPlatformInstance(configUUID, "http://abc.com/", true, true);
     assertOk(createResult);
     createResult = createPlatformInstance(configUUID, "http://abcdef.com/", false, false);
@@ -248,17 +289,51 @@ public class PlatformInstanceControllerTest extends FakeDBApplication {
   }
 
   @Test
-  public void testPromoteInstanceBackupFileNonexistent() {
+  public void testPromoteInstanceNoConnection() {
     when(mockShellProcessHandler.run(anyList(), anyMap(), anyBoolean()))
         .thenReturn(new ShellResponse());
+    PlatformInstanceClient mockPlatformInstanceClient = mock(PlatformInstanceClient.class);
+    when(mockPlatformInstanceClientFactory.getClient(anyString(), anyString(), anyMap()))
+        .thenReturn(mockPlatformInstanceClient);
+    when(mockPlatformInstanceClient.testConnection()).thenReturn(false);
     JsonNode haConfigJson = createHAConfig();
     HighAvailabilityConfig config = Json.fromJson(haConfigJson, HighAvailabilityConfig.class);
-    UUID configUUID = config.getUUID();
+    UUID configUUID = config.getUuid();
     Result createResult = createPlatformInstance(configUUID, "http://abc.com/", true, false);
     assertOk(createResult);
     JsonNode instanceJson = Json.parse(contentAsString(createResult));
     PlatformInstance instance = Json.fromJson(instanceJson, PlatformInstance.class);
-    UUID instanceUUID = instance.getUUID();
+    UUID instanceUUID = instance.getUuid();
+    PlatformInstance remoteLeader = PlatformInstance.create(config, "http://def.com/", true, false);
+    remoteLeader.save();
+    String uri =
+        String.format(
+            "/api/settings/ha/config/%s/instance/%s/promote?isForcePromote=false",
+            configUUID.toString(), instanceUUID.toString());
+    String authToken = user.createAuthToken();
+    JsonNode body = Json.newObject().put("backup_file", "/foo/bar");
+    Result promoteResult =
+        assertPlatformException(() -> doRequestWithAuthTokenAndBody("POST", uri, authToken, body));
+    assertBadRequest(
+        promoteResult, "Could not connect to current leader and force parameter not set.");
+  }
+
+  @Test
+  public void testPromoteInstanceBackupFileNonexistent() {
+    when(mockShellProcessHandler.run(anyList(), anyMap(), anyBoolean()))
+        .thenReturn(new ShellResponse());
+    PlatformInstanceClient mockPlatformInstanceClient = mock(PlatformInstanceClient.class);
+    when(mockPlatformInstanceClientFactory.getClient(anyString(), anyString(), anyMap()))
+        .thenReturn(mockPlatformInstanceClient);
+    when(mockPlatformInstanceClient.testConnection()).thenReturn(true);
+    JsonNode haConfigJson = createHAConfig();
+    HighAvailabilityConfig config = Json.fromJson(haConfigJson, HighAvailabilityConfig.class);
+    UUID configUUID = config.getUuid();
+    Result createResult = createPlatformInstance(configUUID, "http://abc.com/", true, false);
+    assertOk(createResult);
+    JsonNode instanceJson = Json.parse(contentAsString(createResult));
+    PlatformInstance instance = Json.fromJson(instanceJson, PlatformInstance.class);
+    UUID instanceUUID = instance.getUuid();
     PlatformInstance remoteLeader = PlatformInstance.create(config, "http://def.com/", true, false);
     remoteLeader.save();
     String uri =
@@ -268,8 +343,7 @@ public class PlatformInstanceControllerTest extends FakeDBApplication {
     String authToken = user.createAuthToken();
     JsonNode body = Json.newObject().put("backup_file", "/foo/bar");
     Result promoteResult =
-        assertPlatformException(
-            () -> FakeApiHelper.doRequestWithAuthTokenAndBody("POST", uri, authToken, body));
+        assertPlatformException(() -> doRequestWithAuthTokenAndBody("POST", uri, authToken, body));
     assertBadRequest(promoteResult, "Could not find backup file");
   }
 
@@ -279,12 +353,12 @@ public class PlatformInstanceControllerTest extends FakeDBApplication {
         .thenReturn(new ShellResponse());
     JsonNode haConfigJson = createHAConfig();
     HighAvailabilityConfig config = Json.fromJson(haConfigJson, HighAvailabilityConfig.class);
-    UUID configUUID = config.getUUID();
+    UUID configUUID = config.getUuid();
     Result createResult = createPlatformInstance(configUUID, "http://abc.com/", true, false);
     assertOk(createResult);
     JsonNode instanceJson = Json.parse(contentAsString(createResult));
     PlatformInstance instance = Json.fromJson(instanceJson, PlatformInstance.class);
-    UUID instanceUUID = instance.getUUID();
+    UUID instanceUUID = instance.getUuid();
     String uri =
         String.format(
             "/api/settings/ha/config/%s/instance/%s/promote",
@@ -292,8 +366,7 @@ public class PlatformInstanceControllerTest extends FakeDBApplication {
     String authToken = user.createAuthToken();
     JsonNode body = Json.newObject().put("backup_file", "/foo/bar");
     Result promoteResult =
-        assertPlatformException(
-            () -> FakeApiHelper.doRequestWithAuthTokenAndBody("POST", uri, authToken, body));
+        assertPlatformException(() -> doRequestWithAuthTokenAndBody("POST", uri, authToken, body));
     assertBadRequest(promoteResult, "Could not find leader instance");
   }
 
@@ -305,13 +378,17 @@ public class PlatformInstanceControllerTest extends FakeDBApplication {
 
     when(mockShellProcessHandler.run(anyList(), anyMap(), anyBoolean()))
         .thenReturn(new ShellResponse());
+    PlatformInstanceClient mockPlatformInstanceClient = mock(PlatformInstanceClient.class);
+    when(mockPlatformInstanceClientFactory.getClient(anyString(), anyString(), anyMap()))
+        .thenReturn(mockPlatformInstanceClient);
+    when(mockPlatformInstanceClient.testConnection()).thenReturn(true);
 
     PlatformReplicationManager platformReplicationManager =
         app.injector().instanceOf(PlatformReplicationManager.class);
 
     JsonNode haConfigJson = createHAConfig();
     HighAvailabilityConfig config = Json.fromJson(haConfigJson, HighAvailabilityConfig.class);
-    UUID configUUID = config.getUUID();
+    UUID configUUID = config.getUuid();
     Result createResult = createPlatformInstance(configUUID, "http://abc.com/", true, true);
     assertOk(createResult);
     createResult = createPlatformInstance(configUUID, "http://def.com/", false, false);

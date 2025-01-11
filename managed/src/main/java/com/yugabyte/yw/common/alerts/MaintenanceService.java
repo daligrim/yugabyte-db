@@ -20,11 +20,14 @@ import com.yugabyte.yw.common.BeanValidator;
 import com.yugabyte.yw.common.PlatformServiceException;
 import com.yugabyte.yw.models.MaintenanceWindow;
 import com.yugabyte.yw.models.MaintenanceWindow.SortBy;
+import com.yugabyte.yw.models.MaintenanceWindow.State;
+import com.yugabyte.yw.models.Universe;
 import com.yugabyte.yw.models.filters.MaintenanceWindowFilter;
 import com.yugabyte.yw.models.helpers.EntityOperation;
 import com.yugabyte.yw.models.paging.MaintenanceWindowPagedQuery;
 import com.yugabyte.yw.models.paging.MaintenanceWindowPagedResponse;
 import com.yugabyte.yw.models.paging.PagedQuery.SortDirection;
+import io.ebean.DB;
 import io.ebean.Query;
 import io.ebean.annotation.Transactional;
 import java.util.Collections;
@@ -37,7 +40,7 @@ import java.util.stream.Collectors;
 import javax.inject.Inject;
 import javax.inject.Singleton;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.commons.collections.CollectionUtils;
+import org.apache.commons.collections4.CollectionUtils;
 
 @Singleton
 @Slf4j
@@ -58,8 +61,7 @@ public class MaintenanceService {
 
     List<MaintenanceWindow> beforeWindows = Collections.emptyList();
     Set<UUID> windowUuids =
-        maintenanceWindows
-            .stream()
+        maintenanceWindows.stream()
             .filter(alert -> !alert.isNew())
             .map(MaintenanceWindow::getUuid)
             .collect(Collectors.toSet());
@@ -68,13 +70,11 @@ public class MaintenanceService {
       beforeWindows = list(filter);
     }
     Map<UUID, MaintenanceWindow> beforeWindowsMap =
-        beforeWindows
-            .stream()
+        beforeWindows.stream()
             .collect(Collectors.toMap(MaintenanceWindow::getUuid, Function.identity()));
 
     Map<EntityOperation, List<MaintenanceWindow>> toCreateAndUpdate =
-        maintenanceWindows
-            .stream()
+        maintenanceWindows.stream()
             .map(window -> prepareForSave(window, beforeWindowsMap.get(window.getUuid())))
             .filter(window -> filterForSave(window, beforeWindowsMap.get(window.getUuid())))
             .peek(window -> validate(window, beforeWindowsMap.get(window.getUuid())))
@@ -84,13 +84,13 @@ public class MaintenanceService {
         toCreateAndUpdate.getOrDefault(CREATE, Collections.emptyList());
     if (!toCreate.isEmpty()) {
       toCreate.forEach(MaintenanceWindow::generateUUID);
-      MaintenanceWindow.db().saveAll(toCreate);
+      DB.getDefault().saveAll(toCreate);
     }
 
     List<MaintenanceWindow> toUpdate =
         toCreateAndUpdate.getOrDefault(UPDATE, Collections.emptyList());
     if (!toUpdate.isEmpty()) {
-      MaintenanceWindow.db().updateAll(toUpdate);
+      DB.getDefault().updateAll(toUpdate);
     }
 
     log.trace("{} maintenance windows saved", toCreate.size() + toUpdate.size());
@@ -106,8 +106,7 @@ public class MaintenanceService {
     if (uuid == null) {
       throw new PlatformServiceException(BAD_REQUEST, "Can't get maintenance window by null uuid");
     }
-    return list(MaintenanceWindowFilter.builder().uuid(uuid).build())
-        .stream()
+    return list(MaintenanceWindowFilter.builder().uuid(uuid).build()).stream()
         .findFirst()
         .orElse(null);
   }
@@ -121,6 +120,14 @@ public class MaintenanceService {
       throw new PlatformServiceException(BAD_REQUEST, "Invalid Maintenance Window UUID: " + uuid);
     }
     return window;
+  }
+
+  public MaintenanceWindow getOrBadRequest(UUID customerUUID, UUID uuid) {
+    MaintenanceWindow maintenanceWindow = getOrBadRequest(uuid);
+    if (!maintenanceWindow.getCustomerUUID().equals(customerUUID)) {
+      throw new PlatformServiceException(BAD_REQUEST, "Invalid Maintenance Window UUID: " + uuid);
+    }
+    return maintenanceWindow;
   }
 
   public List<MaintenanceWindow> list(MaintenanceWindowFilter filter) {
@@ -205,5 +212,28 @@ public class MaintenanceService {
           .forField("", "can't update missing maintenance window '" + window.getUuid() + "'")
           .throwError();
     }
+  }
+
+  /**
+   * Checks if there is any active maintenance window for the given universe for health check
+   * notifications.
+   *
+   * @param universe
+   * @return true if there is any active maintenance window for the given universe, else false
+   */
+  public boolean isHealthCheckNotificationSuppressedForUniverse(Universe universe) {
+    MaintenanceWindowFilter filter = MaintenanceWindowFilter.builder().state(State.ACTIVE).build();
+    List<MaintenanceWindow> windows = list(filter);
+    for (MaintenanceWindow window : windows) {
+      if ((window.getSuppressHealthCheckNotificationsConfig() != null)
+          && (window.getSuppressHealthCheckNotificationsConfig().isSuppressAllUniverses()
+              || window
+                  .getSuppressHealthCheckNotificationsConfig()
+                  .getUniverseUUIDSet()
+                  .contains(universe.getUniverseUUID()))) {
+        return true;
+      }
+    }
+    return false;
   }
 }

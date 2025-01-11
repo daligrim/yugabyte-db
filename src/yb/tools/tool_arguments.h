@@ -11,12 +11,16 @@
 // under the License.
 //
 
-#ifndef YB_TOOLS_TOOL_ARGUMENTS_H
-#define YB_TOOLS_TOOL_ARGUMENTS_H
+#pragma once
 
+#include <string>
+#include <vector>
+
+#include <boost/algorithm/string.hpp>
 #include <boost/preprocessor/seq/for_each.hpp>
 #include <boost/program_options.hpp>
 
+#include "yb/util/flags.h"
 #include "yb/util/result.h"
 
 // Framework for creating command line tool with multiple subcommands.
@@ -102,6 +106,15 @@ void ShowCommands() {
   }
 }
 
+template <class Action>
+void ShowUsage() {
+  if (IsUsageMessageSet()) {
+    google::ShowUsageWithFlagsRestrict(google::ProgramInvocationName(), __FILE__);
+    std::cout << std::endl;
+  }
+  ShowCommands<Action>();
+}
+
 struct OptionsDescription {
   boost::program_options::positional_options_description positional;
   boost::program_options::options_description desc;
@@ -158,7 +171,7 @@ template <class Action>
 int ExecuteTool(int argc, char** argv) {
   std::string cmd = GetCommand(argc, argv);
   if (cmd.empty()) {
-    ShowCommands<Action>();
+    ShowUsage<Action>();
     return 0;
   }
 
@@ -194,7 +207,102 @@ int ExecuteTool(int argc, char** argv) {
   return 0;
 }
 
+template <class Action>
+void ParseAndCutGFlagsFromCommandLine(int* argc, char*** argv) {
+  std::set<std::string> commands;
+  for (auto action : List(static_cast<Action*>(nullptr))) {
+    commands.insert(OptionName(action));
+  }
+
+  int tail_argc = 0;
+  for (int i = 0; i < *argc; ++i) {
+    if ((*argv)[i][0] != '-' && commands.contains((*argv)[i])) {
+      tail_argc = *argc - i;
+      break;
+    }
+  }
+
+  *argc -= tail_argc;
+  ParseCommandLineFlags(argc, argv, /* remove_flag= */ true);
+  *argc += tail_argc;
+}
+
+// ------------------------------------------------------------------------------------------------
+// Help command by default
+// ------------------------------------------------------------------------------------------------
+const std::string kCommonHelpDescription = "Show help on command";
+
+struct CommonHelpArguments {
+  std::string command;
+};
+
+std::unique_ptr<OptionsDescription> CommonHelpOptions() {
+  auto result = std::make_unique<OptionsDescriptionImpl<CommonHelpArguments>>(
+      kCommonHelpDescription);
+  result->positional.add("command", 1);
+  result->hidden.add_options()
+      ("command", boost::program_options::value(&result->args.command));
+  return result;
+}
+
+template <class Action>
+Status CommonHelpExecute(const CommonHelpArguments& args) {
+  if (args.command.empty()) {
+    ShowUsage<Action>();
+  } else {
+    ShowHelp(VERIFY_RESULT(ActionByName<Action>(args.command)));
+  }
+  return Status::OK();
+}
+
+// ------------------------------------------------------------------------------------------------
+// Helpers for specifying valid ranges of options, and various custom types of options
+// ------------------------------------------------------------------------------------------------
+
+template<typename OptionType>
+auto OptionLowerBound(const char* option_name, OptionType lower_bound) ->
+    typename std::enable_if<std::is_integral<OptionType>::value,
+                            std::function<void(OptionType)>>::type {
+  return [option_name, lower_bound](OptionType value) {
+    if (value < lower_bound) {
+        throw boost::program_options::validation_error(
+            boost::program_options::validation_error::invalid_option_value,
+            option_name,
+            std::to_string(value));
+    }
+  };
+}
+
+template<typename EnumType>
+std::string ValidEnumValuesCommaSeparatedForHelp() {
+  std::vector<std::string> string_values;
+  bool all_start_with_k = true;  // Initialize to true to check if all start with 'k'
+
+  // Collect the enum values as strings and check the starting character
+  for (auto element : List(static_cast<EnumType*>(nullptr))) {
+    const auto s = ToString(element);
+    string_values.push_back(s);
+    if (s.size() <= 1 || s[0] != 'k') {
+      all_start_with_k = false;
+    }
+  }
+
+  std::vector<std::string> final_values;
+
+  if (all_start_with_k) {
+    // If all start with 'k', modify each string by stripping 'k'
+    final_values.reserve(string_values.size());
+    for (auto& s : string_values) {
+      final_values.push_back(s.substr(1));  // Move stripped string
+    }
+  } else {
+    // If not all start with 'k', move the entire vector
+    final_values = std::move(string_values);
+  }
+
+  // Use Boost to join the final values into a comma-separated string
+  return boost::algorithm::join(final_values, ", ");
+}
+
 } // namespace tools
 } // namespace yb
-
-#endif // YB_TOOLS_TOOL_ARGUMENTS_H

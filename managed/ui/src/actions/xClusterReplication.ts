@@ -2,65 +2,140 @@ import axios from 'axios';
 import moment from 'moment';
 
 import { ROOT_URL } from '../config';
-import { XClusterConfig, Metrics } from '../components/xcluster';
+import { Metrics } from '../components/xcluster';
 import { getCustomerEndpoint } from './common';
-import { MetricNames, XClusterConfigState } from '../components/xcluster/constants';
+import {
+  MetricName,
+  XClusterConfigState,
+  XClusterConfigType
+} from '../components/xcluster/constants';
+import { ApiTimeout } from '../redesign/helpers/api';
+import { MetricsQueryParams, YBPTask } from '../redesign/helpers/dtos';
+import {
+  XClusterConfig,
+  XClusterConfigNeedBootstrapPerTableResponse,
+  XClusterConfigNeedBootstrapPerTableSimpleResponse
+} from '../components/xcluster/dtos';
 
-export function getUniverseInfo(universeUUID: string) {
-  const cUUID = localStorage.getItem('customerId');
-  return axios.get(`${ROOT_URL}/customers/${cUUID}/universes/${universeUUID}`);
-}
+// TODO: Move this out of the /actions folder since these functions aren't Redux actions.
 
 export function fetchUniversesList() {
   const cUUID = localStorage.getItem('customerId');
   return axios.get(`${ROOT_URL}/customers/${cUUID}/universes`);
 }
 
-export function fetchTablesInUniverse(universeUUID: string) {
-  const customerId = localStorage.getItem('customerId');
-  return axios.get(`${ROOT_URL}/customers/${customerId}/universes/${universeUUID}/tables`);
-}
-
-export function createXClusterReplication(
-  targetUniverseUUID: string,
-  sourceUniverseUUID: string,
-  name: string,
-  tables: string[],
-  bootstrapParams: any = null
+export type UniverseTableFilters = {
+  includeParentTableInfo?: boolean;
+  xClusterSupportedOnly?: boolean;
+};
+export function fetchTablesInUniverse(
+  universeUUID: string | undefined,
+  filters?: UniverseTableFilters
 ) {
-  const customerId = localStorage.getItem('customerId');
-  return axios.post(`${ROOT_URL}/customers/${customerId}/xcluster_configs`, {
-    sourceUniverseUUID,
-    targetUniverseUUID,
-    name,
-    tables,
-    ...(bootstrapParams !== null && { bootstrapParams })
-  });
+  if (universeUUID) {
+    const customerId = localStorage.getItem('customerId');
+    return axios.get(`${ROOT_URL}/customers/${customerId}/universes/${universeUUID}/tables`, {
+      params: filters,
+      timeout: ApiTimeout.FETCH_TABLE_INFO
+    });
+  }
+  return Promise.reject('Querying universe tables failed: No universe UUID provided.');
 }
-export function isBootstrapRequired(sourceUniverseUUID: string, tableUUIDs: string[]) {
-  const customerId = localStorage.getItem('customerId');
-  return Promise.all(
-    tableUUIDs.map((tableUUID) => {
-      return axios
-        .post<{ [tableUUID: string]: boolean }>(
-          `${ROOT_URL}/customers/${customerId}/universes/${sourceUniverseUUID}/need_bootstrap`,
-          { tables: [tableUUID] }
-        )
-        .then((response) => response.data);
-    })
-  );
+export interface CreateXClusterConfigRequest {
+  name: string;
+  sourceUniverseUUID: string;
+  targetUniverseUUID: string;
+  configType: XClusterConfigType;
+  tables: string[];
+
+  bootstrapParams?: {
+    tables: string[];
+    allowBootstrap: boolean;
+    backupRequestParams: {
+      storageConfigUUID: string;
+    };
+  };
 }
 
-export function getXclusterConfig(uuid: string) {
+export interface EditXClusterConfigTablesRequest {
+  tables: string[];
+
+  autoIncludeIndexTables?: boolean;
+  bootstrapParams?: {
+    tables: string[];
+    allowBootstrap: boolean;
+    backupRequestParams: {
+      storageConfigUUID: string;
+    };
+  };
+}
+
+export function createXClusterConfig(createxClusterConfigRequest: CreateXClusterConfigRequest) {
   const customerId = localStorage.getItem('customerId');
   return axios
-    .get<XClusterConfig>(`${ROOT_URL}/customers/${customerId}/xcluster_configs/${uuid}`)
-    .then((resp) => resp.data);
+    .post<YBPTask>(
+      `${ROOT_URL}/customers/${customerId}/xcluster_configs`,
+      createxClusterConfigRequest
+    )
+    .then((response) => response.data);
 }
 
-export function editXClusterState(replication: XClusterConfig, state: XClusterConfigState) {
+export function restartXClusterConfig(
+  xClusterUUID: string,
+  tables: string[],
+  bootstrapParams: {
+    allowBootstrap: boolean;
+    backupRequestParams: {
+      storageConfigUUID: string;
+    };
+  }
+) {
   const customerId = localStorage.getItem('customerId');
-  return axios.put(`${ROOT_URL}/customers/${customerId}/xcluster_configs/${replication.uuid}`, {
+  return axios
+    .post<YBPTask>(`${ROOT_URL}/customers/${customerId}/xcluster_configs/${xClusterUUID}`, {
+      tables,
+      bootstrapParams
+    })
+    .then((response) => response.data);
+}
+
+export function isBootstrapRequired<TIncludeDetails extends boolean>(
+  sourceUniverseUuid: string,
+  targetUniverseUuid: string | null,
+  tableUuids: string[],
+  configType: XClusterConfigType,
+  includeDetails: TIncludeDetails
+) {
+  const customerId = localStorage.getItem('customerId');
+  return axios
+    .post<
+      TIncludeDetails extends true
+        ? XClusterConfigNeedBootstrapPerTableResponse
+        : XClusterConfigNeedBootstrapPerTableSimpleResponse
+    >(
+      `${ROOT_URL}/customers/${customerId}/universes/${sourceUniverseUuid}/need_bootstrap`,
+      {
+        tables: tableUuids,
+        targetUniverseUUID: targetUniverseUuid
+      },
+      { params: { configType, includeDetails } }
+    )
+    .then((response) => response.data);
+}
+
+export function fetchXClusterConfig(xClusterConfigUUID: string, syncWithDb?: boolean) {
+  const customerId = localStorage.getItem('customerId');
+  return axios
+    .get<XClusterConfig>(
+      `${ROOT_URL}/customers/${customerId}/xcluster_configs/${xClusterConfigUUID}`,
+      { params: { syncWithDB: syncWithDb } }
+    )
+    .then((response) => response.data);
+}
+
+export function editXClusterState(xClusterConfigUUID: string, state: XClusterConfigState) {
+  const customerId = localStorage.getItem('customerId');
+  return axios.put(`${ROOT_URL}/customers/${customerId}/xcluster_configs/${xClusterConfigUUID}`, {
     status: state
   });
 }
@@ -72,16 +147,50 @@ export function editXclusterName(replication: XClusterConfig) {
   });
 }
 
-export function editXClusterTables(replication: XClusterConfig) {
+export function editXClusterConfigTables(
+  xClusterUUID: string,
+  { tables, autoIncludeIndexTables, bootstrapParams }: EditXClusterConfigTablesRequest
+) {
   const customerId = localStorage.getItem('customerId');
-  return axios.put(`${ROOT_URL}/customers/${customerId}/xcluster_configs/${replication.uuid}`, {
-    tables: replication.tables
-  });
+  return axios
+    .put<YBPTask>(`${ROOT_URL}/customers/${customerId}/xcluster_configs/${xClusterUUID}`, {
+      tables,
+      autoIncludeIndexTables: autoIncludeIndexTables ?? false,
+      ...(bootstrapParams !== undefined && { bootstrapParams })
+    })
+    .then((response) => response.data);
 }
 
-export function deleteXclusterConfig(uuid: string) {
+export function deleteXclusterConfig(uuid: string, isForceDelete: boolean) {
   const customerId = localStorage.getItem('customerId');
-  return axios.delete(`${ROOT_URL}/customers/${customerId}/xcluster_configs/${uuid}`);
+  return axios.delete(
+    `${ROOT_URL}/customers/${customerId}/xcluster_configs/${uuid}?isForceDelete=${isForceDelete}`
+  );
+}
+
+/**
+ * Set the provided xCluster config to whatever is on the database.
+ *
+ * Context:
+ * Users can interact with an xCluster config using the YBA API or yb-admin.
+ * The purpose of the sync API is to reconcile changes to an xCluster config as a
+ * result of yb-admin commands.
+ */
+export function syncXClusterConfigWithDB(
+  xClusterConfigUuid: string,
+  replicationGroupName: string,
+  targetUniverseUUID: string
+) {
+  const customerUUID = localStorage.getItem('customerId');
+  return axios
+    .post<YBPTask>(
+      `${ROOT_URL}/customers/${customerUUID}/xcluster_configs/${xClusterConfigUuid}/sync`,
+      {
+        replicationGroupName: replicationGroupName,
+        targetUniverseUUID: targetUniverseUUID
+      }
+    )
+    .then((response) => response.data);
 }
 
 export function queryLagMetricsForUniverse(
@@ -92,18 +201,21 @@ export function queryLagMetricsForUniverse(
     start: moment().utc().subtract('1', 'hour').format('X'),
     end: moment().utc().format('X'),
     nodePrefix,
-    metrics: [MetricNames.TSERVER_ASYNC_REPLICATION_LAG_METRIC],
+    metrics: [MetricName.TSERVER_ASYNC_REPLICATION_LAG],
     xClusterConfigUuid: replicationUUID
   };
 
   const customerUUID = localStorage.getItem('customerId');
-  return axios.post<Metrics<'tserver_async_replication_lag_micros'>>(
-    `${ROOT_URL}/customers/${customerUUID}/metrics`,
-    DEFAULT_GRAPH_FILTER
-  );
+  return axios
+    .post<Metrics<'tserver_async_replication_lag_micros'>>(
+      `${ROOT_URL}/customers/${customerUUID}/metrics`,
+      DEFAULT_GRAPH_FILTER
+    )
+    .then((response) => response.data);
 }
 
 export function queryLagMetricsForTable(
+  streamId: string,
   tableId: string,
   nodePrefix: string | undefined,
   start = moment().utc().subtract('1', 'hour').format('X'),
@@ -112,15 +224,75 @@ export function queryLagMetricsForTable(
   const DEFAULT_GRAPH_FILTER = {
     start,
     end,
+    streamId,
     tableId,
     nodePrefix,
-    metrics: [MetricNames.TSERVER_ASYNC_REPLICATION_LAG_METRIC]
+    metrics: [MetricName.TSERVER_ASYNC_REPLICATION_LAG]
   };
   const customerUUID = localStorage.getItem('customerId');
-  return axios.post<Metrics<'tserver_async_replication_lag_micros'>>(
-    `${ROOT_URL}/customers/${customerUUID}/metrics`,
-    DEFAULT_GRAPH_FILTER
-  );
+  return axios
+    .post<Metrics<'tserver_async_replication_lag_micros'>>(
+      `${ROOT_URL}/customers/${customerUUID}/metrics`,
+      DEFAULT_GRAPH_FILTER
+    )
+    .then((response) => response.data);
+}
+
+interface TableReplicationLagQueryParams {
+  nodePrefix: string | undefined;
+  streamId: string;
+  tableId: string;
+
+  start?: string;
+  end?: string;
+}
+interface ConfigReplicationLagQueryParms {
+  nodePrefix: string | undefined;
+  xClusterConfigUuid: string;
+
+  start?: string;
+  end?: string;
+}
+export function fetchReplicationLag(
+  metricRequestParams: TableReplicationLagQueryParams | ConfigReplicationLagQueryParms
+) {
+  const metricsQueryParams: MetricsQueryParams = {
+    ...metricRequestParams,
+    start: metricRequestParams.start ?? moment().utc().subtract('1', 'hour').format('X'),
+    end: metricRequestParams.end ?? moment().utc().format('X'),
+    metrics: [MetricName.TSERVER_ASYNC_REPLICATION_LAG]
+  };
+  const customerUuid = localStorage.getItem('customerId');
+  return axios
+    .post<Metrics<'tserver_async_replication_lag_micros'>>(
+      `${ROOT_URL}/customers/${customerUuid}/metrics`,
+      metricsQueryParams
+    )
+    .then((response) => response.data);
+}
+
+interface ReplicationSafeTimeLagQueryParam {
+  targetUniverseNodePrefix: string | undefined;
+
+  start?: string;
+  end?: string;
+  namespaceId?: string;
+}
+export function fetchReplicationSafeTimeLag(metricRequestParams: ReplicationSafeTimeLagQueryParam) {
+  const metricsQueryParams: MetricsQueryParams = {
+    start: metricRequestParams.start ?? moment().utc().subtract('1', 'hour').format('X'),
+    end: metricRequestParams.end ?? moment().utc().format('X'),
+    nodePrefix: metricRequestParams.targetUniverseNodePrefix,
+    namespaceId: metricRequestParams.namespaceId,
+    metrics: [MetricName.CONSUMER_SAFE_TIME_LAG]
+  };
+  const customerUuid = localStorage.getItem('customerId');
+  return axios
+    .post<Metrics<'consumer_safe_time_lag'>>(
+      `${ROOT_URL}/customers/${customerUuid}/metrics`,
+      metricsQueryParams
+    )
+    .then((response) => response.data);
 }
 
 export function fetchUniverseDiskUsageMetric(
@@ -132,7 +304,7 @@ export function fetchUniverseDiskUsageMetric(
     start,
     end,
     nodePrefix,
-    metrics: [MetricNames.DISK_USAGE]
+    metrics: [MetricName.DISK_USAGE]
   };
   const customerUUID = localStorage.getItem('customerId');
   return axios
@@ -149,20 +321,27 @@ type callbackFunc = (err: boolean, data: any) => void;
 
 export function fetchTaskUntilItCompletes(
   taskUUID: string,
-  callback: callbackFunc,
+  onTaskCompletion: callbackFunc,
+  onTaskStarted?: () => void,
   interval = DEFAULT_TASK_REFETCH_INTERVAL
 ) {
+  let taskRunning = false;
   async function retryTask() {
     try {
       const resp = await fetchTaskProgress(taskUUID);
       const { percent, status } = resp.data;
+      if (percent > 0 && taskRunning === false) {
+        onTaskStarted && onTaskStarted();
+        taskRunning = true;
+      }
       if (status === 'Failed' || status === 'Failure') {
-        callback(true, resp);
-      } else if (percent === 100) {
-        callback(false, resp.data);
+        onTaskCompletion(true, resp);
+      } else if (percent === 100 && status === 'Success') {
+        onTaskCompletion(false, resp.data);
       } else {
         setTimeout(retryTask, interval);
       }
+      // eslint-disable-next-line no-empty
     } catch {}
   }
   return retryTask();

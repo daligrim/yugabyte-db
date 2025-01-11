@@ -12,7 +12,8 @@ package com.yugabyte.yw.commissioner.tasks;
 
 import com.yugabyte.yw.commissioner.BaseTaskDependencies;
 import com.yugabyte.yw.commissioner.UserTaskDetails.SubTaskGroupType;
-import com.yugabyte.yw.common.DnsManager;
+import com.yugabyte.yw.common.DnsManager.DnsCommandType;
+import com.yugabyte.yw.common.UniverseInProgressException;
 import com.yugabyte.yw.forms.UniverseDefinitionTaskParams;
 import com.yugabyte.yw.forms.UniverseDefinitionTaskParams.Cluster;
 import com.yugabyte.yw.models.Universe;
@@ -43,28 +44,34 @@ public class ReadOnlyClusterDelete extends UniverseDefinitionTaskBase {
   }
 
   @Override
-  public void run() {
-    log.info("Started {} task for uuid={}", getName(), params().universeUUID);
-
+  protected void validateUniverseState(Universe universe) {
     try {
-
-      // Set the 'updateInProgress' flag to prevent other updates from happening.
-      Universe universe = null;
-      if (params().isForceDelete) {
-        universe = forceLockUniverseForUpdate(-1 /* expectedUniverseVersion */);
-      } else {
-        universe = lockUniverseForUpdate(params().expectedUniverseVersion);
+      super.validateUniverseState(universe);
+    } catch (UniverseInProgressException e) {
+      if (!params().isForceDelete) {
+        throw e;
       }
+    }
+  }
 
+  @Override
+  public void run() {
+    log.info("Started {} task for uuid={}", getName(), params().getUniverseUUID());
+
+    Universe universe =
+        lockAndFreezeUniverseForUpdate(params().expectedUniverseVersion, null /* Txn callback */);
+    try {
       List<Cluster> roClusters = universe.getUniverseDetails().getReadOnlyClusters();
       if (Collections.isEmpty(roClusters)) {
         String msg =
             "Unable to delete RO cluster from universe \""
-                + universe.name
+                + universe.getName()
                 + "\" as it doesn't have any RO clusters.";
         log.error(msg);
         throw new RuntimeException(msg);
       }
+
+      addBasicPrecheckTasks();
 
       preTaskActions();
 
@@ -79,7 +86,8 @@ public class ReadOnlyClusterDelete extends UniverseDefinitionTaskBase {
               nodesToBeRemoved,
               params().isForceDelete,
               true /* deleteNodeFromDB */,
-              true /* deleteRootVolumes */)
+              true /* deleteRootVolumes */,
+              true /* skipDestroyPrecheck */)
           .setSubTaskGroupType(SubTaskGroupType.RemovingUnusedServers);
 
       // Remove the cluster entry from the universe db entry.
@@ -90,9 +98,8 @@ public class ReadOnlyClusterDelete extends UniverseDefinitionTaskBase {
       createPlacementInfoTask(null /* blacklistNodes */)
           .setSubTaskGroupType(SubTaskGroupType.ConfigureUniverse);
 
-      // Remove the DNS entry for this cluster.
-      createDnsManipulationTask(
-              DnsManager.DnsCommandType.Delete, params().isForceDelete, cluster.userIntent)
+      // Remove read replica nodes from the DNS entry.
+      createDnsManipulationTask(DnsCommandType.Edit, false, universe)
           .setSubTaskGroupType(SubTaskGroupType.RemovingUnusedServers);
 
       // Update the swamper target file.

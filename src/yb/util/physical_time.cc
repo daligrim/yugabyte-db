@@ -21,22 +21,21 @@
 
 #include "yb/util/atomic.h"
 #include "yb/util/errno.h"
-#include "yb/util/flag_tags.h"
+#include "yb/util/flags.h"
 #include "yb/util/format.h"
 #include "yb/util/logging.h"
 #include "yb/util/result.h"
 #include "yb/util/status_format.h"
 
-DEFINE_uint64(max_clock_sync_error_usec, 10 * 1000 * 1000,
-              "Maximum allowed clock synchronization error as reported by NTP "
-              "before the server will abort.");
-DEFINE_bool(disable_clock_sync_error, true,
+DEFINE_RUNTIME_uint64(max_clock_sync_error_usec, 10 * 1000 * 1000,
+    "Maximum allowed clock synchronization error as reported by NTP "
+    "before the server will abort.");
+TAG_FLAG(max_clock_sync_error_usec, advanced);
+DEFINE_UNKNOWN_bool(disable_clock_sync_error, true,
             "Whether or not we should keep running if we detect a clock synchronization issue.");
 TAG_FLAG(disable_clock_sync_error, advanced);
-TAG_FLAG(max_clock_sync_error_usec, advanced);
-TAG_FLAG(max_clock_sync_error_usec, runtime);
 
-DEFINE_uint64(max_clock_skew_usec, 500 * 1000,
+DEFINE_UNKNOWN_uint64(max_clock_skew_usec, 500 * 1000,
               "Transaction read clock skew in usec. "
               "This is the maximum allowed time delta between servers of a single cluster.");
 
@@ -120,6 +119,11 @@ class AdjTimeClockImpl : public PhysicalClock {
 
 #endif
 
+PhysicalTime kFailedTime = {
+  .time_point = std::numeric_limits<MicrosTime>::max(),
+  .max_error = std::numeric_limits<MicrosTime>::max(),
+};
+
 } // namespace
 
 std::string PhysicalTime::ToString() const {
@@ -139,11 +143,26 @@ const PhysicalClockPtr& AdjTimeClock() {
 #endif
 
 Result<PhysicalTime> MockClock::Now() {
-  return CheckClockSyncError(value_.load(boost::memory_order_acquire));
+  auto value = value_.load(std::memory_order_acquire);
+  if (value.time_point == kFailedTime.time_point) {
+    std::lock_guard lock(status_mutex_);
+    DCHECK(!mock_status_.ok());
+    return mock_status_;
+  }
+  return CheckClockSyncError(value);
 }
 
 void MockClock::Set(const PhysicalTime& value) {
-  value_.store(value, boost::memory_order_release);
+  value_.store(value, std::memory_order_release);
+}
+
+void MockClock::Set(Status status) {
+  DCHECK(!status.ok());
+  {
+    std::lock_guard lock(status_mutex_);
+    mock_status_ = std::move(status);
+  }
+  value_.store(kFailedTime, std::memory_order_release);
 }
 
 PhysicalClockPtr MockClock::AsClock() {

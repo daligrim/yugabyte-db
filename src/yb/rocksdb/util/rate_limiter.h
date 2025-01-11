@@ -31,12 +31,17 @@
 #include "yb/rocksdb/env.h"
 #include "yb/rocksdb/rate_limiter.h"
 
+#include "yb/util/monotime.h"
+
+
 namespace rocksdb {
 
 class GenericRateLimiter : public RateLimiter {
  public:
-  GenericRateLimiter(int64_t refill_bytes,
-      int64_t refill_period_us, int32_t fairness);
+  GenericRateLimiter(
+      int64_t refill_bytes,
+      int64_t refill_period_us,
+      int32_t fairness);
 
   virtual ~GenericRateLimiter();
 
@@ -44,9 +49,10 @@ class GenericRateLimiter : public RateLimiter {
   void SetBytesPerSecond(int64_t bytes_per_second) override;
 
   // Request for token to write bytes. If this request can not be satisfied,
-  // the call is blocked. Caller is responsible to make sure
-  // bytes <= GetSingleBurstBytes()
+  // the call is blocked. If the request is bigger than GetSingleBurstBytes() then the call is
+  // broken up into multiple requests of the same priority.
   void Request(const int64_t bytes, const yb::IOPriority pri) override;
+  void RequestInternal(const int64_t bytes, const yb::IOPriority pri);
 
   int64_t GetSingleBurstBytes() const override {
     return refill_bytes_per_period_.load(std::memory_order_relaxed);
@@ -56,11 +62,19 @@ class GenericRateLimiter : public RateLimiter {
 
   int64_t GetTotalRequests(const yb::IOPriority pri = yb::IOPriority::kTotal) const override;
 
+  // Enable periodic logging when the description is set. Set to the empty string to disable
+  // logging.
+  void EnableLoggingWithDescription(std::string description_for_logging) override;
+
  private:
   void Refill();
   int64_t CalculateRefillBytesPerPeriod(int64_t rate_bytes_per_sec) {
     return rate_bytes_per_sec * refill_period_us_ / 1000000;
   }
+
+  std::string ToStringUnlocked(yb::MonoDelta time_since_refresh) const;
+
+  double GetPerSecondAverageUnlocked(const int64_t* array, yb::MonoDelta time_since_refresh) const;
 
   // This mutex guard all internal states
   mutable port::Mutex request_mutex_;
@@ -74,8 +88,13 @@ class GenericRateLimiter : public RateLimiter {
   port::CondVar exit_cv_;
   int32_t requests_to_wait_;
 
+  // All state is guarded by request_mutex_.
   int64_t total_requests_[yb::kElementsInIOPriority];
   int64_t total_bytes_through_[yb::kElementsInIOPriority];
+  int64_t total_bytes_requested_per_second_[yb::kElementsInIOPriority];
+  int64_t total_requests_per_second_[yb::kElementsInIOPriority];
+  int64_t unthrottled_requests_per_second_[yb::kElementsInIOPriority];
+  int64_t throttled_requests_per_second_[yb::kElementsInIOPriority];
   int64_t available_bytes_;
   int64_t next_refill_us_;
 
@@ -85,6 +104,10 @@ class GenericRateLimiter : public RateLimiter {
   struct Req;
   Req* leader_;
   std::deque<Req*> queue_[yb::kElementsInIOPriority];
+
+  yb::MonoTime last_refresh_ = yb::MonoTime::Now();
+
+  std::string description_for_logging_;
 };
 
 }  // namespace rocksdb

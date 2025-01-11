@@ -11,8 +11,7 @@
 // under the License.
 //
 
-#ifndef YB_TSERVER_READ_QUERY_H
-#define YB_TSERVER_READ_QUERY_H
+#pragma once
 
 #include "yb/common/common_net.pb.h"
 #include "yb/common/read_hybrid_time.h"
@@ -39,8 +38,9 @@ namespace tserver {
 class ReadTabletProvider {
  public:
   virtual Result<std::shared_ptr<tablet::AbstractTablet>> GetTabletForRead(
-    const TabletId& tablet_id, tablet::TabletPeerPtr tablet_peer,
-    YBConsistencyLevel consistency_level, AllowSplitTablet allow_split_tablet) = 0;
+      const TabletId& tablet_id, tablet::TabletPeerPtr tablet_peer,
+      YBConsistencyLevel consistency_level, AllowSplitTablet allow_split_tablet,
+      ReadResponsePB* resp) = 0;
 
   virtual ~ReadTabletProvider() = default;
 };
@@ -51,5 +51,3 @@ void PerformRead(
 
 }  // namespace tserver
 }  // namespace yb
-
-#endif  // YB_TSERVER_READ_QUERY_H

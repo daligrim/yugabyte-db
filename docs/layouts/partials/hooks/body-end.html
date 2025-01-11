@@ -1,87 +1,95 @@
 <script src="/js/site.js"></script>
-
-{{ $layoutType := .Type }}
-{{ with .Site.Params.algolia }}
-  {{ if eq $layoutType "searchpage" }}
-    <script src="https://cdn.jsdelivr.net/algoliasearch/3/algoliasearch.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/docsearch.js@2/dist/cdn/docsearch.min.js"></script>
-    <script>
-      $(document).ready(function() {
-        let queryStr = document.URL.split('?')[1];
-        let urlParams = new URLSearchParams(window.location.search)
-        if (urlParams.has('q')) {
-          // Get previous page version
-          let prevUrl = document.referrer;
-          const versionRegex = /https:\/\/docs\.yugabyte\.com\/(v\d+\.\d+|preview)\//i;
-          const m = versionRegex.exec(prevUrl);
-          // If no match or version not found or no previous page,
-          // use 'preview' to filter version
-          let searchVersion = 'preview';
-          if (m && m[1] && prevUrl) {
-            searchVersion = m[1];
-          }
-
-          let client = algoliasearch('{{ .appid }}', '{{ .apikey }}');
-          let index = client.initIndex('{{ .index }}');
-          index.search({
-            query: urlParams.get('q'),
-            // filters: `version:${searchVersion}`,
-          }, function(err, content) {
-            let formattedHits = docsearch.formatHits(content.hits);
-            let previousResult = null;
-            let collatedResults = [];
-            formattedHits.forEach(hit => {
-              if (!hit.category || !hit.title) return;
-              if (!previousResult || previousResult.category !== hit.category) {
-                previousResult = {
-                  category: hit.category,
-                  hits: [],
-                  url: hit.url
-                };
-                collatedResults.push(previousResult);
-              }
-              hit.text = hit.title
-                .replace(hit.category, '')
-                .replace('<span class="aa-suggestion-title-separator" aria-hidden="true"> › </span>', '');
-              if (hit.text) {
-                const previousHit = previousResult.hits[previousResult.hits.length - 1];
-                if (!previousHit || previousHit.text !== hit.text) {
-                  previousResult.hits.push(hit);
-                }
-              }
-            });
-            $('#search-results').append(collatedResults.map(result => (
-              '<div class="search-result">\
-                <div class="search-title">\
-                  <a href="' + result.url.replace(/^(?:\/\/|[^/]+)*\//, '/') + '">' + result.category + '</a>\
-                </div>\
-                <div class="search-text">' +
-                result.hits.map(hit => (
-                  '<p>' + hit.text + ' <a href="' + hit.url.replace(/^(?:\/\/|[^/]+)*\//, '/') + '">[more&hellip;]</a></p>'
-                )).join('') +
-              '</div></div>'
-            )).join(''));
-            $('#side-navigation').trigger('sticky_kit:recalc');
-          });
-        }
+<script src="/js/trackUtm.js"></script>
+<!-- Add target/rel on external links -->
+<script type="module">
+import detectExternalLink from 'https://cdn.jsdelivr.net/npm/detect-external-link@2/+esm';
+if (typeof detectExternalLink === 'function') {
+  const selectLinks = document.querySelectorAll('.td-content a');
+  selectLinks.forEach(element => {
+    const linkHref = element.getAttribute('href');
+    if (linkHref !== null) {
+      const isExternal = detectExternalLink(linkHref, {
+        'hosts': [
+          'https://docs.yugabyte.com/'
+        ]
       });
-    </script>
-  {{ else }}
-    <script src="https://cdn.jsdelivr.net/npm/docsearch.js@2/dist/cdn/docsearch.min.js"></script>
-    <script>
-      docsearch({
-        apiKey: '{{ .apikey }}',
-        indexName: '{{ .index }}',
-        appId: '{{ .appid }}',
-        // Replace inputSelector with a CSS selector
-        // matching your search input
-        inputSelector: '.td-search-input',
-        transformData: function (item) {
-          for (const property in item) {
-            item[property].url = item[property].url.replace(/^(?:\/\/|[^/]+)*\//, '/');
+      if (isExternal) {
+        if (!element.target) {
+          element.target = '_blank';
+          if (!element.rel) {
+            element.rel = 'noopener';
           }
         }
-      });
-    </script>
-  {{ end }}
-{{ end }}
+      }
+    }
+  });
+}
+</script>
+
+{{- if .Site.Params.search.algolia_docsearch -}}
+  <script src="/js/search.js" id="algolia-search-script"{{- if .Site.Params.search.algolia_sequence_expressions }} data-sequence-expressions="true"{{- end }}></script>
+{{- end -}}
+
+{{- if .Site.Params.kapa_ai -}}
+{{- $questions := `
+  How do I create an index?,
+  Follower Reads vs Read Replicas?,
+  What are transaction isolation levels?,
+  What does Voyager do?
+` -}}
+{{- $questions := replaceRE " +" " " (trim (replaceRE "\n\t\r" " " $questions) " \n\t\r") -}}
+<script defer src="https://widget.kapa.ai/kapa-widget.bundle.js"
+    data-button-bg-color="#FFFFFF"
+    data-button-border-radius="8px"
+    data-button-border="1px solid #D7DEE4"
+    data-button-box-shadow="0px 2px 40px 0px rgba(37, 50, 61, 0.15)"
+    data-button-height="94px"
+    data-button-text-color="#4E5F6D"
+    data-button-text-font-size="21px"
+    data-button-text-shadow="none"
+    data-button-width="97px"
+    data-font-family="Inter,-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif,Apple Color Emoji,Segoe UI Emoji;"
+    data-modal-disclaimer="This is a custom LLM for Yugabyte with access to developer docs (docs.yugabyte.com), and all GitHub issues from the past year (github.com/yugabyte/yugabyte-db/issues). Please note that answers are generated by AI and may not be fully accurate."
+    data-modal-example-questions="{{- $questions -}}"
+    data-project-color="#5D5FeF"
+    data-project-logo="/icons/yugabyte.svg"
+    data-project-name="Yugabyte"
+    data-search-mode-enabled="true"
+    data-search-result-primary-text-color="#0B1117"
+    data-switch-color="#4E5F6D"
+    data-website-id="7669d105-58f8-41b7-b3f1-4799ac938657"
+    data-search-include-source-names='["Documentation"]'
+    data-user-analytics-fingerprint-enabled="true"
+></script>
+<script>
+  (function() {
+    window.addEventListener('load', function () {
+      const askAiTopSpan = document.querySelector('.ask-ai-top > span');
+      const kapaWidgetButton = document.querySelector('#kapa-widget-container > button');
+      if (askAiTopSpan && kapaWidgetButton) {
+        askAiTopSpan.addEventListener('click', function () {
+          kapaWidgetButton.click();
+        });
+      }
+
+      let clearbitAnonymousId = window.yugabyteGetCookie('cb_anonymous_id');
+      if (clearbitAnonymousId && clearbitAnonymousId !== 'null') {
+        clearbitAnonymousId = clearbitAnonymousId.replace(/%22/g, '').replace(/"/g, '');
+        const kapaUser = {
+          uniqueClientId: clearbitAnonymousId,
+        };
+
+        let clearbitUserId = window.yugabyteGetCookie('cb_user_id');
+        if (clearbitUserId && clearbitUserId !== 'null') {
+          clearbitUserId = clearbitUserId.replace(/%22/g, '').replace(/"/g, '');
+          kapaUser.email = clearbitUserId;
+        }
+
+        window.kapaSettings = {
+          user: kapaUser,
+        };
+      }
+    });
+  })();
+</script>
+{{- end -}}

@@ -12,6 +12,8 @@
 //
 package org.yb.cql;
 
+import java.util.HashMap;
+
 import com.datastax.driver.core.ResultSet;
 import com.datastax.driver.core.Row;
 
@@ -22,6 +24,8 @@ import static org.yb.AssertionWrappers.assertNull;
 import static org.yb.AssertionWrappers.assertTrue;
 
 import java.util.Set;
+import java.util.Map;
+import java.util.HashMap;
 
 import org.yb.YBTestRunner;
 import org.junit.runner.RunWith;
@@ -171,8 +175,7 @@ public class TestCreateTable extends BaseCQLTest {
                     "WITH transactions = { 'enabled' : true };");
     session.execute("CREATE INDEX ON test_create_keyword_reg(" + keyword + ");");
 
-    // Wait for the table alterations to complete.
-    Thread.sleep(5000);
+    waitForReadPermsOnAllIndexes("test_create_keyword_reg");
 
     session.execute("SELECT c1, " + keyword + ", c2 FROM test_create_keyword_reg;");
     session.execute("UPDATE test_create_keyword_reg SET " + keyword + " = 3 WHERE c1 = 2;");
@@ -188,6 +191,7 @@ public class TestCreateTable extends BaseCQLTest {
 
   @Test
   public void testCreateTableWithColumnNamedGroup() throws Exception {
+    // Run test with error suppressed as GROUP BY is not supported.
     LOG.info("Start test: " + getCurrentTestMethodName());
     testCreateTableWithColumnNamedKeyword("group");
 
@@ -208,6 +212,8 @@ public class TestCreateTable extends BaseCQLTest {
 
   @Test
   public void testCreateTableNumTablets() throws Exception {
+    restartClusterWithTSFlags(new HashMap<String, String>());
+    
     // Test default number of tablets.
     session.execute("CREATE TABLE test_num_tablets_1 (id int PRIMARY KEY);");
     Set<String> ids =
@@ -230,8 +236,7 @@ public class TestCreateTable extends BaseCQLTest {
     // Test index table with tablets table property set.
     session.execute("CREATE INDEX on test_num_tablets_3 (id) WITH tablets = 5;");
 
-    // Wait for the table alterations to complete.
-    Thread.sleep(5000);
+    waitForReadPermsOnAllIndexes("test_num_tablets_3");
 
     ids =
       miniCluster.getClient().getTabletUUIDs(DEFAULT_TEST_KEYSPACE, "test_num_tablets_3_id_idx");

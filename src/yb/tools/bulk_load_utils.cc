@@ -16,26 +16,27 @@
 #include <boost/algorithm/string.hpp>
 
 #include "yb/util/date_time.h"
+#include "yb/util/flags.h"
 #include "yb/util/stol_utils.h"
 
-DEFINE_string(csv_delimiter, ",", "The character used to separate different columns.");
-DEFINE_string(
-    csv_quote_character, "\"", "The character used to quote a column that may have a delimiter.");
-DEFINE_string(skipped_cols, "", "Comma separated list of 0-indexed columns to skip");
+using std::string;
+
+DEFINE_NON_RUNTIME_string(csv_delimiter, ",", "The character used to separate different columns.");
+DEFINE_NON_RUNTIME_string(csv_quote_character, "\"",
+    "The character used to quote a column that may have a delimiter.");
+DEFINE_NON_RUNTIME_string(skipped_cols, "", "Comma separated list of 0-indexed columns to skip");
 
 namespace {
-static bool CSVSeparatorValidator(const char* flagname, const string& value) {
+static bool CSVSeparatorValidator(const char* flag_name, const string& value) {
   if (value.size() != 1) {
-    LOG(INFO) << "Expect " << flagname << " to be 1 character long";
+    LOG_FLAG_VALIDATION_ERROR(flag_name, value) << "Must be 1 character long";
     return false;
   }
   return true;
 }
 }
 
-__attribute__((unused))
 DEFINE_validator(csv_delimiter, &CSVSeparatorValidator);
-__attribute__((unused))
 DEFINE_validator(csv_quote_character, &CSVSeparatorValidator);
 
 namespace yb {

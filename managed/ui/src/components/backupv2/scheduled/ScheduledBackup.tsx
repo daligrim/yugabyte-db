@@ -7,9 +7,15 @@
  * http://github.com/YugaByte/yugabyte-db/blob/master/licenses/POLYFORM-FREE-TRIAL-LICENSE-1.0.0.txt
  */
 
-import React from 'react';
 import { ScheduledBackupList } from './ScheduledBackupList';
+import { AllowedTasks } from '../../../redesign/helpers/dtos';
 
-export const ScheduledBackup = ({ universeUUID }: { universeUUID: string }) => {
-  return <ScheduledBackupList universeUUID={universeUUID} />;
+export const ScheduledBackup = ({
+  universeUUID,
+  allowedTasks
+}: {
+  universeUUID: string;
+  allowedTasks: AllowedTasks;
+}) => {
+  return <ScheduledBackupList universeUUID={universeUUID} allowedTasks={allowedTasks} />;
 };

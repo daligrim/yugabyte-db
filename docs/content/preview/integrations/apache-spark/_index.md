@@ -4,39 +4,27 @@ headerTitle: Apache Spark
 linkTitle: Apache Spark
 description: Use Apache Spark with YugabyteDB
 headcontent: Use Apache Spark with YugabyteDB
-image: /images/develop/ecosystem-integrations/apache-spark.png
+image: /images/section_icons/develop/ecosystem/apache-spark.png
 menu:
-  preview:
+  preview_integrations:
     identifier: apache-spark
-    parent: integrations
+    parent: integrations-other
     weight: 571
 type: indexpage
 ---
 
-<div class="row">
+{{<index/block>}}
 
-  <div class="col-12 col-md-6 col-lg-12 col-xl-6">
-    <a class="section-link icon-offset" href="java-ysql/">
-      <div class="head">
-        <img class="icon" src="/images/section_icons/api/ysql.png" aria-hidden="true" />
-        <div class="title">YSQL</div>
-      </div>
-      <div class="body">
-          Use Apache Spark with YugabyteDB to add data and run YSQL queries.
-      </div>
-    </a>
-  </div>
+  {{<index/item
+    title="YSQL"
+    body="Use Apache Spark with YugabyteDB to add data and run YSQL queries."
+    href="java-ysql/"
+    icon="/images/section_icons/api/ysql.png">}}
 
-  <div class="col-12 col-md-6 col-lg-12 col-xl-6">
-    <a class="section-link icon-offset" href="java-ycql/">
-      <div class="head">
-        <img class="icon" src="/images/section_icons/api/ycql.png" aria-hidden="true" />
-        <div class="title">YCQL</div>
-      </div>
-      <div class="body">
-          Use Apache Spark with YugabyteDB to add data and run YCQL queries.
-      </div>
-    </a>
-  </div>
+  {{<index/item
+    title="YCQL"
+    body="Use Apache Spark with YugabyteDB to add data and run YCQL queries."
+    href="java-ycql/"
+    icon="/images/section_icons/api/ycql.png">}}
 
-</div>
+{{</index/block>}}

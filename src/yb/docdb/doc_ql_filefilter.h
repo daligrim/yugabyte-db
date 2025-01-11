@@ -13,33 +13,22 @@
 
 // Utilities for encoding and decoding key/value pairs that are used in the DocDB code.
 
-#ifndef YB_DOCDB_DOC_QL_FILEFILTER_H
-#define YB_DOCDB_DOC_QL_FILEFILTER_H
+#pragma once
 
-#include "yb/docdb/docdb_fwd.h"
-#include "yb/rocksdb/db/compaction.h"
-#include "yb/util/status_fwd.h"
+#include "yb/common/hybrid_time.h"
+#include "yb/common/transaction.h"
 
-namespace yb {
-namespace docdb {
+#include "yb/qlexpr/qlexpr_fwd.h"
 
-class QLRangeBasedFileFilter : public rocksdb::ReadFileFilter {
- public:
-  QLRangeBasedFileFilter(const std::vector<KeyEntryValue>& lower_bounds,
-                         const std::vector<bool>& lower_bounds_inclusive_,
-                         const std::vector<KeyEntryValue>& upper_bounds,
-                         const std::vector<bool>& upper_bounds_inclusive_);
+#include "yb/rocksdb/rocksdb_fwd.h"
 
-  bool Filter(const rocksdb::FdWithBoundaries& file) const override;
+namespace yb::docdb {
 
- private:
-  std::vector<KeyBytes> lower_bounds_;
-  std::vector<bool> lower_bounds_inclusive_;
-  std::vector<KeyBytes> upper_bounds_;
-  std::vector<bool> upper_bounds_inclusive_;
-};
+std::shared_ptr<rocksdb::ReadFileFilter> CreateFileFilter(const qlexpr::YQLScanSpec& scan_spec);
+std::shared_ptr<rocksdb::ReadFileFilter> CreateHybridTimeFileFilter(HybridTime min_hybrid_Time);
+// Create a file filter for intentsdb using the given min running hybrid time. Filtering is done
+// based on intent hybrid time stored in the intent key, not commit time of the transaction.
+std::shared_ptr<rocksdb::ReadFileFilter> CreateIntentHybridTimeFileFilter(
+    HybridTime min_running_ht);
 
-}  // namespace docdb
-}  // namespace yb
-
-#endif  // YB_DOCDB_DOC_QL_FILEFILTER_H
+}  // namespace yb::docdb

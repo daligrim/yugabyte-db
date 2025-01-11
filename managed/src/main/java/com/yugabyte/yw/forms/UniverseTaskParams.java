@@ -2,19 +2,25 @@
 
 package com.yugabyte.yw.forms;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.yugabyte.yw.models.Users;
 import com.yugabyte.yw.models.XClusterConfig;
+import com.yugabyte.yw.models.common.YbaApi;
 import com.yugabyte.yw.models.helpers.DeviceInfo;
 import com.yugabyte.yw.models.helpers.NodeDetails;
+import com.yugabyte.yw.models.helpers.TaskType;
 import io.swagger.annotations.ApiModel;
 import io.swagger.annotations.ApiModelProperty;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
+import lombok.Getter;
+import lombok.Setter;
 
 public class UniverseTaskParams extends AbstractTaskParams {
   public static final int DEFAULT_SLEEP_AFTER_RESTART_MS = 180000;
@@ -66,8 +72,14 @@ public class UniverseTaskParams extends AbstractTaskParams {
     @ApiModelProperty(value = "YSQL RPC port")
     public int ysqlServerRpcPort;
 
+    @ApiModelProperty(value = "Internal YSQL RPC port")
+    public int internalYsqlServerRpcPort;
+
     @ApiModelProperty(value = "Node exporter port")
     public int nodeExporterPort;
+
+    @ApiModelProperty(value = "Otel Collector metrics port")
+    public int otelCollectorMetricsPort;
 
     public static CommunicationPorts exportToCommunicationPorts(NodeDetails node) {
       return exportToCommunicationPorts(new CommunicationPorts(), node);
@@ -91,7 +103,9 @@ public class UniverseTaskParams extends AbstractTaskParams {
       portsObj.yqlServerRpcPort = node.yqlServerRpcPort;
       portsObj.ysqlServerHttpPort = node.ysqlServerHttpPort;
       portsObj.ysqlServerRpcPort = node.ysqlServerRpcPort;
+      portsObj.internalYsqlServerRpcPort = node.internalYsqlServerRpcPort;
       portsObj.nodeExporterPort = node.nodeExporterPort;
+      portsObj.otelCollectorMetricsPort = node.otelCollectorMetricsPort;
 
       return portsObj;
     }
@@ -109,7 +123,93 @@ public class UniverseTaskParams extends AbstractTaskParams {
       node.yqlServerRpcPort = ports.yqlServerRpcPort;
       node.ysqlServerHttpPort = ports.ysqlServerHttpPort;
       node.ysqlServerRpcPort = ports.ysqlServerRpcPort;
+      node.internalYsqlServerRpcPort = ports.internalYsqlServerRpcPort;
       node.nodeExporterPort = ports.nodeExporterPort;
+      node.otelCollectorMetricsPort = ports.otelCollectorMetricsPort;
+    }
+
+    public static void mergeCommunicationPorts(
+        CommunicationPorts ports, ConfigureDBApiParams params) {
+      ports.ysqlServerHttpPort = params.communicationPorts.ysqlServerHttpPort;
+      ports.ysqlServerRpcPort = params.communicationPorts.ysqlServerRpcPort;
+      ports.internalYsqlServerRpcPort = params.communicationPorts.internalYsqlServerRpcPort;
+      ports.yqlServerHttpPort = params.communicationPorts.yqlServerHttpPort;
+      ports.yqlServerRpcPort = params.communicationPorts.yqlServerRpcPort;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+      if (this == o) return true;
+      if (o == null || getClass() != o.getClass()) return false;
+      CommunicationPorts ports = (CommunicationPorts) o;
+      return masterHttpPort == ports.masterHttpPort
+          && masterRpcPort == ports.masterRpcPort
+          && tserverHttpPort == ports.tserverHttpPort
+          && tserverRpcPort == ports.tserverRpcPort
+          && ybControllerHttpPort == ports.ybControllerHttpPort
+          && ybControllerrRpcPort == ports.ybControllerrRpcPort
+          && redisServerHttpPort == ports.redisServerHttpPort
+          && redisServerRpcPort == ports.redisServerRpcPort
+          && yqlServerHttpPort == ports.yqlServerHttpPort
+          && yqlServerRpcPort == ports.yqlServerRpcPort
+          && ysqlServerHttpPort == ports.ysqlServerHttpPort
+          && ysqlServerRpcPort == ports.ysqlServerRpcPort
+          && internalYsqlServerRpcPort == ports.internalYsqlServerRpcPort
+          && nodeExporterPort == ports.nodeExporterPort
+          && otelCollectorMetricsPort == ports.otelCollectorMetricsPort;
+    }
+
+    @Override
+    public int hashCode() {
+      return Objects.hash(
+          masterHttpPort,
+          masterRpcPort,
+          tserverHttpPort,
+          tserverRpcPort,
+          ybControllerHttpPort,
+          ybControllerrRpcPort,
+          redisServerHttpPort,
+          redisServerRpcPort,
+          yqlServerHttpPort,
+          yqlServerRpcPort,
+          ysqlServerHttpPort,
+          ysqlServerRpcPort,
+          nodeExporterPort,
+          otelCollectorMetricsPort);
+    }
+
+    @Override
+    public String toString() {
+      return "CommunicationPorts{"
+          + "masterHttpPort="
+          + masterHttpPort
+          + ", masterRpcPort="
+          + masterRpcPort
+          + ", tserverHttpPort="
+          + tserverHttpPort
+          + ", tserverRpcPort="
+          + tserverRpcPort
+          + ", ybControllerHttpPort="
+          + ybControllerHttpPort
+          + ", ybControllerrRpcPort="
+          + ybControllerrRpcPort
+          + ", redisServerHttpPort="
+          + redisServerHttpPort
+          + ", redisServerRpcPort="
+          + redisServerRpcPort
+          + ", yqlServerHttpPort="
+          + yqlServerHttpPort
+          + ", yqlServerRpcPort="
+          + yqlServerRpcPort
+          + ", ysqlServerHttpPort="
+          + ysqlServerHttpPort
+          + ", ysqlServerRpcPort="
+          + ysqlServerRpcPort
+          + ", nodeExporterPort="
+          + nodeExporterPort
+          + ", otelCollectorMetricsPort="
+          + otelCollectorMetricsPort
+          + '}';
     }
   }
 
@@ -129,12 +229,11 @@ public class UniverseTaskParams extends AbstractTaskParams {
   @ApiModelProperty(value = "The target universe's xcluster replication relationships")
   @JsonProperty(value = "targetXClusterConfigs", access = JsonProperty.Access.READ_ONLY)
   public List<UUID> getTargetXClusterConfigs() {
-    if (universeUUID == null) {
+    if (getUniverseUUID() == null) {
       return new ArrayList<>();
     }
-    return XClusterConfig.getByTargetUniverseUUID(universeUUID)
-        .stream()
-        .map(xClusterConfig -> xClusterConfig.uuid)
+    return XClusterConfig.getByTargetUniverseUUID(getUniverseUUID()).stream()
+        .map(xClusterConfig -> xClusterConfig.getUuid())
         .collect(Collectors.toList());
   }
 
@@ -147,12 +246,11 @@ public class UniverseTaskParams extends AbstractTaskParams {
   @ApiModelProperty(value = "The source universe's xcluster replication relationships")
   @JsonProperty(value = "sourceXClusterConfigs", access = JsonProperty.Access.READ_ONLY)
   public List<UUID> getSourceXClusterConfigs() {
-    if (universeUUID == null) {
+    if (getUniverseUUID() == null) {
       return Collections.emptyList();
     }
-    return XClusterConfig.getBySourceUniverseUUID(universeUUID)
-        .stream()
-        .map(xClusterConfig -> xClusterConfig.uuid)
+    return XClusterConfig.getBySourceUniverseUUID(getUniverseUUID()).stream()
+        .map(xClusterConfig -> xClusterConfig.getUuid())
         .collect(Collectors.toList());
   }
 
@@ -166,19 +264,21 @@ public class UniverseTaskParams extends AbstractTaskParams {
 
   // The universe against which this operation is being executed.
   @ApiModelProperty(value = "Associated universe UUID")
-  public UUID universeUUID;
+  @Getter
+  @Setter
+  private UUID universeUUID;
 
   // Previous version used for task info.
   @ApiModelProperty(value = "Previous software version")
   public String ybPrevSoftwareVersion;
 
-  @ApiModelProperty public boolean enableYbc = false;
+  @ApiModelProperty @Getter @Setter private boolean enableYbc = false;
 
-  @ApiModelProperty public String ybcSoftwareVersion = null;
+  @ApiModelProperty @Getter @Setter private String ybcSoftwareVersion = null;
 
   @ApiModelProperty public boolean installYbc = false;
 
-  @ApiModelProperty public boolean ybcInstalled = false;
+  @ApiModelProperty @Getter @Setter private boolean ybcInstalled = false;
 
   // Expected version of the universe for operation execution. Set to -1 if an operation should
   // not verify expected version of the universe.
@@ -190,7 +290,9 @@ public class UniverseTaskParams extends AbstractTaskParams {
   // If an AWS backed universe has chosen EBS volume encryption, this will be set to the
   // Amazon Resource Name (ARN) of the CMK to be used to generate data keys for volume encryption
   @ApiModelProperty(value = "Amazon Resource Name (ARN) of the CMK")
-  public String cmkArn;
+  @Getter
+  @Setter
+  private String cmkArn;
 
   // Store encryption key provider specific configuration/authorization values
   @ApiModelProperty(value = "Encryption at rest configation")
@@ -209,12 +311,23 @@ public class UniverseTaskParams extends AbstractTaskParams {
   @ApiModelProperty(value = "Extra dependencies")
   public ExtraDependencies extraDependencies = new ExtraDependencies();
 
-  // Whether this task has been tried before or not. Awkward naming because we cannot use
-  // `isRetry` due to play reading the "is" prefix differently.
-  @ApiModelProperty(value = "Whether this task has been tried before")
-  @Deprecated
-  public boolean firstTry = true;
-
   // The user that created the task
   public Users creatingUser;
+
+  public String platformUrl;
+
+  @ApiModelProperty(value = "YbaApi Internal. Run only prechecks during task run")
+  @YbaApi(visibility = YbaApi.YbaApiVisibility.INTERNAL, sinceYBAVersion = "2.23.0.0")
+  public Boolean runOnlyPrechecks = false;
+
+  @JsonIgnore
+  public boolean isRunOnlyPrechecks() {
+    return runOnlyPrechecks;
+  }
+
+  @JsonIgnore
+  @Override
+  public UUID getTargetUuid(TaskType taskType) {
+    return getUniverseUUID();
+  }
 }

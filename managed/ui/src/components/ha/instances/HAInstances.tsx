@@ -1,34 +1,52 @@
 import _ from 'lodash';
-import React, { FC, ReactElement, useState } from 'react';
+import { FC, ReactElement, useState } from 'react';
 import { Col, Grid, Row } from 'react-bootstrap';
 import { BootstrapTable, TableHeaderColumn } from 'react-bootstrap-table';
+import moment from 'moment-timezone';
+import { useQuery } from 'react-query';
+
 import { YBButton } from '../../common/forms/fields';
 import { useLoadHAConfiguration } from '../hooks/useLoadHAConfiguration';
-import { AddStandbyInstanceModal } from '../modals/AddStandbyInstanceModal';
 import { YBLoading } from '../../common/indicators';
 import { HAErrorPlaceholder } from '../compounds/HAErrorPlaceholder';
-import { HAPlatformInstance } from '../../../redesign/helpers/dtos';
 import { DeleteModal } from '../modals/DeleteModal';
 import { PromoteInstanceModal } from '../modals/PromoteInstanceModal';
 import { BadgeInstanceType } from '../compounds/BadgeInstanceType';
+import { AddStandbyInstanceModal } from '../modals/AddStandbyInstanceModal';
+import { formatDuration } from '../../../utils/Formatters';
+import { HAInstanceStatelabel } from '../compounds/HAInstanceStateLabel';
+import { ReactComponent as PrometheusIcon } from '../../../redesign/assets/prometheus-icon.svg';
+import { YBTooltip } from '../../../redesign/components';
+import { Box, Typography, useTheme } from '@material-ui/core';
+import { getPrometheusBaseUrl } from '../../../redesign/features/metrics/utils';
+import { PROMETHEUS_URL_QUERY_KEY } from '../../../redesign/helpers/api';
+import { getPrometheusHostInfo } from '../../../v2/api/metrics/metrics';
+
+import { HaInstanceState, HaPlatformInstance } from '../dtos';
+
+import { useIconStyles } from '../../../redesign/styles/styles';
 import './HAInstances.scss';
-import { timeFormatter } from '../../../utils/TableFormatters';
 
-const renderAddress = (cell: any, row: HAPlatformInstance): ReactElement => (
-  <a href={row.address} target="_blank" rel="noopener noreferrer">
-    {row.address}
-    {row.is_local && <span className="badge badge-orange">Current</span>}
-  </a>
-);
+interface HAInstancesProps {
+  // Dispatch
+  fetchRuntimeConfigs: () => void;
+  setRuntimeConfig: (key: string, value: string) => void;
+  // State
+  runtimeConfigs: any;
+}
 
-const renderInstanceType = (cell: HAPlatformInstance['is_leader']): ReactElement => (
+const renderInstanceType = (cell: HaPlatformInstance['is_leader']): ReactElement => (
   <BadgeInstanceType isActive={cell} />
 );
 
-const renderLastBackup = (cell: HAPlatformInstance['last_backup']): ReactElement | string =>
-  cell ? timeFormatter(cell) : 'n/a';
+const renderBackupLag = (cell: HaPlatformInstance['last_backup']): ReactElement | string =>
+  cell ? formatDuration(moment.duration(moment().diff(moment(cell))).asMilliseconds()) : 'n/a';
 
-export const HAInstances: FC = () => {
+export const HAInstances: FC<HAInstancesProps> = ({
+  fetchRuntimeConfigs,
+  setRuntimeConfig,
+  runtimeConfigs
+}) => {
   const [isAddInstancesModalVisible, setAddInstancesModalVisible] = useState(false);
   const [instanceToDelete, setInstanceToDelete] = useState<string>();
   const [instanceToPromote, setInstanceToPromote] = useState<string>();
@@ -36,6 +54,9 @@ export const HAInstances: FC = () => {
     loadSchedule: false,
     autoRefresh: true
   });
+  const iconClasses = useIconStyles();
+  const theme = useTheme();
+  const prometheusUrlQuery = useQuery(PROMETHEUS_URL_QUERY_KEY, () => getPrometheusHostInfo());
 
   const showAddInstancesModal = () => setAddInstancesModalVisible(true);
   const hideAddInstancesModal = () => setAddInstancesModalVisible(false);
@@ -46,7 +67,43 @@ export const HAInstances: FC = () => {
 
   const currentInstance = config?.instances.find((item) => item.is_local);
 
-  const renderActions = (cell: any, row: HAPlatformInstance): ReactElement => {
+  const renderAddress = (_: any, platformInstance: HaPlatformInstance): ReactElement => {
+    const prometheusBaseUrl = prometheusUrlQuery.data
+      ? getPrometheusBaseUrl(
+          prometheusUrlQuery.data.prometheus_url,
+          prometheusUrlQuery.data.use_browser_fqdn
+        )
+      : '';
+
+    const prometheusFederateMetricsJobUrl = prometheusBaseUrl
+      ? `${prometheusBaseUrl}/targets?search=federate`
+      : '';
+    // Only local standby YBA instances will have the federate metrics job link as we are building the
+    // Prometheus link using the metrics URL provided by the current YBA's config values.
+    const showPrometheusIcon =
+      !platformInstance.is_leader && platformInstance.is_local && prometheusFederateMetricsJobUrl;
+    return (
+      <Box display="flex" gridGap={theme.spacing(1)} alignItems="center">
+        <a href={platformInstance.address} target="_blank" rel="noopener noreferrer">
+          {platformInstance.address}
+        </a>
+        {platformInstance.is_local && <span className="badge badge-orange">Current</span>}
+        {showPrometheusIcon && (
+          <YBTooltip
+            title={
+              <Typography variant="body2">View metrics federation job on prometheus</Typography>
+            }
+          >
+            <a target="_blank" rel="noopener noreferrer" href={prometheusFederateMetricsJobUrl}>
+              <PrometheusIcon className={iconClasses.interactiveIcon} />
+            </a>
+          </YBTooltip>
+        )}
+      </Box>
+    );
+  };
+
+  const renderActions = (cell: any, row: HaPlatformInstance): ReactElement => {
     if (currentInstance?.is_leader) {
       return (
         <YBButton
@@ -57,6 +114,7 @@ export const HAInstances: FC = () => {
         />
       );
     } else {
+      // eslint-disable-next-line no-lonely-if
       if (row.is_local) {
         return (
           <YBButton
@@ -78,7 +136,8 @@ export const HAInstances: FC = () => {
   }
 
   if (error) {
-    return <HAErrorPlaceholder error={error} configUUID={config?.uuid!}/>;
+    // eslint-disable-next-line @typescript-eslint/no-non-null-asserted-optional-chain
+    return <HAErrorPlaceholder error={error} configUUID={config?.uuid!} />;
   }
 
   if (isNoHAConfigExists) {
@@ -98,6 +157,9 @@ export const HAInstances: FC = () => {
           configId={config.uuid}
           visible={isAddInstancesModalVisible}
           onClose={hideAddInstancesModal}
+          fetchRuntimeConfigs={fetchRuntimeConfigs}
+          setRuntimeConfig={setRuntimeConfig}
+          runtimeConfigs={runtimeConfigs}
         />
         <DeleteModal
           configId={config.uuid}
@@ -138,30 +200,40 @@ export const HAInstances: FC = () => {
                 dataField="address"
                 dataFormat={renderAddress}
                 dataSort
-                width="40%"
+                width="30%"
               >
                 Address
+              </TableHeaderColumn>
+              <TableHeaderColumn
+                dataField="instance_state"
+                dataFormat={(_: HaInstanceState, haInstance: HaPlatformInstance) => (
+                  <HAInstanceStatelabel haInstance={haInstance} />
+                )}
+                dataSort
+                width="17.5%"
+              >
+                Instance State
               </TableHeaderColumn>
               <TableHeaderColumn
                 dataField="is_leader"
                 dataFormat={renderInstanceType}
                 dataSort
-                width="20%"
+                width="17.5%"
               >
                 Type
               </TableHeaderColumn>
               <TableHeaderColumn
                 dataField="last_backup"
-                dataFormat={renderLastBackup}
+                dataFormat={renderBackupLag}
                 dataSort
-                width="20%"
+                width="17.5%"
               >
-                Last Backup Time
+                Time since last backup
               </TableHeaderColumn>
               <TableHeaderColumn
                 columnClassName="yb-actions-cell"
                 dataFormat={renderActions}
-                width="20%"
+                width="17.5%"
               >
                 Action
               </TableHeaderColumn>

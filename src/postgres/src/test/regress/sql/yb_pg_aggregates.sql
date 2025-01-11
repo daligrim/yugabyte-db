@@ -2,6 +2,24 @@
 -- AGGREGATES
 --
 
+-- directory paths are passed to us in environment variables
+\getenv abs_srcdir PG_ABS_SRCDIR
+
+-- avoid bit-exact output here because operations may not be bit-exact.
+SET extra_float_digits = 0;
+
+-- prepare some test data
+CREATE TABLE aggtest (
+	a 			int2,
+	b			float4
+);
+
+\set filename :abs_srcdir '/data/agg.data'
+COPY aggtest FROM :'filename';
+
+ANALYZE aggtest;
+
+
 SELECT avg(four) AS avg_1 FROM onek;
 
 SELECT avg(a) AS avg_32 FROM aggtest WHERE a < 100;
@@ -97,11 +115,9 @@ having exists (select 1 from onek b
 
 -- Test handling of sublinks within outer-level aggregates.
 -- Per bug report from Daniel Grace.
-create view oneh as select * from onek order by unique2 limit 100;
 select
-  (select max((select i.unique2 from oneh i where i.unique1 = o.unique1)))
-from oneh o;
-drop view oneh;
+  (select max((select i.unique2 from tenk1 i where i.unique1 = o.unique1)))
+from tenk1 o;
 
 -- Test handling of Params within aggregate arguments in hashed aggregation.
 -- Per bug report from Jeevan Chalke.
@@ -164,9 +180,6 @@ SELECT
   BIT_OR(x)   AS "7",
   BIT_OR(y)   AS "1101"
 FROM bitwise_test;
-
--- drop temp table
-DROP TABLE bitwise_test;
 
 --
 -- test boolean aggregates
@@ -288,9 +301,12 @@ select min(tenthous) from tenk1 where thousand = 33;
 explain (costs off)
   select f1, (select min(unique1) from tenk1 where unique1 > f1) AS gt
     from int4_tbl;
--- TODO(jayden): Non-deterministic, so commenting out.
--- select f1, (select min(unique1) from tenk1 where unique1 > f1) AS gt
---   from int4_tbl;
+-- YB note: add consistent ordering that matches upstream:
+-- 1. mainly order by absolute value of f1.
+-- 2. order positives before negatives by adding an offset of -1/+1 using the
+--    sign function.
+select f1, (select min(unique1) from tenk1 where unique1 > f1) AS gt
+  from int4_tbl order by abs(f1) - sign(f1);
 
 -- check some cases that were handled incorrectly in 8.3.0
 explain (costs off)
@@ -343,6 +359,22 @@ select distinct min(f1), max(f1) from minmaxtest;
 
 drop table minmaxtest cascade;
 
+-- DISTINCT can also trigger wrong answers with hash aggregation (bug #18465)
+begin;
+set local enable_sort = off;
+-- YB note: t1 access path differs from upstream because we favor index scan
+-- when the table is unanalyzed or CBO is not enabled.
+-- YB note: add consistent ordering that matches upstream:
+-- 1. mainly order by absolute value of f1.
+-- 2. order positives before negatives by adding an offset of -1/+1 using the
+--    sign function.
+explain (costs off)
+  select f1, (select distinct min(t1.f1) from int4_tbl t1 where t1.f1 = t0.f1)
+  from int4_tbl t0 order by abs(f1) - sign(f1);
+select f1, (select distinct min(t1.f1) from int4_tbl t1 where t1.f1 = t0.f1)
+from int4_tbl t0 order by abs(f1) - sign(f1);
+rollback;
+
 -- check for correct detection of nested-aggregate errors
 select max(min(unique1)) from tenk1;
 select (select max(min(unique1)) from int8_tbl) from tenk1;
@@ -372,11 +404,11 @@ from t1 inner join t2 on t1.a = t2.x and t1.b = t2.y
 group by t1.a,t1.b,t1.c,t1.d,t2.x,t2.z;
 
 -- Cannot optimize when PK is deferrable
--- explain (costs off) select * from t3 group by a,b,c;
+explain (costs off) select * from t3 group by a,b,c;
 
 drop table t1;
 drop table t2;
--- drop table t3;
+drop table t3;
 
 --
 -- Test combinations of DISTINCT and/or ORDER BY
@@ -510,29 +542,28 @@ select string_agg(a,'AB') from (values(null),(null),('bbbb'),('cccc')) g(a);
 select string_agg(a,',') from (values(null),(null)) g(a);
 
 -- check some implicit casting cases, as per bug #5564
--- TODO(jayden): Enable below once we have yb_pg_varchar test which creates this table.
 select string_agg(distinct f1, ',' order by f1) from varchar_tbl;  -- ok
--- select string_agg(distinct f1::text, ',' order by f1) from varchar_tbl;  -- not ok
--- select string_agg(distinct f1, ',' order by f1::text) from varchar_tbl;  -- not ok
--- select string_agg(distinct f1::text, ',' order by f1::text) from varchar_tbl;  -- ok
+select string_agg(distinct f1::text, ',' order by f1) from varchar_tbl;  -- not ok
+select string_agg(distinct f1, ',' order by f1::text) from varchar_tbl;  -- not ok
+select string_agg(distinct f1::text, ',' order by f1::text) from varchar_tbl;  -- ok
 
 -- string_agg bytea tests
--- TODO(jayden): Below test relies on retrieval ordering, thus is non-deterministic.
--- create table bytea_test_table(v bytea);
+-- YB note: add PK ordering for consistent output.
+create table bytea_test_table(v bytea, PRIMARY KEY (v DESC));
 
--- select string_agg(v, '') from bytea_test_table;
+select string_agg(v, '') from bytea_test_table;
 
--- insert into bytea_test_table values(decode('ff','hex'));
+insert into bytea_test_table values(decode('ff','hex'));
 
--- select string_agg(v, '') from bytea_test_table;
+select string_agg(v, '') from bytea_test_table;
 
--- insert into bytea_test_table values(decode('aa','hex'));
+insert into bytea_test_table values(decode('aa','hex'));
 
--- select string_agg(v, '') from bytea_test_table;
--- select string_agg(v, NULL) from bytea_test_table;
--- select string_agg(v, decode('ee', 'hex')) from bytea_test_table;
+select string_agg(v, '') from bytea_test_table;
+select string_agg(v, NULL) from bytea_test_table;
+select string_agg(v, decode('ee', 'hex')) from bytea_test_table;
 
--- drop table bytea_test_table;
+drop table bytea_test_table;
 
 -- FILTER tests
 
@@ -639,7 +670,6 @@ select pg_collation_for(percentile_disc(1) within group (order by x collate "POS
   from (values ('fred'),('jim')) v(x);
 
 -- ordered-set aggs created with CREATE AGGREGATE
--- TODO(jason): uncomment when issue #2172 is closed or closing.
 select test_rank(3) within group (order by x)
 from (values (1),(1),(2),(2),(3),(3),(4)) v(x);
 select test_percentile_disc(0.5) within group (order by thousand) from tenk1;
@@ -976,3 +1006,10 @@ select v||'a', case v||'a' when 'aa' then 1 else 0 end, count(*)
 select v||'a', case when v||'a' = 'aa' then 1 else 0 end, count(*)
   from unnest(array['a','b']) u(v)
  group by v||'a' order by 1;
+
+-- Make sure that generation of HashAggregate for uniqification purposes
+-- does not lead to array overflow due to unexpected duplicate hash keys
+-- see CAFeeJoKKu0u+A_A9R9316djW-YW3-+Gtgvy3ju655qRHR3jtdA@mail.gmail.com
+explain (costs off)
+  select 1 from tenk1
+   where (hundred, thousand) in (select twothousand, twothousand from onek);

@@ -28,36 +28,36 @@ $ ps aux | grep yb-master
 
 If the servers are not running, you can start them by using the following:
 
-- `yb-ctl` when using a local cluster.
+- [yugabyted](../../../reference/configuration/yugabyted/).
 
-- `bin/yb-tserver` and `bin/yb-master` servers when using a multi-node cluster.
+- [yb-tserver](../../../reference/configuration/yb-tserver/) and [yb-master](../../../reference/configuration/yb-master/) when using a [manual deployment](../../../deploy/manual-deployment/).
 
-Once the servers are running, yet they are not accessible from your client machine, it may indicate a network issue.
+If the servers are running, yet they are not accessible from your client machine, it may indicate a network issue.
 
 ## Are the YB-Master and YB-TServer endpoints accessible?
 
 Typically, the endpoints are defined as follows:
 
-|      Description |                       URL |
-|------------------|---------------------------|
+|   Description    |            URL            |
+| ---------------- | ------------------------- |
 | Master Web Page  | `<node-ip>:7000`          |
 | TServer Web Page | `<node-ip>:9000`          |
-| Redis Metrics    | `<node-ip>:11000/metrics` |
-| YCQL Metrics      | `<node-ip>:12000/metrics` |
-| Redis Server     | `<node-ip>:6379`          |
-| YCQL Server       | `<node-ip>:9042`          |
+| YSQL Metrics     | `<node-ip>:13000/metrics` |
+| YCQL Metrics     | `<node-ip>:12000/metrics` |
+| YSQL Server      | `<node-ip>:5433`          |
+| YCQL Server      | `<node-ip>:9042`          |
 
 However, in some cases these endpoints may not be accessible, depending on the configuration on your physical machines or on your cloud provider account.
 
 ### IP not accessible
 
-Private versus Public IP: Consider setting up a VPN or using the node’s public IP (for example, get it from the machine status on your cloud-provider account).
+Private versus Public IP: Consider setting up a VPN or using the node's public IP (for example, get it from the machine status on your cloud-provider account).
 
 ### Ports closed
 
 - Cloud Account Configuration: Open the relevant ports, as per the following definition, for TCP traffic on your cloud provider account (for example, security group rules).
 
-- SELinux is enabled: If your host has SELinux enabled, run the following commands to open the ports using firewall exceptions.
+- Firewall is enabled: If your host has firewall enabled, run the following commands to open the ports using firewall exceptions.
 
   ```sh
   sudo firewall-cmd --zone=public --add-port=7000/tcp;

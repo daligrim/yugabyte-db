@@ -54,8 +54,9 @@
 
 #include "yb/util/debug/trace_event.h"
 
-namespace yb {
-namespace tablet {
+using std::string;
+
+namespace yb::tablet {
 
 using consensus::ConsensusBootstrapInfo;
 
@@ -79,7 +80,7 @@ const string TabletStatusListener::table_id() const {
   return meta_->table_id();
 }
 
-std::shared_ptr<Partition> TabletStatusListener::partition() const {
+std::shared_ptr<dockv::Partition> TabletStatusListener::partition() const {
   return meta_->partition();
 }
 
@@ -93,8 +94,13 @@ TabletStatusListener::~TabletStatusListener() {
 void TabletStatusListener::StatusMessage(const string& status) {
   LOG(INFO) << "T " << tablet_id() << " P " << meta_->fs_manager()->uuid() << ": "
             << status;
-  std::lock_guard<std::shared_timed_mutex> l(lock_);
+  std::lock_guard l(lock_);
   last_status_ = status;
+}
+
+void TabletStatusListener::SetStatusPrefix(const std::string& prefix) {
+  std::lock_guard l(lock_);
+  status_prefix_ = prefix + "\n";
 }
 
 Status BootstrapTablet(
@@ -116,8 +122,7 @@ Status BootstrapTablet(
 }
 
 string DocDbOpIds::ToString() const {
-  return Format("{ regular: $0 intents: $1 }", regular, intents);
+  return YB_STRUCT_TO_STRING(regular, intents, vector_indexes);
 }
 
-} // namespace tablet
-} // namespace yb
+} // namespace yb::tablet

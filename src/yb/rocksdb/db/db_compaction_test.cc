@@ -27,20 +27,23 @@
 #include "yb/rocksdb/port/stack_trace.h"
 #include "yb/rocksdb/rate_limiter.h"
 #include "yb/rocksdb/util/file_util.h"
-#include "yb/rocksdb/util/sync_point.h"
+#include "yb/rocksdb/util/task_metrics.h"
 #include "yb/rocksdb/util/testutil.h"
 
 #include "yb/rocksutil/yb_rocksdb_logger.h"
 
 #include "yb/util/backoff_waiter.h"
+#include "yb/util/metrics.h"
 #include "yb/util/priority_thread_pool.h"
 #include "yb/util/random_util.h"
+#include "yb/util/sync_point.h"
 #include "yb/util/test_thread_holder.h"
 #include "yb/util/tsan_util.h"
 
 DECLARE_bool(flush_rocksdb_on_shutdown);
 DECLARE_bool(use_priority_thread_pool_for_compactions);
 DECLARE_bool(use_priority_thread_pool_for_flushes);
+DECLARE_bool(rocksdb_allow_multiple_pending_compactions_for_priority_thread_pool);
 
 using std::atomic;
 using namespace std::literals;
@@ -48,7 +51,6 @@ using namespace std::literals;
 namespace rocksdb {
 
 // SYNC_POINT is not supported in released Windows mode.
-#if !defined(ROCKSDB_LITE)
 
 class DBCompactionTest : public DBTestBase {
  public:
@@ -80,12 +82,12 @@ class FlushedFileCollector : public EventListener {
   ~FlushedFileCollector() {}
 
   void OnFlushCompleted(DB* db, const FlushJobInfo& info) override {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard lock(mutex_);
     flushed_files_.push_back(info.file_path);
   }
 
   std::vector<std::string> GetFlushedFiles() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard lock(mutex_);
     std::vector<std::string> result;
     for (auto fname : flushed_files_) {
       result.push_back(fname);
@@ -382,7 +384,7 @@ TEST_F(DBCompactionTest, TestTableReaderForCompaction) {
 
   int num_table_cache_lookup = 0;
   int num_new_table_reader = 0;
-  rocksdb::SyncPoint::GetInstance()->SetCallBack(
+  yb::SyncPoint::GetInstance()->SetCallBack(
       "TableCache::FindTable:0", [&](void* arg) {
         assert(arg != nullptr);
         bool no_io = *(reinterpret_cast<bool*>(arg));
@@ -391,10 +393,10 @@ TEST_F(DBCompactionTest, TestTableReaderForCompaction) {
           num_table_cache_lookup++;
         }
       });
-  rocksdb::SyncPoint::GetInstance()->SetCallBack(
+  yb::SyncPoint::GetInstance()->SetCallBack(
       "TableCache::GetTableReader:0",
       [&](void* arg) { num_new_table_reader++; });
-  rocksdb::SyncPoint::GetInstance()->EnableProcessing();
+  yb::SyncPoint::GetInstance()->EnableProcessing();
 
   for (int k = 0; k < options.level0_file_num_compaction_trigger; ++k) {
     ASSERT_OK(Put(Key(k), Key(k)));
@@ -455,7 +457,7 @@ TEST_F(DBCompactionTest, TestTableReaderForCompaction) {
   ASSERT_EQ(num_table_cache_lookup, 1);
   ASSERT_EQ(num_new_table_reader, 0);
 
-  rocksdb::SyncPoint::GetInstance()->ClearAllCallBacks();
+  yb::SyncPoint::GetInstance()->ClearAllCallBacks();
 }
 
 TEST_P(DBCompactionTestWithParam, CompactionDeletionTriggerReopen) {
@@ -804,7 +806,7 @@ TEST_F(DBCompactionTest, ClogSingleCompactionQueue) {
 
   ASSERT_OK(dbfull()->TEST_WaitForCompact());
 
-  rocksdb::SyncPoint::GetInstance()->DisableProcessing();
+  yb::SyncPoint::GetInstance()->DisableProcessing();
 
   ASSERT_GT(listener->slowdown_writes() + listener->stop_writes(), 0);
 }
@@ -844,17 +846,17 @@ TEST_F(DBCompactionTest, ClogMultipleCompactionQueues) {
     sleeping_tasks[i].WaitUntilSleeping();
   }
 
-  rocksdb::SyncPoint::GetInstance()->EnableProcessing();
+  yb::SyncPoint::GetInstance()->EnableProcessing();
 
   CreateAndReopenWithCF({"one", "two", "three"}, options);
 
-  rocksdb::SyncPoint::GetInstance()->SetCallBack(
+  yb::SyncPoint::GetInstance()->SetCallBack(
       "DBImpl:BackgroundCompaction:LargeCompaction",
       [&](void *args) {
         ASSERT_EQ(dbfull()->TEST_NumRunningLargeCompactions(), 1);
         ++num_large_compactions; });
 
-  rocksdb::SyncPoint::GetInstance()->SetCallBack(
+  yb::SyncPoint::GetInstance()->SetCallBack(
       "DBImpl:BackgroundCompaction:SmallCompaction",
       [&](void *args) {
         ++num_small_compactions; });
@@ -894,7 +896,7 @@ TEST_F(DBCompactionTest, ClogMultipleCompactionQueues) {
 
   ASSERT_OK(dbfull()->TEST_WaitForCompact());
 
-  rocksdb::SyncPoint::GetInstance()->DisableProcessing();
+  yb::SyncPoint::GetInstance()->DisableProcessing();
 
   ASSERT_GE(num_small_compactions, options.level0_stop_writes_trigger);
   ASSERT_GT(num_large_compactions, num_large_compactions_before_small_flushes);
@@ -1038,10 +1040,10 @@ TEST_F(DBCompactionTest, RecoverDuringMemtableCompaction) {
 
 TEST_P(DBCompactionTestWithParam, TrivialMoveOneFile) {
   int32_t trivial_move = 0;
-  rocksdb::SyncPoint::GetInstance()->SetCallBack(
+  yb::SyncPoint::GetInstance()->SetCallBack(
       "DBImpl::BackgroundCompaction:TrivialMove",
       [&](void* arg) { trivial_move++; });
-  rocksdb::SyncPoint::GetInstance()->EnableProcessing();
+  yb::SyncPoint::GetInstance()->EnableProcessing();
 
   Options options;
   options.write_buffer_size = 100000000;
@@ -1090,19 +1092,19 @@ TEST_P(DBCompactionTestWithParam, TrivialMoveOneFile) {
   }
 
   ASSERT_EQ(trivial_move, 1);
-  rocksdb::SyncPoint::GetInstance()->DisableProcessing();
+  yb::SyncPoint::GetInstance()->DisableProcessing();
 }
 
 TEST_P(DBCompactionTestWithParam, TrivialMoveNonOverlappingFiles) {
   int32_t trivial_move = 0;
   int32_t non_trivial_move = 0;
-  rocksdb::SyncPoint::GetInstance()->SetCallBack(
+  yb::SyncPoint::GetInstance()->SetCallBack(
       "DBImpl::BackgroundCompaction:TrivialMove",
       [&](void* arg) { trivial_move++; });
-  rocksdb::SyncPoint::GetInstance()->SetCallBack(
+  yb::SyncPoint::GetInstance()->SetCallBack(
       "DBImpl::BackgroundCompaction:NonTrivial",
       [&](void* arg) { non_trivial_move++; });
-  rocksdb::SyncPoint::GetInstance()->EnableProcessing();
+  yb::SyncPoint::GetInstance()->EnableProcessing();
 
   Options options = CurrentOptions();
   options.disable_auto_compactions = true;
@@ -1189,19 +1191,19 @@ TEST_P(DBCompactionTestWithParam, TrivialMoveNonOverlappingFiles) {
   ASSERT_EQ(trivial_move, 0);
   ASSERT_EQ(non_trivial_move, 1);
 
-  rocksdb::SyncPoint::GetInstance()->DisableProcessing();
+  yb::SyncPoint::GetInstance()->DisableProcessing();
 }
 
 TEST_P(DBCompactionTestWithParam, TrivialMoveTargetLevel) {
   int32_t trivial_move = 0;
   int32_t non_trivial_move = 0;
-  rocksdb::SyncPoint::GetInstance()->SetCallBack(
+  yb::SyncPoint::GetInstance()->SetCallBack(
       "DBImpl::BackgroundCompaction:TrivialMove",
       [&](void* arg) { trivial_move++; });
-  rocksdb::SyncPoint::GetInstance()->SetCallBack(
+  yb::SyncPoint::GetInstance()->SetCallBack(
       "DBImpl::BackgroundCompaction:NonTrivial",
       [&](void* arg) { non_trivial_move++; });
-  rocksdb::SyncPoint::GetInstance()->EnableProcessing();
+  yb::SyncPoint::GetInstance()->EnableProcessing();
 
   Options options = CurrentOptions();
   options.disable_auto_compactions = true;
@@ -1254,18 +1256,18 @@ TEST_P(DBCompactionTestWithParam, TrivialMoveTargetLevel) {
 TEST_P(DBCompactionTestWithParam, ManualCompactionPartial) {
   int32_t trivial_move = 0;
   int32_t non_trivial_move = 0;
-  rocksdb::SyncPoint::GetInstance()->SetCallBack(
+  yb::SyncPoint::GetInstance()->SetCallBack(
       "DBImpl::BackgroundCompaction:TrivialMove",
       [&](void* arg) { trivial_move++; });
-  rocksdb::SyncPoint::GetInstance()->SetCallBack(
+  yb::SyncPoint::GetInstance()->SetCallBack(
       "DBImpl::BackgroundCompaction:NonTrivial",
       [&](void* arg) { non_trivial_move++; });
   bool first = true;
   bool second = true;
-  rocksdb::SyncPoint::GetInstance()->LoadDependency(
+  yb::SyncPoint::GetInstance()->LoadDependency(
       {{"DBCompaction::ManualPartial:4", "DBCompaction::ManualPartial:1"},
        {"DBCompaction::ManualPartial:2", "DBCompaction::ManualPartial:3"}});
-  rocksdb::SyncPoint::GetInstance()->SetCallBack(
+  yb::SyncPoint::GetInstance()->SetCallBack(
       "DBImpl::BackgroundCompaction:NonTrivial:AfterRun", [&](void* arg) {
         if (first) {
           TEST_SYNC_POINT("DBCompaction::ManualPartial:4");
@@ -1276,7 +1278,7 @@ TEST_P(DBCompactionTestWithParam, ManualCompactionPartial) {
         }
       });
 
-  rocksdb::SyncPoint::GetInstance()->EnableProcessing();
+  yb::SyncPoint::GetInstance()->EnableProcessing();
 
   Options options = CurrentOptions();
   options.write_buffer_size = 10 * 1024 * 1024;
@@ -1389,18 +1391,18 @@ TEST_P(DBCompactionTestWithParam, ManualCompactionPartial) {
 TEST_F(DBCompactionTest, DISABLED_ManualPartialFill) {
   int32_t trivial_move = 0;
   int32_t non_trivial_move = 0;
-  rocksdb::SyncPoint::GetInstance()->SetCallBack(
+  yb::SyncPoint::GetInstance()->SetCallBack(
       "DBImpl::BackgroundCompaction:TrivialMove",
       [&](void* arg) { trivial_move++; });
-  rocksdb::SyncPoint::GetInstance()->SetCallBack(
+  yb::SyncPoint::GetInstance()->SetCallBack(
       "DBImpl::BackgroundCompaction:NonTrivial",
       [&](void* arg) { non_trivial_move++; });
   bool first = true;
   bool second = true;
-  rocksdb::SyncPoint::GetInstance()->LoadDependency(
+  yb::SyncPoint::GetInstance()->LoadDependency(
       {{"DBCompaction::PartialFill:4", "DBCompaction::PartialFill:1"},
        {"DBCompaction::PartialFill:2", "DBCompaction::PartialFill:3"}});
-  rocksdb::SyncPoint::GetInstance()->SetCallBack(
+  yb::SyncPoint::GetInstance()->SetCallBack(
       "DBImpl::BackgroundCompaction:NonTrivial:AfterRun", [&](void* arg) {
         if (first) {
           TEST_SYNC_POINT("DBCompaction::PartialFill:4");
@@ -1410,7 +1412,7 @@ TEST_F(DBCompactionTest, DISABLED_ManualPartialFill) {
         }
       });
 
-  rocksdb::SyncPoint::GetInstance()->EnableProcessing();
+  yb::SyncPoint::GetInstance()->EnableProcessing();
 
   Options options = CurrentOptions();
   options.write_buffer_size = 10 * 1024 * 1024;
@@ -1630,13 +1632,13 @@ TEST_F(DBCompactionTest, DeleteFileRange) {
 TEST_P(DBCompactionTestWithParam, TrivialMoveToLastLevelWithFiles) {
   int32_t trivial_move = 0;
   int32_t non_trivial_move = 0;
-  rocksdb::SyncPoint::GetInstance()->SetCallBack(
+  yb::SyncPoint::GetInstance()->SetCallBack(
       "DBImpl::BackgroundCompaction:TrivialMove",
       [&](void* arg) { trivial_move++; });
-  rocksdb::SyncPoint::GetInstance()->SetCallBack(
+  yb::SyncPoint::GetInstance()->SetCallBack(
       "DBImpl::BackgroundCompaction:NonTrivial",
       [&](void* arg) { non_trivial_move++; });
-  rocksdb::SyncPoint::GetInstance()->EnableProcessing();
+  yb::SyncPoint::GetInstance()->EnableProcessing();
 
   Options options;
   options.write_buffer_size = 100000000;
@@ -1686,7 +1688,7 @@ TEST_P(DBCompactionTestWithParam, TrivialMoveToLastLevelWithFiles) {
     ASSERT_EQ(Get(Key(i)), values[i]);
   }
 
-  rocksdb::SyncPoint::GetInstance()->DisableProcessing();
+  yb::SyncPoint::GetInstance()->DisableProcessing();
 }
 
 TEST_P(DBCompactionTestWithParam, LevelCompactionThirdPath) {
@@ -2003,7 +2005,7 @@ TEST_P(DBCompactionTestWithParam, ConvertCompactionStyle) {
   // compaction style
   std::string keys_in_db;
   Iterator* iter = dbfull()->NewIterator(ReadOptions(), handles_[1]);
-  for (iter->SeekToFirst(); iter->Valid(); iter->Next()) {
+  for (iter->SeekToFirst(); ASSERT_RESULT(iter->CheckedValid()); iter->Next()) {
     keys_in_db.append(iter->key().ToString());
     keys_in_db.push_back(',');
   }
@@ -2464,19 +2466,19 @@ TEST_P(DBCompactionTestWithParam, CompressLevelCompaction) {
                                    kZlibCompression};
   int matches = 0, didnt_match = 0, trivial_move = 0, non_trivial = 0;
 
-  rocksdb::SyncPoint::GetInstance()->SetCallBack(
+  yb::SyncPoint::GetInstance()->SetCallBack(
       "Compaction::InputCompressionMatchesOutput:Matches",
       [&](void* arg) { matches++; });
-  rocksdb::SyncPoint::GetInstance()->SetCallBack(
+  yb::SyncPoint::GetInstance()->SetCallBack(
       "Compaction::InputCompressionMatchesOutput:DidntMatch",
       [&](void* arg) { didnt_match++; });
-  rocksdb::SyncPoint::GetInstance()->SetCallBack(
+  yb::SyncPoint::GetInstance()->SetCallBack(
       "DBImpl::BackgroundCompaction:NonTrivial",
       [&](void* arg) { non_trivial++; });
-  rocksdb::SyncPoint::GetInstance()->SetCallBack(
+  yb::SyncPoint::GetInstance()->SetCallBack(
       "DBImpl::BackgroundCompaction:TrivialMove",
       [&](void* arg) { trivial_move++; });
-  rocksdb::SyncPoint::GetInstance()->EnableProcessing();
+  yb::SyncPoint::GetInstance()->EnableProcessing();
 
   Reopen(options);
 
@@ -2537,7 +2539,7 @@ TEST_P(DBCompactionTestWithParam, CompressLevelCompaction) {
   ASSERT_EQ(trivial_move, 12);
   ASSERT_EQ(non_trivial, 8);
 
-  rocksdb::SyncPoint::GetInstance()->DisableProcessing();
+  yb::SyncPoint::GetInstance()->DisableProcessing();
 
   for (int i = 0; i < key_idx; i++) {
     auto v = Get(Key(i));
@@ -2602,13 +2604,13 @@ TEST_F(DBCompactionTest, SuggestCompactRangeNoTwoLevel0Compactions) {
   }
   ASSERT_OK(db_->CompactRange(CompactRangeOptions(), nullptr, nullptr));
 
-  rocksdb::SyncPoint::GetInstance()->LoadDependency(
+  yb::SyncPoint::GetInstance()->LoadDependency(
       {{"CompactionJob::Run():Start",
         "DBCompactionTest::SuggestCompactRangeNoTwoLevel0Compactions:1"},
        {"DBCompactionTest::SuggestCompactRangeNoTwoLevel0Compactions:2",
         "CompactionJob::Run():End"}});
 
-  rocksdb::SyncPoint::GetInstance()->EnableProcessing();
+  yb::SyncPoint::GetInstance()->EnableProcessing();
 
   // trigger L0 compaction
   for (int num = 0; num < options.level0_file_num_compaction_trigger + 1;
@@ -2638,13 +2640,13 @@ TEST_F(DBCompactionTest, SuggestCompactRangeNoTwoLevel0Compactions) {
 TEST_P(DBCompactionTestWithParam, ForceBottommostLevelCompaction) {
   int32_t trivial_move = 0;
   int32_t non_trivial_move = 0;
-  rocksdb::SyncPoint::GetInstance()->SetCallBack(
+  yb::SyncPoint::GetInstance()->SetCallBack(
       "DBImpl::BackgroundCompaction:TrivialMove",
       [&](void* arg) { trivial_move++; });
-  rocksdb::SyncPoint::GetInstance()->SetCallBack(
+  yb::SyncPoint::GetInstance()->SetCallBack(
       "DBImpl::BackgroundCompaction:NonTrivial",
       [&](void* arg) { non_trivial_move++; });
-  rocksdb::SyncPoint::GetInstance()->EnableProcessing();
+  yb::SyncPoint::GetInstance()->EnableProcessing();
 
   Options options;
   options.write_buffer_size = 100000000;
@@ -2715,7 +2717,7 @@ TEST_P(DBCompactionTestWithParam, ForceBottommostLevelCompaction) {
     ASSERT_EQ(Get(Key(i)), values[i]);
   }
 
-  rocksdb::SyncPoint::GetInstance()->DisableProcessing();
+  yb::SyncPoint::GetInstance()->DisableProcessing();
 }
 
 INSTANTIATE_TEST_CASE_P(DBCompactionTestWithParam, DBCompactionTestWithParam,
@@ -2769,11 +2771,12 @@ TEST_P(CompactionPriTest, Test) {
 
 // Test that manual compaction is aborted during shutdown.
 TEST_F_EX(DBCompactionTest, AbortManualCompactionOnShutdown, RocksDBTest) {
-  FLAGS_use_priority_thread_pool_for_compactions = true;
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_use_priority_thread_pool_for_compactions) = true;
 
   for (const auto use_priority_thread_pool_for_flushes : {false, true}) {
     LOG(INFO) << "use_priority_thread_pool_for_flushes: " << use_priority_thread_pool_for_flushes;
-    FLAGS_use_priority_thread_pool_for_flushes = use_priority_thread_pool_for_flushes;
+    ANNOTATE_UNPROTECTED_WRITE(FLAGS_use_priority_thread_pool_for_flushes) =
+        use_priority_thread_pool_for_flushes;
 
     auto* env = Env::Default();
     const auto db_root_path = yb::Format(
@@ -2865,7 +2868,7 @@ TEST_F_EX(DBCompactionTest, AbortManualCompactionOnShutdown, RocksDBTest) {
         const auto last_file_path =
             db_info.flushed_file_collector->GetFlushedFileInfos().back().file_path;
         for (const auto& file_meta : db->GetLiveFilesMetaData()) {
-          if (file_meta.FullName() == last_file_path) {
+          if (file_meta.BaseFilePath() == last_file_path) {
             last_sst_size = file_meta.total_size;
             break;
           }
@@ -2948,6 +2951,204 @@ TEST_F_EX(DBCompactionTest, AbortManualCompactionOnShutdown, RocksDBTest) {
   }
 }
 
+namespace {
+
+class DelayFilter : public CompactionFilter {
+ public:
+  explicit DelayFilter(std::atomic<int>* delay_ms_per_entry)
+      : delay_ms_per_entry_(delay_ms_per_entry) {}
+
+  FilterDecision Filter(int level, const Slice& key, const Slice& value,
+                        std::string* new_value, bool* value_changed) override {
+    auto delay_ms = delay_ms_per_entry_->load();
+    if (delay_ms > 0) {
+      std::this_thread::sleep_for(delay_ms * 1ms);
+    }
+    return FilterDecision::kKeep;
+  }
+
+  const char* Name() const override { return "KeepFilter"; }
+
+ private:
+  std::atomic<int>* delay_ms_per_entry_;
+};
+
+class DelayFilterFactory : public CompactionFilterFactory {
+ public:
+  virtual std::unique_ptr<CompactionFilter> CreateCompactionFilter(
+      const CompactionFilter::Context& context) override {
+    return std::unique_ptr<CompactionFilter>(new DelayFilter(&delay_ms_per_entry_));
+  }
+
+  void SetDelayMsPerEntry(int delay_ms_per_entry) {
+    delay_ms_per_entry_ = delay_ms_per_entry;
+  }
+
+  const char* Name() const override { return "DelayFilterFactory"; }
+
+ private:
+  std::atomic<int> delay_ms_per_entry_;
+};
+
+Result<std::pair<size_t, size_t>> CheckPendingCompactions(DBImpl* db) {
+  size_t num_small_pending_compactions;
+  size_t num_large_pending_compactions;
+  size_t num_small_not_started_compactions;
+  size_t num_large_not_started_compactions;
+  {
+    std::lock_guard db_lock(*db->TEST_mutex());
+    std::lock_guard priority_thread_pool_lock(
+        *db->GetOptions().priority_thread_pool_for_compactions_and_flushes->TEST_mutex());
+
+    auto* cfd = pointer_cast<ColumnFamilyHandleImpl*>(db->DefaultColumnFamily())->cfd();
+    num_small_pending_compactions = cfd->num_pending_compactions(CompactionSizeKind::kSmall);
+    num_large_pending_compactions = cfd->num_pending_compactions(CompactionSizeKind::kLarge);
+
+    num_small_not_started_compactions =
+        db->TEST_NumNotStartedCompactionsUnlocked(CompactionSizeKind::kSmall);
+    num_large_not_started_compactions =
+        db->TEST_NumNotStartedCompactionsUnlocked(CompactionSizeKind::kLarge);
+  }
+
+  LOG(INFO) << "num_small_pending_compactions: " << num_small_pending_compactions
+            << " num_large_pending_compactions: " << num_large_pending_compactions;
+  LOG(INFO) << "num_small_not_started_compactions: " << num_small_not_started_compactions
+            << " num_large_not_started_compactions: " << num_large_not_started_compactions;
+
+  SCHECK_LE(num_small_not_started_compactions, num_small_pending_compactions, IllegalState,
+            "Pending compactions should include not started and paused.");
+  SCHECK_LE(num_large_not_started_compactions, num_large_pending_compactions, IllegalState,
+            "Pending compactions should include not started and paused.");
+
+  // We can consider aborting not yet started compaction if pausing another one in the same category
+  // in order to limit number of pending compactions but this is non-trivial and limiting not
+  // started ones should be good enough combined together with
+  // rocksdb_determine_compaction_input_at_start==true behavior.
+  SCHECK_LE(
+      num_small_not_started_compactions, std::size_t{1}, IllegalState,
+      "Expected at most 1 not started small compaction.");
+  SCHECK_LE(
+      num_large_not_started_compactions, std::size_t{1}, IllegalState,
+      "Expected at most 1 not started large compaction.");
+
+  return std::make_pair(num_small_pending_compactions, num_large_pending_compactions);
+}
+
+} // namespace
+
+TEST_F(DBCompactionTest, LimitPendingCompactionTasks) {
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_use_priority_thread_pool_for_compactions) = true;
+  ANNOTATE_UNPROTECTED_WRITE(
+      FLAGS_rocksdb_allow_multiple_pending_compactions_for_priority_thread_pool) = false;
+
+  constexpr auto kMaxBackgroundCompactions = 1;
+  constexpr auto kNumKeysPerSmallSstFile = 100;
+  constexpr auto kNumKeysPerLargeSstFile = 1000;
+  constexpr auto kNumSstFiles = 30;
+  constexpr auto kNumLargeSstFiles = 10;
+  constexpr auto kCompactionDelayMsPerEntry = 10000 * yb::kTimeMultiplier / kNumKeysPerSmallSstFile;
+  constexpr auto kTimeout = 10s * yb::kTimeMultiplier;
+  constexpr auto kMaxCompactFlushRate = 256_MB;
+  constexpr auto kValueSizeBytes = 1_KB;
+  constexpr auto kNumFilesCompactionTrigger = 5;
+  constexpr auto kMaxNumExpectedFiles = 2 * kNumFilesCompactionTrigger;
+
+  // Static to avoid destruction before RocksDB is destroyed by owning test object.
+  static yb::PriorityThreadPool thread_pool(kMaxBackgroundCompactions);
+
+  std::shared_ptr<RateLimiter> rate_limiter(NewGenericRateLimiter(kMaxCompactFlushRate));
+  auto compaction_filter_factory = std::make_shared<DelayFilterFactory>();
+  compaction_filter_factory->SetDelayMsPerEntry(kCompactionDelayMsPerEntry);
+
+  rocksdb::BlockBasedTableOptions table_options;
+  table_options.block_size = 2_KB;
+  table_options.filter_block_size = 2_KB;
+  table_options.index_block_size = 2_KB;
+
+  Options options;
+  options.table_factory.reset(rocksdb::NewBlockBasedTableFactory(table_options));
+  // Setting write_buffer_size big enough, because we use manual flush in this test.
+  options.write_buffer_size = 128_MB;
+  options.arena_block_size = 4_KB;
+  options.num_levels = 1;
+  options.compaction_style = kCompactionStyleUniversal;
+  options.compaction_filter_factory = compaction_filter_factory;
+  options.level0_file_num_compaction_trigger = 5;
+  options.level0_stop_writes_trigger = kNumSstFiles * 2;
+  options.level0_slowdown_writes_trigger = options.level0_stop_writes_trigger;
+  options.max_background_compactions = kMaxBackgroundCompactions;
+  options.priority_thread_pool_for_compactions_and_flushes = &thread_pool;
+  options.info_log_level = InfoLogLevel::DEBUG_LEVEL;
+  options.info_log = std::make_shared<yb::YBRocksDBLogger>(options.log_prefix);
+  options.rate_limiter = rate_limiter;
+  options.create_if_missing = true;
+  options.compaction_size_threshold_bytes = 2 * kValueSizeBytes * kNumKeysPerLargeSstFile;
+
+  auto& compaction_options_universal = options.compaction_options_universal;
+  compaction_options_universal.stop_style =
+      rocksdb::CompactionStopStyle::kCompactionStopStyleTotalSize;
+  compaction_options_universal.min_merge_width = 4;
+  // Limit number of files to be picked up into compaction in order to have more compaction
+  // candidates during the test.
+  compaction_options_universal.max_merge_width = 8;
+  compaction_options_universal.size_ratio = 20;
+  compaction_options_universal.always_include_size_threshold =
+      2 * kValueSizeBytes * kNumKeysPerSmallSstFile;
+
+  METRIC_DEFINE_entity(test_entity);
+  ROCKSDB_PRIORITY_THREAD_POOL_METRICS_DEFINE(test_entity);
+  yb::MetricRegistry registry;
+  auto entity = METRIC_ENTITY_test_entity.Instantiate(&registry, "task metrics");
+
+  auto priority_thread_pool_metrics =
+      std::make_shared<RocksDBPriorityThreadPoolMetrics>(
+          ROCKSDB_PRIORITY_THREAD_POOL_METRICS_INSTANCE(entity));
+  options.priority_thread_pool_metrics = priority_thread_pool_metrics;
+
+  DestroyAndReopen(options);
+
+  ColumnFamilyData* cfd = pointer_cast<ColumnFamilyHandleImpl*>(db_->DefaultColumnFamily())->cfd();
+
+  int num_keys = 0;
+
+  for (auto num = 0; num < kNumSstFiles; num++) {
+    const auto num_keys_per_file =
+        (num < kNumLargeSstFiles) ? kNumKeysPerLargeSstFile : kNumKeysPerSmallSstFile;
+    for (auto i = 0; i < num_keys_per_file; i++) {
+      auto key = Key(++num_keys);
+      ASSERT_OK(Put(key, yb::RandomHumanReadableString(kValueSizeBytes)));
+    }
+    ASSERT_OK(Flush());
+    ASSERT_OK(ResultToStatus(CheckPendingCompactions(dbfull())));
+  }
+  LOG(INFO) << "Waiting for flushes to complete...";
+  ASSERT_OK(dbfull()->TEST_WaitForFlushMemTable());
+  LOG(INFO) << "Waiting for flushes to complete - DONE";
+
+  auto num_pending_compactions = ASSERT_RESULT(CheckPendingCompactions(dbfull()));
+  // We should achieve at least 1 small and 1 large pending compactions (and we've verified that we
+  // have at most 1 is not yet started in each category).
+  ASSERT_GE(num_pending_compactions.first, 1);
+  ASSERT_GE(num_pending_compactions.second, 1);
+
+  compaction_filter_factory->SetDelayMsPerEntry(0);
+
+  auto deadline = yb::CoarseMonoClock::Now() + kTimeout;
+  while (yb::CoarseMonoClock::Now() <= deadline) {
+    auto num_sst_files = db_->GetCurrentVersionNumSSTFiles();
+    LOG(INFO) << "num_sst_files: " << num_sst_files;
+    if (std::cmp_less(num_sst_files, kMaxNumExpectedFiles + 1)) {
+      break;
+    }
+    ASSERT_OK(ResultToStatus(CheckPendingCompactions(dbfull())));
+    std::this_thread::sleep_for(1s);
+  }
+
+  ASSERT_LE(db_->GetCurrentVersionNumSSTFiles(), kMaxNumExpectedFiles);
+
+  Close();
+}
+
 INSTANTIATE_TEST_CASE_P(
     CompactionPriTest, CompactionPriTest,
     ::testing::Values(CompactionPri::kByCompensatedSize,
@@ -2955,16 +3156,11 @@ INSTANTIATE_TEST_CASE_P(
                       CompactionPri::kOldestSmallestSeqFirst,
                       CompactionPri::kMinOverlappingRatio));
 
-#endif // !defined(ROCKSDB_LITE)
 }  // namespace rocksdb
 
 int main(int argc, char** argv) {
-#if !defined(ROCKSDB_LITE)
   rocksdb::port::InstallStackTraceHandler();
   ::testing::InitGoogleTest(&argc, argv);
   google::ParseCommandLineNonHelpFlags(&argc, &argv, /* remove_flags */ true);
   return RUN_ALL_TESTS();
-#else
-  return 0;
-#endif
 }

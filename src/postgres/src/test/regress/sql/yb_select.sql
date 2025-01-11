@@ -113,3 +113,163 @@ EXPLAIN EXECUTE myplan(null);
 EXECUTE myplan(null);
 EXECUTE myplan(0);
 EXECUTE myplan(1);
+
+--
+-- For https://github.com/YugaByte/yugabyte-db/issues/10254
+--
+CREATE TABLE t(h INT, r INT, PRIMARY KEY(h, r ASC));
+INSERT INTO t VALUES(1, 1), (1, 3);
+SELECT * FROM t WHERE h = 1 AND r in(1, 3) FOR KEY SHARE;
+-- On this query postgres process stucked in an infinite loop.
+SELECT * FROM t WHERE h = 1 AND r IN (1, 2, 3) FOR KEY SHARE;
+
+-- Testing distinct pushdown, see #16552
+-- TODO(tanuj): add back ANALYZE when #16633 is fixed.
+EXPLAIN (SUMMARY OFF, TIMING OFF, COSTS OFF) SELECT DISTINCT att.attname as name, att.attnum as OID, pg_catalog.format_type(ty.oid,NULL) AS datatype,
+	att.attnotnull as not_null, att.atthasdef as has_default_val
+	FROM pg_catalog.pg_attribute att
+	    JOIN pg_catalog.pg_type ty ON ty.oid=atttypid
+	WHERE
+	    att.attnum > 0
+	    AND att.attisdropped IS FALSE
+	ORDER BY att.attnum LIMIT 1;
+
+-- check system columns in YbSeqScan(#18485)
+explain (costs off)
+/*+ SeqScan(nr2) */ SELECT tableoid::regclass, * from nr2 where i = 1;
+/*+ SeqScan(nr2) */ SELECT tableoid::regclass, * from nr2 where i = 1;
+
+--
+-- For https://github.com/YugaByte/yugabyte-db/issues/20316
+--
+create table a (a int);
+insert into a values (1),(2),(3),(4);
+
+create table b (b int, a int);
+insert into b values (1, 1),(2, 1),(3, 2),(4, 4);
+
+create table c (c int);
+insert into c values (1),(2),(3);
+
+create table d (b int, c int);
+insert into d values (1, 1),(1, 2),(1, 3),(2, 1),(3, 2),(3, 3);
+
+explain (verbose, costs off)
+select
+  a.a,
+  (
+    select sum(t.v0)
+    from (
+      select c.c as v0
+      from c
+      where c.c in (
+        select d.c
+        from d
+          join b
+            on b.b = d.b
+        where b.a = a.a
+      )
+    ) as t
+  )
+from a
+order by a.a;
+select
+  a.a,
+  (
+    select sum(t.v0)
+    from (
+      select c.c as v0
+      from c
+      where c.c in (
+        select d.c
+        from d
+          join b
+            on b.b = d.b
+        where b.a = a.a
+      )
+    ) as t
+  )
+from a
+order by a.a;
+
+explain (verbose, costs off)
+select
+  a.a,
+  (
+    select sum(t.v0)
+    from (
+      select c.c as v0
+      from c
+      where c.c in (
+        select d.c
+        from d
+          join b
+            on b.b = d.b
+        where b.a = a.a
+      )
+    ) as t
+  )
+from a
+where a in (1, 2)
+order by a.a;
+select
+  a.a,
+  (
+    select sum(t.v0)
+    from (
+      select c.c as v0
+      from c
+      where c.c in (
+        select d.c
+        from d
+          join b
+            on b.b = d.b
+        where b.a = a.a
+      )
+    ) as t
+  )
+from a
+where a in (1, 2)
+order by a.a;
+
+-- #23287 string_to_text pushdown
+create table string_to_text_test(data text);
+insert into string_to_text_test values ('foo bar');
+explain (costs off)
+select * from string_to_text_test where 'foo' = ANY(string_to_array(data, ' '));
+select * from string_to_text_test where 'foo' = ANY(string_to_array(data, ' '));
+drop table string_to_text_test;
+
+-- #22533 storage index filter in non-trivial subquery
+CREATE TABLE site (id int PRIMARY KEY);
+CREATE TABLE address (id int PRIMARY KEY, site_id int, recorded_at timestamp);
+CREATE INDEX idx_address_problem ON address (site_id HASH) INCLUDE (recorded_at);
+explain (costs off)
+SELECT s.id, aa.addresses
+FROM site s
+JOIN (
+    SELECT
+        array_agg(json_build_object(
+        'id', a.id,
+        'site_id', a.site_id)) AS addresses
+    FROM address a
+    WHERE a.site_id = 1
+    AND a.recorded_at IS NULL
+    ) aa ON true;
+
+-- try with bitmap scans
+/*+ Set(yb_enable_bitmapscan true) Set(enable_indexscan false) Set(enable_seqscan false) */
+explain (costs off)
+SELECT s.id, aa.addresses
+FROM site s
+JOIN (
+    SELECT
+        array_agg(json_build_object(
+        'id', a.id,
+        'site_id', a.site_id)) AS addresses
+    FROM address a
+    WHERE a.site_id = 1
+    AND a.recorded_at IS NULL
+    ) aa ON true;
+DROP TABLE site;
+DROP TABLE address;

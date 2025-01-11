@@ -29,8 +29,7 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_SERVER_SERVER_BASE_H
-#define YB_SERVER_SERVER_BASE_H
+#pragma once
 
 #include <memory>
 #include <string>
@@ -54,6 +53,7 @@ class MetricEntity;
 class MetricRegistry;
 class NodeInstancePB;
 class ScopedGLogMetrics;
+class ServerRegistrationPB;
 class Thread;
 class Webserver;
 
@@ -107,12 +107,6 @@ class RpcServerBase {
   const std::string get_hostname() const;
 
   virtual Status ReloadKeysAndCertificates() { return Status::OK(); }
-  virtual Status ReloadPgConfig() {
-    // TODO: This should never be called on master, so we should return a bad status here.
-    // Unfortunately master library depends on tserver library (#14034), so it gets all its flags
-    // including the pg flags. Just return OK for now so that everything looks consistent.
-    return Status::OK();
-  }
   virtual std::string GetCertificateDetails() { return ""; }
 
   virtual uint32_t GetAutoFlagConfigVersion() const { return 0; }
@@ -125,7 +119,7 @@ class RpcServerBase {
                 const scoped_refptr<Clock>& clock = nullptr);
   virtual ~RpcServerBase();
 
-  virtual Status InitAutoFlags();
+  virtual Status InitFlags(rpc::Messenger* messenger);
   virtual Status Init();
   virtual Status Start();
 
@@ -206,17 +200,39 @@ class RpcAndWebServerBase : public RpcServerBase {
 
   virtual void DisplayGeneralInfoIcons(std::stringstream* output);
 
+  virtual void DisplayMemoryIcons(std::stringstream* output);
+
   virtual Status DisplayRpcIcons(std::stringstream* output);
+
+  // Local calls is an optimization used to directly handle the incoming
+  // TServer rpc calls locally without going through the rpc layer.
+  // This is used when a cql or a pg perform call performs a read/write
+  // call to the local TServer.
+  virtual bool ShouldExportLocalCalls() {
+    return false;
+  }
 
   static void DisplayIconTile(std::stringstream* output, const std::string icon,
                               const std::string caption, const std::string url);
 
   Status Init() override;
+  Status InitFlags(rpc::Messenger* messenger) override;
   Status Start() override;
   void Shutdown() override;
 
   std::unique_ptr<FsManager> fs_manager_;
   std::unique_ptr<Webserver> web_server_;
+
+ protected:
+  // Returns all the AutoFlags associated with this process.
+  virtual Result<std::unordered_set<std::string>> GetAvailableAutoFlagsForServer() const {
+    return std::unordered_set<std::string>();
+  }
+
+  // Returns all the flags associated with this process.
+  virtual Result<std::unordered_set<std::string>> GetFlagsForServer() const {
+    return std::unordered_set<std::string>();
+  }
 
  private:
   void GenerateInstanceID();
@@ -224,6 +240,8 @@ class RpcAndWebServerBase : public RpcServerBase {
   std::string FooterHtml() const;
 
   scoped_refptr<AtomicMillisLag> server_uptime_ms_metric_;
+  scoped_refptr<AtomicGauge<int64_t>> server_hard_limit_;
+  scoped_refptr<AtomicGauge<int64_t>> server_soft_limit_;
 
   DISALLOW_COPY_AND_ASSIGN(RpcAndWebServerBase);
 };
@@ -245,5 +263,3 @@ void TEST_Isolate(rpc::Messenger* messenger);
 
 } // namespace server
 } // namespace yb
-
-#endif /* YB_SERVER_SERVER_BASE_H */

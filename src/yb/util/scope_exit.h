@@ -11,11 +11,13 @@
 // under the License.
 //
 
-#ifndef YB_UTIL_SCOPE_EXIT_H
-#define YB_UTIL_SCOPE_EXIT_H
+#pragma once
 
 #include <type_traits>
+#include <optional>
+#include <utility>
 
+#include "yb/gutil/macros.h"
 #include "yb/util/status_fwd.h"
 
 namespace yb {
@@ -23,24 +25,39 @@ namespace yb {
 template <class F>
 class NODISCARD_CLASS ScopeExitLambda {
  public:
-  ScopeExitLambda(const ScopeExitLambda&) = delete;
-  void operator=(const ScopeExitLambda&) = delete;
+  ScopeExitLambda(ScopeExitLambda&& rhs) : f_(std::move(rhs.f_)) { rhs.Cancel(); }
 
-  ScopeExitLambda(ScopeExitLambda&& rhs) : f_(std::move(rhs.f_)), moved_(false) {
-    rhs.moved_ = true;
-  }
-
-  explicit ScopeExitLambda(const F& f) : f_(f), moved_(false) {}
-  explicit ScopeExitLambda(F&& f) : f_(std::move(f)), moved_(false) {}
+  explicit ScopeExitLambda(const F& f) : f_(f) {}
+  explicit ScopeExitLambda(F&& f) : f_(std::move(f)) {}
 
   ~ScopeExitLambda() {
-    if (!moved_) {
-      f_();
+    if (f_) {
+      (*f_)();
     }
   }
+
+  // Cancel the lambda and release the resources held by it.
+  // This is useful when ScopeExit is used to perform cleanup due to unexpected exits, such as
+  // VERIFY_RESULT and RETURN_NOT_OK. Whereas in the success case, the cleanup is not needed.
+  //
+  // Ex:
+  //  Status DoStuff(const Identifier& id) {
+  //    std::lock_guard l(mutex_);
+  //    AddToMap(id);
+  //    auto se = CancellableScopeExit([&id](){RemoveFromMap(id);});
+  //
+  //    auto stuff = VERIFY_RESULT(DoInternalStuff(id));
+  //    RETURN_NOT_OK(Commit(stuff));
+  //
+  //    se.Cancel();
+  //    return Status::OK();
+  //  }
+  void Cancel() { f_ = std::nullopt; }
+
  private:
-  F f_;
-  bool moved_;
+  std::optional<F> f_;
+
+  DISALLOW_COPY_AND_ASSIGN(ScopeExitLambda);
 };
 
 template <class F>
@@ -54,5 +71,3 @@ ScopeExitLambda<typename std::remove_reference<F>::type> ScopeExit(F&& f) {
 }
 
 } // namespace yb
-
-#endif // YB_UTIL_SCOPE_EXIT_H

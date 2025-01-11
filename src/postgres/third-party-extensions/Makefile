@@ -1,4 +1,16 @@
-DIRS = pg_hint_plan orafce hypopg
+DIRS = \
+	hypopg \
+	orafce \
+	pgaudit \
+	pg_cron \
+	pg_hint_plan \
+	pg_stat_monitor \
+	pgvector \
+	postgresql-hll \
+	pg_partman \
+	wal2json \
+	pgtap \
+
 BUILDDIRS = $(DIRS:%=build-%)
 INSTALLDIRS = $(DIRS:%=install-%)
 CLEANDIRS = $(DIRS:%=clean-%)

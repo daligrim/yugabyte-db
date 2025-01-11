@@ -96,6 +96,9 @@ export const BOOTSTRAP_PROVIDER_RESPONSE = 'BOOTSTRAP_PROVIDER_RESPONSE';
 export const DELETE_INSTANCE = 'DELETE_INSTANCE';
 export const DELETE_INSTANCE_RESPONSE = 'DELETE_INSTANCE_RESPONSE';
 
+export const CHANGE_NODE_INSTANCE_STATUS = 'CHANGE_NODE_INSTANCE_STATUS';
+export const CHANGE_NODE_INSTANCE_STATUS_RESPONSE = 'CHANGE_NODE_INSTANCE_STATUS_RESPONSE';
+
 export const PRECHECK_INSTANCE = 'PRECHECK_INSTANCE';
 export const PRECHECK_INSTANCE_RESPONSE = 'PRECHECK_INSTANCE_RESPONSE';
 
@@ -273,6 +276,13 @@ export function createRegion(providerUUID, formValues) {
     type: CREATE_REGION,
     payload: request
   };
+}
+
+export function getKubeConfig() {
+  const customerUUID = localStorage.getItem('customerId');
+
+  const url = `${ROOT_URL}/customers/${customerUUID}/providers/suggested_kubernetes_config`;
+  return axios.get(url);
 }
 
 export function createRegionResponse(result) {
@@ -522,10 +532,10 @@ export function listAccessKeysResponse(response) {
   };
 }
 
-export function listAccessKeysReqCompleted(){
+export function listAccessKeysReqCompleted() {
   return {
     type: LIST_ACCESS_KEYS_REQUEST_COMPLETED
-  }
+  };
 }
 
 export function getEBSTypeList() {
@@ -687,6 +697,22 @@ export function deleteInstance(providerUUID, instanceIP) {
 export function deleteInstanceResponse(response) {
   return {
     type: DELETE_INSTANCE_RESPONSE,
+    payload: response
+  };
+}
+
+export function changeNodeInstanceStatus(providerUUID, instanceIP, nodeInstanceStatus) {
+  const uri = `${getProviderEndpoint(providerUUID)}/instances/${instanceIP}/state`;
+  const request = axios.put(uri, nodeInstanceStatus);
+  return {
+    type: CHANGE_NODE_INSTANCE_STATUS,
+    payload: request
+  };
+}
+
+export function changeNodeInstanceStatusResponse(response) {
+  return {
+    type: CHANGE_NODE_INSTANCE_STATUS_RESPONSE,
     payload: response
   };
 }

@@ -3,9 +3,11 @@ title: Contribute to YugabyteDB
 headerTitle: Contribute to YugabyteDB
 linkTitle: Contribute
 description: Contribute to the YugabyteDB code and documentation.
-image: /images/section_icons/index/quick_start.png
+image: fa-light fa-code-pull-request
 headcontent: Contribute code and docs to improve YugabyteDB.
 type: indexpage
+cascade:
+  unversioned: true
 showRightNav: true
 ---
 
@@ -31,7 +33,7 @@ This is the C++ code and the unit tests that comprise the core of YugabyteDB. Yo
 
 ### Docs
 
-[YugabyteDB documentation](/) uses the Hugo framework. There are two types of docs issues - infrastructure enhancements, and adding or modifying content. You can [follow the steps outlined here](docs/) to get set up and make a contribution.
+YugabyteDB documentation uses the Hugo framework. There are two types of docs issues - infrastructure enhancements, and adding or modifying content. You can [follow the steps outlined here](docs/) to get set up and make a contribution.
 
 ## Find an issue
 

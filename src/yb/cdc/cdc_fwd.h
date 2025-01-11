@@ -16,7 +16,6 @@
 namespace yb {
 namespace cdc {
 
-class CDCServiceContext;
 class CDCServiceImpl;
 
 } // namespace cdc

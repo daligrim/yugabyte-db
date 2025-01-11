@@ -17,7 +17,6 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef ROCKSDB_LITE
 
 #include "yb/docdb/docdb_rocksdb_util.h"
 #include "yb/rocksdb/options.h"
@@ -28,16 +27,8 @@ int main(int argc, char** argv) {
   rocksdb::Options options;
   yb::tablet::TabletOptions t_options;
   yb::docdb::InitRocksDBOptions(
-      &options, "" /* log_prefix */, nullptr /* statistics */, t_options);
+      &options, "" /* log_prefix */, "" /* tablet_id */, nullptr /* statistics */, t_options);
   rocksdb::LDBTool tool;
   tool.Run(argc, argv, options);
   return 0;
 }
-
-#else
-#include <stdio.h>
-int main(int argc, char** argv) {
-  fprintf(stderr, "Not supported in lite mode.\n");
-  return 1;
-}
-#endif  // ROCKSDB_LITE

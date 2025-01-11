@@ -29,8 +29,7 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_TSERVER_REMOTE_BOOTSTRAP_SERVICE_H_
-#define YB_TSERVER_REMOTE_BOOTSTRAP_SERVICE_H_
+#pragma once
 
 #include <string>
 #include <unordered_map>
@@ -69,6 +68,10 @@ class RemoteBootstrapServiceImpl : public RemoteBootstrapServiceIf {
   void BeginRemoteBootstrapSession(const BeginRemoteBootstrapSessionRequestPB* req,
                                    BeginRemoteBootstrapSessionResponsePB* resp,
                                    rpc::RpcContext context) override;
+
+  void BeginRemoteSnapshotTransferSession(
+      const BeginRemoteSnapshotTransferSessionRequestPB* req,
+      BeginRemoteSnapshotTransferSessionResponsePB* resp, rpc::RpcContext context) override;
 
   void CheckRemoteBootstrapSessionActive(
       const CheckRemoteBootstrapSessionActiveRequestPB* req,
@@ -115,6 +118,8 @@ class RemoteBootstrapServiceImpl : public RemoteBootstrapServiceIf {
       ChangePeerRoleResponsePB* resp,
       rpc::RpcContext context) override;
 
+  void DumpStatusHtml(std::ostream& out);
+
  private:
   struct SessionData {
     scoped_refptr<RemoteBootstrapSession> session;
@@ -131,7 +136,7 @@ class RemoteBootstrapServiceImpl : public RemoteBootstrapServiceIf {
 
     ~LogAnchorSessionData();
 
-    void ResetExpiration();
+    void ResetExpiration(bool session_succeeded);
 
     std::shared_ptr<tablet::TabletPeer> tablet_peer_;
 
@@ -143,6 +148,11 @@ class RemoteBootstrapServiceImpl : public RemoteBootstrapServiceIf {
   typedef std::unordered_map<std::string, SessionData> SessionMap;
 
   typedef std::unordered_map<std::string, std::shared_ptr<LogAnchorSessionData>> LogAnchorsMap;
+
+  template <typename Request>
+  Result<scoped_refptr<RemoteBootstrapSession>> CreateRemoteSession(
+      const Request* req, const ServerRegistrationPB* tablet_leader_conn_info,
+      const std::string& requestor_string, RemoteBootstrapErrorPB::Code* error_code);
 
   // Validate the data identifier in a FetchData request.
   Status ValidateFetchRequestDataId(
@@ -182,7 +192,13 @@ class RemoteBootstrapServiceImpl : public RemoteBootstrapServiceIf {
   // Protects sessions_ and session_expirations_ maps.
   mutable std::mutex sessions_mutex_;
   SessionMap sessions_ GUARDED_BY(sessions_mutex_);
-  std::atomic<int32> nsessions_ GUARDED_BY(sessions_mutex_) = {0};
+  // Count of sessions that are in the phase of actively serving data over the network. We use this
+  // for rate limiting instead of sessions_.size() so as to avoid rbs dest peers in the local
+  // bootstrap phase unecessarily throttle the available bandwidth.
+  std::atomic<int32> nsessions_serving_data_ GUARDED_BY(sessions_mutex_) = {0};
+  // Metric tracking RBS sessions actively using the bandwidth on this node to transfer data.
+  // Set to reflect nsessions_serving_data_.
+  scoped_refptr<yb::AtomicGauge<int32>> num_sessions_serving_data_;
 
   mutable std::mutex log_anchors_mutex_;
   LogAnchorsMap log_anchors_map_ GUARDED_BY(log_anchors_mutex_);
@@ -195,5 +211,3 @@ class RemoteBootstrapServiceImpl : public RemoteBootstrapServiceIf {
 
 } // namespace tserver
 } // namespace yb
-
-#endif // YB_TSERVER_REMOTE_BOOTSTRAP_SERVICE_H_

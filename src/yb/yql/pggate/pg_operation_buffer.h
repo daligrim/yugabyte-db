@@ -11,11 +11,13 @@
 // under the License.
 //
 
-#ifndef YB_YQL_PGGATE_PG_OPERATION_BUFFER_H_
-#define YB_YQL_PGGATE_PG_OPERATION_BUFFER_H_
+#pragma once
 
 #include <functional>
 #include <memory>
+#include <utility>
+
+#include "yb/ash/wait_state.h"
 
 #include "yb/common/common_fwd.h"
 #include "yb/common/pg_types.h"
@@ -25,32 +27,44 @@
 
 #include "yb/yql/pggate/pg_gate_fwd.h"
 #include "yb/yql/pggate/pg_perform_future.h"
+#include "yb/yql/pggate/pg_tools.h"
 
-namespace yb {
-namespace pggate {
+namespace yb::pggate {
+
+class PgDocMetrics;
+class PgSession;
+class PgTableDesc;
 
 struct BufferingSettings {
   size_t max_batch_size;
   size_t max_in_flight_operations;
 };
 
-struct BufferableOperations {
-  PgsqlOps operations;
-  PgObjectIds relations;
-
-  void Add(PgsqlOpPtr op, const PgObjectId& relation);
+class BufferableOperations {
+ public:
+  const PgsqlOps& operations() const { return operations_; }
+  const PgObjectIds& relations() const { return relations_; }
+  void Add(PgsqlOpPtr&& op, const PgTableDesc& table);
   void Swap(BufferableOperations* rhs);
   void Clear();
   void Reserve(size_t capacity);
-  bool empty() const;
-  size_t size() const;
+  bool Empty() const;
+  size_t Size() const;
+  void MoveTo(PgsqlOps& operations, PgObjectIds& relations) &&;
+
+ private:
+  PgsqlOps operations_;
+  PgObjectIds relations_;
 };
 
 class PgOperationBuffer {
  public:
-  using Flusher = std::function<Result<PerformFuture>(BufferableOperations, bool)>;
+  using PerformFutureEx = std::pair<PerformFuture, PgSession*>;
+  using OperationsFlusher = std::function<Result<PerformFutureEx>(BufferableOperations&&, bool)>;
 
-  PgOperationBuffer(const Flusher& flusher, const BufferingSettings& buffering_settings);
+  PgOperationBuffer(
+      OperationsFlusher&& ops_flusher, PgDocMetrics& metrics,
+      const BufferingSettings& buffering_settings);
   ~PgOperationBuffer();
   Status Add(const PgTableDesc& table, PgsqlWriteOpPtr op, bool transactional);
   Status Flush();
@@ -64,7 +78,4 @@ class PgOperationBuffer {
   std::unique_ptr<Impl> impl_;
 };
 
-} // namespace pggate
-} // namespace yb
-
-#endif // YB_YQL_PGGATE_PG_OPERATION_BUFFER_H_
+} // namespace yb::pggate

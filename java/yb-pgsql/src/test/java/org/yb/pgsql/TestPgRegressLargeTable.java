@@ -34,7 +34,7 @@ import static org.yb.AssertionWrappers.*;
  * Runs the pg_regress test suite on YB code.
  */
 @RunWith(value=YBTestRunnerNonTsanOnly.class)
-public class TestPgRegressLargeTable extends BasePgSQLTest {
+public class TestPgRegressLargeTable extends BasePgRegressTest {
   private static final Logger LOG = LoggerFactory.getLogger(TestPgRegressLargeTable.class);
 
   private static final String TURN_OFF_COPY_FROM_BATCH_TRANSACTION =
@@ -48,7 +48,7 @@ public class TestPgRegressLargeTable extends BasePgSQLTest {
   @Override
   protected Map<String, String> getTServerFlags() {
     Map<String, String> flags = super.getTServerFlags();
-    flags.put("ysql_pg_conf", TURN_OFF_COPY_FROM_BATCH_TRANSACTION);
+    appendToYsqlPgConf(flags, TURN_OFF_COPY_FROM_BATCH_TRANSACTION);
     return flags;
   }
 

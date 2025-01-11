@@ -1,14 +1,20 @@
 // Copyright (c) YugaByte, Inc.
 
-import React, { Component } from 'react';
+import { Component, Suspense, lazy } from 'react';
+import { YBLoadingCircleIcon } from '../components/common/indicators';
 
-import { ReleaseListContainer } from '../components/releases';
-
+const NewReleaseList = lazy(() =>
+  import('../redesign/features/releases/components/ReleaseList').then(({ NewReleaseList }) => ({
+    default: NewReleaseList
+  }))
+);
 class Releases extends Component {
   render() {
     return (
       <div className="dashboard-container">
-        <ReleaseListContainer />
+        <Suspense fallback={YBLoadingCircleIcon}>
+          <NewReleaseList />
+        </Suspense>
       </div>
     );
   }

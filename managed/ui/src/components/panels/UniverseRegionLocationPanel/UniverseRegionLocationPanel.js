@@ -1,11 +1,12 @@
 // Copyright (c) YugaByte, Inc.
 
-import React, { Component } from 'react';
-import { RegionMap } from '../../maps';
-import { RegionMapLegend } from '../../maps';
+import { Component } from 'react';
+import { RegionMap, RegionMapLegend } from '../../maps';
+
 import { isNonEmptyArray, isValidObject, isEmptyArray } from '../../../utils/ObjectUtils';
 import { getPromiseState } from '../../../utils/PromiseUtils';
-import { getPrimaryCluster, getProviderMetadata } from '../../../utils/UniverseUtils';
+import { getPrimaryCluster } from '../../../utils/UniverseUtils';
+import { PROVIDER_TYPES } from '../../../config';
 
 export default class UniverseRegionLocationPanel extends Component {
   constructor(props) {
@@ -54,7 +55,7 @@ export default class UniverseRegionLocationPanel extends Component {
         if (isNonEmptyArray(universePrimaryRegions)) {
           universePrimaryRegions.forEach(function (regionItem) {
             if (isValidObject(regionItem.uuid)) {
-              if (universeListByRegions.hasOwnProperty(regionItem.uuid)) {
+              if (Object.prototype.hasOwnProperty.call(universeListByRegions, regionItem.uuid)) {
                 universeListByRegions[regionItem.uuid].push(universeItem);
               } else {
                 universeListByRegions[regionItem.uuid] = [universeItem];
@@ -72,16 +73,20 @@ export default class UniverseRegionLocationPanel extends Component {
         }
       });
     });
-    const completeProviderList = cloud.providers.data.map((provider) => {
-      return getProviderMetadata(provider);
+    const uniqueProviderCodes = new Set();
+    cloud.providers.data.forEach((provider) => {
+      uniqueProviderCodes.add(provider.code);
     });
+    const uniqueProvidersMetadata = Array.from(uniqueProviderCodes).map((providerCode) =>
+      PROVIDER_TYPES.find((providerType) => providerType.code === providerCode)
+    );
 
     return (
       <div>
         <RegionMap title="All Supported Regions" regions={completeRegionList} type="All" />
-        {isNonEmptyArray(completeProviderList) && (
+        {isNonEmptyArray(uniqueProvidersMetadata) && (
           <RegionMapLegend
-            providers={completeProviderList}
+            providers={uniqueProvidersMetadata}
             onProviderSelect={this.onProviderSelect}
           />
         )}

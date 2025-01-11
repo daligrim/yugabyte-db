@@ -38,12 +38,22 @@
 namespace yb {
 XClusterSafeTimeMap::XClusterSafeTimeMap() : map_initialized_(false) {}
 
-Result<HybridTime> XClusterSafeTimeMap::GetSafeTime(const NamespaceId& namespace_id) const {
+bool XClusterSafeTimeMap::HasNamespace(const NamespaceId& namespace_id) const {
+  if (empty()) {
+    return false;
+  }
+
+  SharedLock l(xcluster_safe_time_map_mutex_);
+  return ContainsKey(xcluster_safe_time_map_, namespace_id);
+}
+
+Result<std::optional<HybridTime>> XClusterSafeTimeMap::GetSafeTime(
+    const NamespaceId& namespace_id) const {
   SharedLock l(xcluster_safe_time_map_mutex_);
   SCHECK(map_initialized_, TryAgain, "XCluster safe time not yet initialized");
   auto* safe_time = FindOrNull(xcluster_safe_time_map_, namespace_id);
   if (!safe_time) {
-    return STATUS(NotFound, Format("XCluster safe time not found for namespace $0", namespace_id));
+    return std::nullopt;
   }
 
   HybridTime safe_ht = HybridTime(*safe_time);
@@ -56,9 +66,10 @@ Result<HybridTime> XClusterSafeTimeMap::GetSafeTime(const NamespaceId& namespace
   return safe_ht;
 }
 
-void XClusterSafeTimeMap::Update(XClusterNamespaceToSafeTimePBMap safe_time_map) {
+void XClusterSafeTimeMap::Update(const XClusterNamespaceToSafeTimePBMap& safe_time_map) {
   std::lock_guard l(xcluster_safe_time_map_mutex_);
   map_initialized_ = true;
   xcluster_safe_time_map_ = std::move(safe_time_map);
+  empty_.store(xcluster_safe_time_map_.empty(), std::memory_order_release);
 }
 }  // namespace yb

@@ -12,7 +12,6 @@
 #
 
 set(YB_PCH_PREFIX cqlserver)
-set(YB_PCH_DEP_LIBS opid_proto)
 
 #########################################
 # cqlserver_service_proto
@@ -46,6 +45,7 @@ set(CQLSERVER_SRCS
   cql_server_options.cc
   cql_service.cc
   cql_statement.cc
+  statements-path-handler.cc
   system_query_cache.cc
 )
 

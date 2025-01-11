@@ -32,7 +32,7 @@
 
 #include <boost/algorithm/string/predicate.hpp>
 
-#include <glog/logging.h>
+#include "yb/util/logging.h"
 #include <glog/stl_logging.h>
 #include <gtest/gtest.h>
 
@@ -46,6 +46,9 @@
 #include "yb/util/test_macros.h"
 #include "yb/util/test_util.h"
 #include "yb/fs/fs.pb.h"
+
+using std::string;
+using std::vector;
 
 DECLARE_string(fs_data_dirs);
 DECLARE_string(fs_wal_dirs);
@@ -106,18 +109,18 @@ class FsManagerTestBase : public YBTest {
   void SetupFlagsAndBaseDirs(
       const string& data_path, const string& wal_path, FsManagerOpts* out_opts) {
     // Setup data in case empty.
-    FLAGS_fs_data_dirs = data_path;
+    ANNOTATE_UNPROTECTED_WRITE(FLAGS_fs_data_dirs) = data_path;
     if (!data_path.empty()) {
       string path = GetTestPath(data_path);
       ASSERT_OK(env_->CreateDir(path));
-      FLAGS_fs_data_dirs = path;
+      ANNOTATE_UNPROTECTED_WRITE(FLAGS_fs_data_dirs) = path;
     }
     // Setup wal in case empty.
-    FLAGS_fs_wal_dirs = wal_path;
+    ANNOTATE_UNPROTECTED_WRITE(FLAGS_fs_wal_dirs) = wal_path;
     if (!wal_path.empty()) {
       string path = GetTestPath(wal_path);
       ASSERT_OK(env_->CreateDir(path));
-      FLAGS_fs_wal_dirs = path;
+      ANNOTATE_UNPROTECTED_WRITE(FLAGS_fs_wal_dirs) = path;
     }
     // Setup opts from flags and add server type.
     FsManagerOpts opts;
@@ -199,7 +202,7 @@ TEST_F(FsManagerTestBase, TestDuplicatePaths) {
 }
 
 TEST_F(FsManagerTestBase, TestListTablets) {
-  auto tablet_ids = ASSERT_RESULT(fs_manager()->ListTabletIds());
+  auto tablet_ids = ASSERT_RESULT(fs_manager()->ListTabletIds(CleanupTemporaryFiles::kTrue));
   ASSERT_EQ(0, tablet_ids.size());
 
   string path = fs_manager()->GetRaftGroupMetadataDirs()[0];
@@ -213,7 +216,7 @@ TEST_F(FsManagerTestBase, TestListTablets) {
   ASSERT_OK(env_->NewWritableFile(
       JoinPathSegments(path, "a_tablet_sort_of"), &writer));
 
-  tablet_ids = ASSERT_RESULT(fs_manager()->ListTabletIds());
+  tablet_ids = ASSERT_RESULT(fs_manager()->ListTabletIds(CleanupTemporaryFiles::kTrue));
   ASSERT_EQ(1, tablet_ids.size()) << tablet_ids;
 }
 
@@ -306,7 +309,7 @@ TEST_F(FsManagerTestBase, MultiDriveWithoutMeta) {
 
   // Deleted tablet-meta should be created
   ASSERT_OK(fs_manager()->CheckAndOpenFileSystemRoots());
-  ASSERT_OK(fs_manager()->ListTabletIds());
+  ASSERT_OK(fs_manager()->ListTabletIds(CleanupTemporaryFiles::kTrue));
 }
 
 TEST_F(FsManagerTestBase, AutoFlagsTest) {

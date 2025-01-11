@@ -11,13 +11,15 @@
 // under the License.
 //
 
-#ifndef YB_UTIL_DEBUG_LOCK_DEBUG_H
-#define YB_UTIL_DEBUG_LOCK_DEBUG_H
+#pragma once
 
 #include <atomic>
 #include <mutex>
 
 #include "yb/gutil/thread_annotations.h"
+
+#include "yb/util/logging.h"
+#include "yb/util/monotime.h"
 
 namespace yb {
 
@@ -38,14 +40,23 @@ class NonRecursiveSharedLockBase {
 
 template<class Mutex>
 class SCOPED_CAPABILITY NonRecursiveSharedLock : public NonRecursiveSharedLockBase {
+  bool acquired;
  public:
   explicit NonRecursiveSharedLock(Mutex& mutex) ACQUIRE_SHARED(mutex) // NOLINT
       : NonRecursiveSharedLockBase(&mutex) {
     mutex.lock_shared();
+    acquired = true;
+  }
+
+  void unlock() RELEASE() {
+    if (acquired) {
+      static_cast<Mutex*>(mutex())->unlock_shared();
+    }
+    acquired = false;
   }
 
   ~NonRecursiveSharedLock() RELEASE() {
-    static_cast<Mutex*>(mutex())->unlock_shared();
+    unlock();
   }
 };
 
@@ -70,17 +81,17 @@ class SingleThreadedAtomic {
   explicit SingleThreadedAtomic(const T& t) : value_(t) {}
 
   T load(std::memory_order) const {
-    std::lock_guard<SingleThreadedMutex> lock(mutex_);
+    std::lock_guard lock(mutex_);
     return value_;
   }
 
   void store(const T& value, std::memory_order) {
-    std::lock_guard<SingleThreadedMutex> lock(mutex_);
+    std::lock_guard lock(mutex_);
     value_ = value;
   }
 
   bool compare_exchange_strong(T& old_value, const T& new_value) { // NOLINT
-    std::lock_guard<SingleThreadedMutex> lock(mutex_);
+    std::lock_guard lock(mutex_);
     if (value_ == old_value) {
       value_ = new_value;
       return true;
@@ -94,6 +105,76 @@ class SingleThreadedAtomic {
   mutable SingleThreadedMutex mutex_;
 };
 
-}  // namespace yb
+class TimeTrackedLockBase {
+ protected:
+  void Acquired();
+  void Released(const char* name);
 
-#endif  // YB_UTIL_DEBUG_LOCK_DEBUG_H
+  void Assign(const TimeTrackedLockBase& rhs);
+
+  bool owns_lock() const {
+    return start_ != CoarseTimePoint();
+  }
+
+ private:
+  CoarseTimePoint start_;
+};
+
+template <class MutexType>
+class SCOPED_CAPABILITY TimeTrackedUniqueLock : public TimeTrackedLockBase {
+ public:
+  explicit TimeTrackedUniqueLock(MutexType& mutex) ACQUIRE(mutex) : mutex_(mutex) {
+    lock();
+  }
+
+  ~TimeTrackedUniqueLock() RELEASE() {
+    if (owns_lock()) {
+      unlock();
+    }
+  }
+
+  void lock() ACQUIRE() {
+    mutex_.lock();
+    Acquired();
+  }
+
+  void unlock() RELEASE() {
+    CHECK(owns_lock());
+    mutex_.unlock();
+    Released("lock");
+  }
+
+ private:
+  MutexType& mutex_;
+};
+
+template <class MutexType>
+class SCOPED_CAPABILITY TimeTrackedSharedLock : public TimeTrackedLockBase {
+ public:
+  explicit TimeTrackedSharedLock(MutexType& mutex) ACQUIRE_SHARED(mutex) : mutex_(mutex) {
+    lock();
+
+  }
+
+  ~TimeTrackedSharedLock() RELEASE() {
+    if (owns_lock()) {
+      unlock();
+    }
+  }
+
+  void lock() ACQUIRE_SHARED() {
+    mutex_.lock_shared();
+    Acquired();
+  }
+
+  void unlock() RELEASE() {
+    CHECK(owns_lock());
+    mutex_.unlock_shared();
+    Released("shared lock");
+  }
+
+ private:
+  MutexType& mutex_;
+};
+
+}  // namespace yb

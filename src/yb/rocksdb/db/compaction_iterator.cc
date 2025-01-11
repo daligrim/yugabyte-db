@@ -73,7 +73,7 @@ CompactionIterator::CompactionIterator(
 void CompactionIterator::AddLiveRanges(const std::vector<std::pair<Slice, Slice>>& ranges) {
   for (auto it = ranges.rbegin(); it != ranges.rend(); ++it) {
     const auto& range = *it;
-    DCHECK(range.first.Less(range.second));
+    DCHECK(range.second.empty() || range.first.Less(range.second)) << AsString(range);
     if (!live_key_ranges_stack_.empty()) {
       DCHECK(live_key_ranges_stack_.back().first.GreaterOrEqual(range.second));
     }
@@ -140,9 +140,13 @@ void CompactionIterator::NextFromInput() {
   at_next_ = false;
   valid_ = false;
 
-  while (!valid_ && input_->Valid()) {
-    key_ = input_->key();
-    value_ = input_->value();
+  while (!valid_) {
+    const auto& entry = input_->Entry();
+    if (!entry) {
+      return;
+    }
+    key_ = entry.key;
+    value_ = entry.value;
     iter_stats_.num_input_records++;
 
     if (!ParseInternalKey(key_, &ikey_)) {

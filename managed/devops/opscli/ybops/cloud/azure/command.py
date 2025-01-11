@@ -14,12 +14,14 @@ from ybops.cloud.azure.method import AzureNetworkBootstrapMethod, AzureProvision
     AzureQueryInstanceTypesMethod, AzureQueryVnetMethod, AzureNetworkCleanupMethod, \
     AzureQueryUltraMethod, AzureCreateDnsEntryMethod, AzureEditDnsEntryMethod, \
     AzureDeleteDnsEntryMethod, AzureListDnsEntryMethod, AzureDeleteRootVolumesMethod, \
-    AzurePauseInstancesMethod, AzureResumeInstancesMethod
+    AzurePauseInstancesMethod, AzureResumeInstancesMethod, AzureChangeInstanceTypeMethod, \
+    AzureCreateRootVolumesMethod, AzureReplaceRootVolumeMethod, AzureHardRebootInstancesMethod, \
+    AzureQueryCurrentHostMethod, AzureQueryDeviceNames
 from ybops.cloud.common.method import AccessCreateVaultMethod, ConfigureInstancesMethod, \
     ListInstancesMethod, InitYSQLMethod, UpdateDiskMethod, CronCheckMethod, \
     AccessEditVaultMethod, AccessDeleteKeyMethod, TransferXClusterCerts, \
     VerifySSHConnection, AddAuthorizedKey, RemoveAuthorizedKey, RebootInstancesMethod, RunHooks, \
-    WaitForSSHConnection
+    WaitForConnection, ManageOtelCollector
 
 
 class AzureNetworkCommand(NetworkCommand):
@@ -45,6 +47,7 @@ class AzureInstanceCommand(InstanceCommand):
         self.add_method(UpdateDiskMethod(self))
         self.add_method(CronCheckMethod(self))
         self.add_method(AzureDeleteRootVolumesMethod(self))
+        self.add_method(AzureChangeInstanceTypeMethod(self))
         self.add_method(TransferXClusterCerts(self))
         self.add_method(VerifySSHConnection(self))
         self.add_method(AddAuthorizedKey(self))
@@ -53,7 +56,11 @@ class AzureInstanceCommand(InstanceCommand):
         self.add_method(AzureResumeInstancesMethod(self))
         self.add_method(RebootInstancesMethod(self))
         self.add_method(RunHooks(self))
-        self.add_method(WaitForSSHConnection(self))
+        self.add_method(WaitForConnection(self))
+        self.add_method(AzureCreateRootVolumesMethod(self))
+        self.add_method(AzureReplaceRootVolumeMethod(self))
+        self.add_method(AzureHardRebootInstancesMethod(self))
+        self.add_method(ManageOtelCollector(self))
 
 
 class AzureAccessCommand(AccessCommand):
@@ -78,6 +85,8 @@ class AzureQueryCommand(QueryCommand):
         self.add_method(AzureQueryInstanceTypesMethod(self))
         self.add_method(AzureQueryVnetMethod(self))
         self.add_method(AzureQueryUltraMethod(self))
+        self.add_method(AzureQueryCurrentHostMethod(self))
+        self.add_method(AzureQueryDeviceNames(self))
 
 
 class AzureDnsCommand(DnsCommand):

@@ -29,8 +29,7 @@
 // Example code is also available
 //   https://github.com/facebook/rocksdb/wiki/A-Tutorial-of-RocksDB-SST-formats#wiki-examples
 
-#ifndef YB_ROCKSDB_TABLE_H
-#define YB_ROCKSDB_TABLE_H
+#pragma once
 
 #include <memory>
 #include <string>
@@ -54,7 +53,6 @@ class WritableFileWriter;
 struct EnvOptions;
 struct Options;
 
-using std::unique_ptr;
 using namespace yb::size_literals;
 
 enum ChecksumType : char {
@@ -119,6 +117,12 @@ struct BlockBasedTableOptions {
 
   // If non-NULL use the specified cache for compressed blocks.
   // If NULL, rocksdb will not use a compressed block cache.
+  // 'block_cache_compressed' should be nullptr for now. If you want to configure it,
+  // the logic for generating the block cache key prefix must be modified.
+  // With 'block_cache_compressed' enabled, data will be put into the block cache
+  // during file generation. However, both the mtime and the CRC32 of the
+  // meta-block required for generating the block cache key prefix are not
+  // available during this process.
   std::shared_ptr<Cache> block_cache_compressed = nullptr;
 
   // Approximate size of user data packed per block, in bytes. Note that the
@@ -231,7 +235,6 @@ struct BlockBasedTablePropertyNames {
 extern TableFactory* NewBlockBasedTableFactory(
     const BlockBasedTableOptions& table_options = BlockBasedTableOptions());
 
-#ifndef ROCKSDB_LITE
 
 enum EncodingType : char {
   // Always write full keys without any special encoding.
@@ -321,7 +324,6 @@ struct PlainTableOptions {
 extern TableFactory* NewPlainTableFactory(const PlainTableOptions& options =
                                               PlainTableOptions());
 
-#endif  // ROCKSDB_LITE
 
 class RandomAccessFileReader;
 
@@ -358,8 +360,8 @@ class TableFactory {
   // table_reader is the output table reader.
   virtual Status NewTableReader(
       const TableReaderOptions& table_reader_options,
-      unique_ptr<RandomAccessFileReader>&& base_file, uint64_t base_file_size,
-      unique_ptr<TableReader>* table_reader) const = 0;
+      std::unique_ptr<RandomAccessFileReader>&& base_file, uint64_t base_file_size,
+      std::unique_ptr<TableReader>* table_reader) const = 0;
 
   // Whether SST split into metadata and data file(s) is supported for writing.
   // There is a AdaptiveTableFactory inheriting common TableFactory interface. AdaptiveTableFactory
@@ -421,16 +423,8 @@ class TableFactory {
   // Developers should use DB::SetOption() instead to dynamically change
   // options while the DB is open.
   virtual void* GetOptions() { return nullptr; }
-
-  // Returns SST file filter for pruning out files which doesn't contain some part of user_key.
-  // It should be in sync with FilterPolicy used for bloom filter construction. For example,
-  // file filter should only consider hashed components of the key when using with
-  // DocDbAwareFilterPolicy and HashedComponentsExtractor.
-  virtual std::shared_ptr<TableAwareReadFileFilter> NewTableAwareReadFileFilter(
-      const ReadOptions &read_options, const Slice &user_key) const { return nullptr; }
 };
 
-#ifndef ROCKSDB_LITE
 // Create a special table factory that can open either of the supported
 // table formats, based on setting inside the SST files. It should be used to
 // convert a DB from one table format to another.
@@ -443,8 +437,5 @@ extern TableFactory* NewAdaptiveTableFactory(
     std::shared_ptr<TableFactory> block_based_table_factory = nullptr,
     std::shared_ptr<TableFactory> plain_table_factory = nullptr);
 
-#endif  // ROCKSDB_LITE
 
 }  // namespace rocksdb
-
-#endif  // YB_ROCKSDB_TABLE_H

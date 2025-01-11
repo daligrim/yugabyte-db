@@ -3,9 +3,10 @@ import { useUpdateEffect } from 'react-use';
 import { getUnixTime } from 'date-fns';
 import { useTranslation, TFuncKey, Namespace } from 'react-i18next';
 import { MetricResponse, useGetClusterMetricQuery } from '@app/api/src';
-import { getInterval, RelativeInterval, roundDecimal, timeFormatterWithStartEnd } from '@app/helpers';
+import { ClusterType, getInterval, RelativeInterval, roundDecimal, timeFormatterWithStartEnd } from '@app/helpers';
 import { YBChartContainer } from '@app/components/YBChart/YBChartContainer';
 import { YBLineChartOptions, YBLinerChart } from '@app/components/YBChart/YBLinerChart';
+import { useQueryParam } from 'use-query-params';
 
 interface ChartDataPoint {
   time: number;
@@ -18,6 +19,8 @@ interface ChartDataPoint {
   ['DISK_USAGE_GB']?: number | null;
   ['PROVISIONED_DISK_SPACE_GB']?: number | null;
   ['TOTAL_LIVE_NODES']?: number | null;
+  ['TOTAL_LOGICAL_CONNECTIONS']?: number | null;
+  ['TOTAL_PHYSICAL_CONNECTIONS']?: number | null;
 }
 
 interface ChartContainerProps {
@@ -31,6 +34,8 @@ interface ChartContainerProps {
   unitKey?: TFuncKey<Namespace>;
   refreshFromParent?: number;
   regionName?: string;
+  zone?: string,
+  clusterType?: ClusterType;
 }
 
 /*
@@ -74,7 +79,9 @@ export const ChartController: FC<ChartContainerProps> = ({
   chartDrawingType,
   unitKey,
   refreshFromParent,
-  regionName
+  regionName,
+  zone,
+  clusterType
 }) => {
   const [interval, setNewInterval] = useState(() => getInterval(relativeInterval));
   const { t } = useTranslation();
@@ -85,7 +92,9 @@ export const ChartController: FC<ChartContainerProps> = ({
       node_name: newNodeName,
       start_time: getUnixTime(interval.start),
       end_time: getUnixTime(interval.end),
-      region: regionName === '' ? undefined : regionName
+      region: regionName === '' ? undefined : regionName,
+      zone: zone === '' ? undefined : zone,
+      cluster_type: clusterType
     },
     {
       query: {
@@ -103,14 +112,18 @@ export const ChartController: FC<ChartContainerProps> = ({
     setNewNodeName(nodeName === 'all' ? undefined : nodeName);
   }, [relativeInterval, nodeName]);
 
+  const [ refreshChartController, setRefreshChartController ] = 
+    useQueryParam<boolean | undefined>("refreshChartController");
+
   // getInterval() will return new timestamps on every call which will trigger query re-run
   const refresh = useCallback(() => {
     setNewInterval(getInterval(relativeInterval));
+    setRefreshChartController(undefined, "replaceIn");
   }, [relativeInterval]);
 
   useEffect(() => {
     refresh();
-  }, [refreshFromParent, refresh]);
+  }, [refreshFromParent, refresh, refreshChartController]);
 
   const tooltipFormatter = (value: number, name: string) => {
     const tooltipVal = roundDecimal(value).toLocaleString();

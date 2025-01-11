@@ -11,6 +11,7 @@
 // under the License.
 //
 
+#include "yb/util/callsite_profiling.h"
 #include "yb/util/cross_thread_mutex.h"
 
 namespace yb {
@@ -23,10 +24,10 @@ void CrossThreadMutex::lock() {
 
 void CrossThreadMutex::unlock() {
   {
-    std::lock_guard<std::mutex> lk(mutex_);
+    std::lock_guard lk(mutex_);
     is_locked_ = false;
   }
-  condition_variable_.notify_one();
+  YB_PROFILE(condition_variable_.notify_one());
 }
 
 } // namespace yb

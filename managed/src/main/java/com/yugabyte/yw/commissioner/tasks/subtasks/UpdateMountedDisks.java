@@ -13,11 +13,13 @@ public class UpdateMountedDisks extends NodeTaskBase {
   public static final Logger LOG = LoggerFactory.getLogger(UpdateMountedDisks.class);
 
   @Inject
-  protected UpdateMountedDisks(BaseTaskDependencies baseTaskDependencies, NodeManager nodeManager) {
-    super(baseTaskDependencies, nodeManager);
+  protected UpdateMountedDisks(BaseTaskDependencies baseTaskDependencies) {
+    super(baseTaskDependencies);
   }
 
-  public static class Params extends NodeTaskParams {}
+  public static class Params extends NodeTaskParams {
+    public String machineImage;
+  }
 
   @Override
   protected Params taskParams() {

@@ -13,7 +13,7 @@
 
 #include "yb/master/util/yql_vtable_helpers.h"
 
-#include <future>
+#include <algorithm>
 
 #include <boost/container/small_vector.hpp>
 
@@ -25,11 +25,10 @@
 #include "yb/util/net/net_util.h"
 #include "yb/util/result.h"
 #include "yb/util/status_format.h"
+#include "yb/util/std_util.h"
 #include "yb/util/yb_partition.h"
 
-namespace yb {
-namespace master {
-namespace util {
+namespace yb::master::util {
 
 // Ideally, we want clients to use YB's own load-balancing policy for Cassandra to route the
 // requests to the respective nodes hosting the partition keys. But for clients using vanilla
@@ -101,11 +100,9 @@ PublicPrivateIPFutures GetPublicPrivateIPFutures(
 
   const auto& private_host = common.private_rpc_addresses()[0].host();
   if (private_host.empty()) {
-    std::promise<Result<IpAddress>> promise;
-    result.private_ip_future = promise.get_future();
-    promise.set_value(STATUS_FORMAT(
+    result.private_ip_future = ValueAsFuture(Result<IpAddress>(STATUS_FORMAT(
         IllegalState, "Tablet server $0 doesn't have any rpc addresses registered",
-        ts_info.tserver_instance().permanent_uuid()));
+        ts_info.tserver_instance().permanent_uuid())));
     return result;
   }
 
@@ -128,10 +125,11 @@ const QLValuePB& GetValueHelper<QLValuePB>::Apply(
 QLValuePB GetValueHelper<std::string>::Apply(const std::string& strval, const DataType data_type) {
   QLValuePB value_pb;
   switch (data_type) {
-    case STRING:
+    case DataType::STRING:
       value_pb.set_string_value(strval);
       break;
-    case BINARY:
+    case DataType::VECTOR: FALLTHROUGH_INTENDED;
+    case DataType::BINARY:
       value_pb.set_binary_value(strval);
       break;
     default:
@@ -145,10 +143,10 @@ QLValuePB GetValueHelper<std::string>::Apply(
     const char* strval, size_t len, const DataType data_type) {
   QLValuePB value_pb;
   switch (data_type) {
-    case STRING:
+    case DataType::STRING:
       value_pb.set_string_value(strval, len);
       break;
-    case BINARY:
+    case DataType::BINARY:
       value_pb.set_binary_value(strval, len);
       break;
     default:
@@ -161,16 +159,16 @@ QLValuePB GetValueHelper<std::string>::Apply(
 QLValuePB GetValueHelper<int32_t>::Apply(const int32_t intval, const DataType data_type) {
   QLValuePB value_pb;
   switch (data_type) {
-    case INT64:
+    case DataType::INT64:
       value_pb.set_int64_value(intval);
       break;
-    case INT32:
+    case DataType::INT32:
       value_pb.set_int32_value(intval);
       break;
-    case INT16:
+    case DataType::INT16:
       value_pb.set_int16_value(intval);
       break;
-    case INT8:
+    case DataType::INT8:
       value_pb.set_int8_value(intval);
       break;
     default:
@@ -199,6 +197,4 @@ QLValuePB GetValueHelper<bool>::Apply(const bool bool_val, const DataType data_t
   return value_pb;
 }
 
-}  // namespace util
-}  // namespace master
-}  // namespace yb
+}  // namespace yb::master::util

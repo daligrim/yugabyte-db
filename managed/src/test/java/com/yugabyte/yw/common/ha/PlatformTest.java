@@ -23,19 +23,21 @@ import static play.libs.Files.singletonTemporaryFileCreator;
 import static play.test.Helpers.contentAsString;
 import static play.test.Helpers.fakeRequest;
 
-import akka.stream.javadsl.Source;
-import akka.util.ByteString;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableMap;
+import com.yugabyte.yw.common.AppConfigHelper;
+import com.yugabyte.yw.common.ConfigHelper;
 import com.yugabyte.yw.common.FakeApi;
 import com.yugabyte.yw.common.FakeDBApplication;
 import com.yugabyte.yw.common.ModelFactory;
+import com.yugabyte.yw.common.Util;
 import com.yugabyte.yw.models.Customer;
 import com.yugabyte.yw.models.PlatformInstance;
 import com.yugabyte.yw.models.Users;
-import io.ebean.Ebean;
-import io.ebean.EbeanServer;
+import io.ebean.DB;
+import io.ebean.Database;
+import io.ebean.MockHelper;
 import java.io.File;
 import java.io.FileWriter;
 import java.io.IOException;
@@ -51,6 +53,8 @@ import java.util.Map;
 import java.util.Random;
 import java.util.UUID;
 import org.apache.commons.io.FileUtils;
+import org.apache.pekko.stream.javadsl.Source;
+import org.apache.pekko.util.ByteString;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Rule;
@@ -83,10 +87,12 @@ public class PlatformTest extends FakeDBApplication {
   private static final String LOCAL_ACME_ORG = "http://local.acme.org/";
   private static final String REMOTE_ACME_ORG = "http://remote.acme.org";
   private FakeApi fakeApi;
-  EbeanServer localEBeanServer;
+  Database localEBeanServer;
 
   private PlatformInstanceClientFactory mockPlatformInstanceClientFactory =
       mock(PlatformInstanceClientFactory.class);
+
+  private ConfigHelper mockConfigHelper = mock(ConfigHelper.class);
 
   @Override
   protected GuiceApplicationBuilder configureApplication(GuiceApplicationBuilder builder) {
@@ -101,16 +107,21 @@ public class PlatformTest extends FakeDBApplication {
     customer = ModelFactory.testCustomer();
     user = ModelFactory.testUser(customer, Users.Role.SuperAdmin);
     authToken = user.createAuthToken();
-    localEBeanServer = Ebean.getDefaultServer();
+    localEBeanServer = DB.getDefault();
     fakeApi = new FakeApi(app, localEBeanServer);
     clusterKey = createClusterKey();
     localConfigUUID = createHAConfig(fakeApi, clusterKey);
+    PlatformInstanceClient mockPlatformInstanceClient = mock(PlatformInstanceClient.class);
+    when(mockPlatformInstanceClientFactory.getClient(anyString(), anyString(), anyMap()))
+        .thenReturn(mockPlatformInstanceClient);
+    when(mockPlatformInstanceClient.testConnection()).thenReturn(true);
     localInstance = createPlatformInstance(localConfigUUID, LOCAL_ACME_ORG, true, true);
     remoteInstance = createPlatformInstance(localConfigUUID, REMOTE_ACME_ORG, false, false);
     backupDir =
         Paths.get(
-            app.config().getString(PlatformReplicationHelper.STORAGE_PATH_KEY),
+            app.config().getString(AppConfigHelper.YB_STORAGE_PATH),
             PlatformReplicationHelper.BACKUP_DIR);
+    Util.setYbaVersion("1.0.0.0-b1");
   }
 
   @After
@@ -130,14 +141,14 @@ public class PlatformTest extends FakeDBApplication {
             ImmutableMap.of(
                 "play.allowGlobalApplication",
                 false,
-                PlatformReplicationHelper.STORAGE_PATH_KEY,
+                AppConfigHelper.YB_STORAGE_PATH,
                 remoteStorage.getRoot().getAbsolutePath()));
     Helpers.start(remoteApp);
     mat = remoteApp.getWrappedApplication().materializer();
-    EbeanServer remoteEBenServer = Ebean.getDefaultServer();
+    Database remoteEBenServer = DB.getDefault();
     replicationDir =
         Paths.get(
-            remoteApp.config().getString(PlatformReplicationHelper.STORAGE_PATH_KEY),
+            remoteApp.config().getString(AppConfigHelper.YB_STORAGE_PATH),
             PlatformReplicationHelper.REPLICATION_DIR);
     return new FakeApi(remoteApp, remoteEBenServer);
   }
@@ -158,7 +169,7 @@ public class PlatformTest extends FakeDBApplication {
     PlatformReplicationManager replicationManager =
         app.injector().instanceOf(PlatformReplicationManager.class);
 
-    Ebean.register(localEBeanServer, true);
+    MockHelper.mock(localEBeanServer, true);
 
     assertTrue("sendBackup failed", replicationManager.sendBackup(remoteInstance));
 
@@ -178,7 +189,7 @@ public class PlatformTest extends FakeDBApplication {
   }
 
   private void assertUploadContents(File backupFile) throws IOException {
-    String storagePath = remoteApp.config().getString(PlatformReplicationHelper.STORAGE_PATH_KEY);
+    String storagePath = remoteApp.config().getString(AppConfigHelper.YB_STORAGE_PATH);
     File uploadedFile =
         Paths.get(
                 storagePath,
@@ -236,8 +247,10 @@ public class PlatformTest extends FakeDBApplication {
   }
 
   private void setupProxyingApiHelper(FakeApi remoteFakeApi, String clusterKey) {
-    when(mockPlatformInstanceClientFactory.getClient(anyString(), anyString()))
-        .thenReturn(new PlatformInstanceClient(mockApiHelper, clusterKey, REMOTE_ACME_ORG));
+    when(mockPlatformInstanceClientFactory.getClient(anyString(), anyString(), anyMap()))
+        .thenReturn(
+            new PlatformInstanceClient(
+                mockApiHelper, clusterKey, REMOTE_ACME_ORG, mockConfigHelper));
     when(mockApiHelper.multipartRequest(anyString(), anyMap(), anyList()))
         .thenAnswer(
             invocation -> {

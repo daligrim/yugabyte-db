@@ -89,6 +89,9 @@ race:yb::ExternalDaemon::LogTailerThread::LogTailerThread
 # Known well implemented lock-free containers
 race:boost::lockfree
 
+# Suppress TSAN data race in boost::regex_match (potential false positive)
+race:boost::re_detail_500::saved_state::saved_state
+
 # -------------------------------------------------------------------------------------------------
 # Supressions from libcds:
 
@@ -98,6 +101,12 @@ deadlock:cds/intrusive/lazy_list_nogc.h
 
 # false: BronsonAVLTree potential deadlock
 deadlock:cds/container/impl/bronson_avltree_map_rcu.h
+
+# Until the third party fix for cassandra-cpp-driver lands.
+# TODO(#14710)
+deadlock:libcassandra
+# TODO(#14677)
+deadlock:MasterSnapshotCoordinator
 
 #TODO: temporarily suppressed. Must be researched later
 race:cds/container/impl/bronson_avltree_map_rcu.h
@@ -160,6 +169,19 @@ signal:src/postgres/src/backend/postmaster/postmaster.c
 # The implementation is correct but TSAN has false positive data races during SharedPtr
 # destruction.
 race:cass::RefCounted<cass::*>::dec_ref
+
+# In the C++ Cassandra driver there is a data race in 'cass::Metadata::update_partitions'.
+# Github issue: https://github.com/yugabyte/yugabyte-db/issues/13059
+#               [DocDB] Race condition in Cassandra C++ driver between
+#               cass::Metadata::update_partitions and cass::Metadata::clear_and_update_back
+# Github issue: https://github.com/yugabyte/yugabyte-db/issues/14977
+#               [YCQL][TSan Unit Test] Data race in
+#               CppCassandraDriverTest.TestCreateUniqueIndexPartial
+# The following lines should be removed from the supressions after the issues fixing.
+race:cass::Metadata::clear_and_update_back
+race:cass::Metadata::update_partitions
+race:cass::Metadata::update_keyspaces
+
 # Races in libuv.so
 race:uv__io_feed
 race:uv__update_time
@@ -176,3 +198,21 @@ race:fLI::*
 
 # Known problem with PstackWatcher
 signal:yb::PstackWatcher::DumpStacks
+
+# Unexpected tsan warning in the getpwuid_r standard thread safe function which is called
+# from the pqGetpwuid function
+race:pqGetpwuid
+
+# Usearch and HNSWlib have non-trivial synchronisation, so TSAN detects false positive races there.
+# https://gist.github.com/spolitov/1624c44446196a0a35b6b9ceae877f92
+race:unum::usearch
+race:hnswlib::HierarchicalNSW
+
+# Known issues with krb5 after updates to postgres 15.
+race:krb5_gss_init_context
+race:k5_once
+
+# Known issues with odyssey
+race:od_logger_format
+race:od_stat_query_end
+race:od_route_pool_stat

@@ -11,14 +11,16 @@
 // under the License.
 //
 
-#ifndef YB_DOCDB_QL_ROCKSDB_STORAGE_H
-#define YB_DOCDB_QL_ROCKSDB_STORAGE_H
+#pragma once
 
-#include <boost/optional.hpp>
+#include <functional>
+#include <memory>
 
 #include "yb/docdb/key_bounds.h"
 #include "yb/docdb/ql_rowwise_iterator_interface.h"
 #include "yb/docdb/ql_storage_interface.h"
+
+#include "yb/util/status.h"
 
 namespace yb {
 namespace docdb {
@@ -26,18 +28,18 @@ namespace docdb {
 // Implementation of YQLStorageIf with rocksdb as a backend. This is what all of our QL tables use.
 class QLRocksDBStorage : public YQLStorageIf {
  public:
-  explicit QLRocksDBStorage(const DocDB& doc_db);
+  explicit QLRocksDBStorage(const std::string& log_prefix, const DocDB& doc_db);
 
   //------------------------------------------------------------------------------------------------
   // CQL Support.
   Status GetIterator(
       const QLReadRequestPB& request,
-      const Schema& projection,
+      const dockv::ReaderProjection& projection,
       std::reference_wrapper<const DocReadContext> doc_read_context,
       const TransactionOperationContext& txn_op_context,
-      CoarseTimePoint deadline,
-      const ReadHybridTime& read_time,
-      const QLScanSpec& spec,
+      const ReadOperationData& read_operation_data,
+      const qlexpr::QLScanSpec& spec,
+      std::reference_wrapper<const ScopedRWOperation> pending_op,
       std::unique_ptr<YQLRowwiseIteratorIf> *iter) const override;
 
   Status BuildYQLScanSpec(
@@ -45,49 +47,59 @@ class QLRocksDBStorage : public YQLStorageIf {
       const ReadHybridTime& read_time,
       const Schema& schema,
       bool include_static_columns,
-      const Schema& static_projection,
-      std::unique_ptr<QLScanSpec>* spec,
-      std::unique_ptr<QLScanSpec>* static_row_spec) const override;
+      std::unique_ptr<qlexpr::QLScanSpec>* spec,
+      std::unique_ptr<qlexpr::QLScanSpec>* static_row_spec) const override;
 
   //------------------------------------------------------------------------------------------------
   // PGSQL Support.
   Status CreateIterator(
-      const Schema& projection,
+      const dockv::ReaderProjection& projection,
       std::reference_wrapper<const docdb::DocReadContext> doc_read_context,
       const TransactionOperationContext& txn_op_context,
-      CoarseTimePoint deadline,
-      const ReadHybridTime& read_time,
+      const ReadOperationData& read_operation_data,
+      std::reference_wrapper<const ScopedRWOperation> pending_op,
       YQLRowwiseIteratorIf::UniPtr* iter) const override;
 
-  Status InitIterator(YQLRowwiseIteratorIf* doc_iter,
-                              const PgsqlReadRequestPB& request,
-                              const Schema& schema,
-                              const QLValuePB& ybctid) const override;
+  Status InitIterator(DocRowwiseIterator* doc_iter,
+                      const PgsqlReadRequestPB& request,
+                      const Schema& schema,
+                      const QLValuePB& ybctid) const override;
 
   Status GetIterator(
       const PgsqlReadRequestPB& request,
-      const Schema& projection,
+      const dockv::ReaderProjection& projection,
       std::reference_wrapper<const DocReadContext> doc_read_context,
       const TransactionOperationContext& txn_op_context,
-      CoarseTimePoint deadline,
-      const ReadHybridTime& read_time,
-      const DocKey& start_doc_key,
+      const ReadOperationData& read_operation_data,
+      const dockv::DocKey& start_doc_key,
+      std::reference_wrapper<const ScopedRWOperation> pending_op,
       YQLRowwiseIteratorIf::UniPtr* iter) const override;
 
-  Status GetIterator(
+  Result<std::unique_ptr<YQLRowwiseIteratorIf>> GetIteratorForYbctid(
       uint64 stmt_id,
-      const Schema& projection,
+      const dockv::ReaderProjection& projection,
       std::reference_wrapper<const DocReadContext> doc_read_context,
       const TransactionOperationContext& txn_op_context,
-      CoarseTimePoint deadline,
-      const ReadHybridTime& read_time,
-      const QLValuePB& ybctid,
-      YQLRowwiseIteratorIf::UniPtr* iter) const override;
+      const ReadOperationData& read_operation_data,
+      const YbctidBounds& bounds,
+      std::reference_wrapper<const ScopedRWOperation> pending_op,
+      SkipSeek skip_seek = SkipSeek::kFalse) const override;
+
+  Result<SampleBlocksData> GetSampleBlocks(
+      std::reference_wrapper<const DocReadContext> doc_read_context,
+      DocDbBlocksSamplingMethod blocks_sampling_method,
+      size_t num_blocks_for_sample) const override;
+
+  std::string ToString() const override;
 
  private:
+  const std::string& LogPrefix() const {
+    return log_prefix_;
+  }
+
+  const std::string log_prefix_;
   const DocDB doc_db_;
 };
 
 }  // namespace docdb
 }  // namespace yb
-#endif // YB_DOCDB_QL_ROCKSDB_STORAGE_H

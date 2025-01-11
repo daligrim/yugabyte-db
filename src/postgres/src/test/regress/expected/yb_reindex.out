@@ -13,10 +13,31 @@ UPDATE pg_index SET indisvalid = false
     WHERE indexrelid = 'pg_depend_depender_index'::regclass;
 UPDATE pg_index SET indisvalid = false
     WHERE indexrelid = 'yb_j_idx'::regclass;
+SELECT oid AS db_oid FROM pg_database WHERE datname = (
+    SELECT CASE
+        WHEN COUNT(*) = 1 THEN 'template1'
+        ELSE current_database() END FROM pg_yb_catalog_version) \gset
+SELECT
+$force_cache_refresh$
+SET yb_non_ddl_txn_for_sys_tables_allowed TO on;
+UPDATE pg_yb_catalog_version
+   SET current_version       = current_version + 1,
+       last_breaking_version = current_version + 1
+ WHERE db_oid = :db_oid;
+RESET yb_non_ddl_txn_for_sys_tables_allowed;
+DO
+$$
+BEGIN
+    PERFORM pg_sleep(5);
+END;
+$$;
+$force_cache_refresh$ AS force_cache_refresh \gset
 -- Force cache refresh.  The UPDATE pg_yb_catalog_version trick doesn't seem to
--- work for pg_depend_depender_index, but reconnecting does.  Since
--- reconnecting releases temp tables, do this refresh first before creating
--- temp tables.
+-- work for pg_depend_depender_index, but updating the pg_yb_catalog_version
+-- and then reconnecting does (simply reconnecting doesn't result in a cache
+-- refresh when the tserver response cache is enabled). Since reconnecting
+-- releases temp tables, do this refresh first before creating temp tables.
+:force_cache_refresh
 \c
 CREATE TEMP TABLE tmp (i int PRIMARY KEY, j int);
 CREATE INDEX ON tmp (j);
@@ -122,10 +143,10 @@ EXPLAIN (costs off)
 /*+SeqScan(pg_depend) */
 SELECT deptype FROM pg_depend
     WHERE classid = 'pg_class'::regclass and objid = 'yb'::regclass;
-                           QUERY PLAN
-----------------------------------------------------------------
- YB Seq Scan on pg_depend
-   Filter: ((classid = '1259'::oid) AND (objid = '54321'::oid))
+                               QUERY PLAN
+------------------------------------------------------------------------
+ Seq Scan on pg_depend
+   Storage Filter: ((classid = '1259'::oid) AND (objid = '54321'::oid))
 (2 rows)
 
 /*+SeqScan(pg_depend) */
@@ -170,6 +191,7 @@ SELECT i FROM tmp WHERE j = -5;
  5
 (1 row)
 
+SET enable_bitmapscan = on;
 EXPLAIN (costs off)
 /*+IndexScan(tmp_j_idx) */
 SELECT i FROM tmp WHERE j = -5;
@@ -188,13 +210,14 @@ SELECT i FROM tmp WHERE j = -5;
  5
 (1 row)
 
+RESET enable_bitmapscan;
 EXPLAIN (costs off)
 /*+SeqScan(yb) */
 SELECT i FROM yb WHERE j = -5;
-          QUERY PLAN
--------------------------------
- YB Seq Scan on yb
-   Filter: (j = '-5'::integer)
+              QUERY PLAN
+---------------------------------------
+ Seq Scan on yb
+   Storage Filter: (j = '-5'::integer)
 (2 rows)
 
 /*+SeqScan(yb) */
@@ -229,32 +252,14 @@ SELECT i FROM yb WHERE j = -5;
 UPDATE pg_index SET indislive = false, indisready = false, indisvalid = false
     WHERE indexrelid = 'tmp_j_idx'::regclass;
 --- Force cache refresh.
-SET yb_non_ddl_txn_for_sys_tables_allowed TO on;
-UPDATE pg_yb_catalog_version SET current_version = current_version + 1;
-UPDATE pg_yb_catalog_version SET last_breaking_version = current_version;
-RESET yb_non_ddl_txn_for_sys_tables_allowed;
-SELECT current_version = last_breaking_version from pg_yb_catalog_version;
- ?column?
-----------
- t
-(1 row)
-
+:force_cache_refresh
 -- Do update that goes to table but doesn't go to index.
 UPDATE tmp SET i = 11 WHERE j = -5;
 -- Enable reads/writes to the index.
 UPDATE pg_index SET indislive = true, indisready = true, indisvalid = true
     WHERE indexrelid = 'tmp_j_idx'::regclass;
 --- Force cache refresh.
-SET yb_non_ddl_txn_for_sys_tables_allowed TO on;
-UPDATE pg_yb_catalog_version SET current_version = current_version + 1;
-UPDATE pg_yb_catalog_version SET last_breaking_version = current_version;
-RESET yb_non_ddl_txn_for_sys_tables_allowed;
-SELECT current_version = last_breaking_version from pg_yb_catalog_version;
- ?column?
-----------
- t
-(1 row)
-
+:force_cache_refresh
 -- Show the corruption.
 /*+SeqScan(tmp) */
 SELECT i FROM tmp WHERE j = -5;
@@ -273,16 +278,7 @@ SELECT i FROM tmp WHERE j = -5;
 UPDATE pg_index SET indislive = false, indisready = false, indisvalid = false
     WHERE indexrelid = 'tmp_j_idx'::regclass;
 --- Force cache refresh.
-SET yb_non_ddl_txn_for_sys_tables_allowed TO on;
-UPDATE pg_yb_catalog_version SET current_version = current_version + 1;
-UPDATE pg_yb_catalog_version SET last_breaking_version = current_version;
-RESET yb_non_ddl_txn_for_sys_tables_allowed;
-SELECT current_version = last_breaking_version from pg_yb_catalog_version;
- ?column?
-----------
- t
-(1 row)
-
+:force_cache_refresh
 -- 3. reindex (for temp index)
 REINDEX INDEX tmp_j_idx;
 -- 4. verification (for temp index)
@@ -330,6 +326,7 @@ UPDATE pg_index SET indislive = false, indisready = false, indisvalid = false
 UPDATE pg_index SET indislive = false, indisready = false, indisvalid = false
     WHERE indexrelid = 'yb_j_idx'::regclass;
 -- Force cache refresh.
+:force_cache_refresh
 \c
 -- Do updates that go to tables but don't go to indexes.
 SET yb_non_ddl_txn_for_sys_tables_allowed TO on;
@@ -348,6 +345,7 @@ UPDATE pg_index SET indislive = true, indisready = true, indisvalid = true
 UPDATE pg_index SET indislive = true, indisready = true, indisvalid = true
     WHERE indexrelid = 'yb_j_idx'::regclass;
 -- Force cache refresh.
+:force_cache_refresh
 \c
 -- Show the corruptions.
 /*+SeqScan(pg_depend) */
@@ -361,7 +359,7 @@ SELECT deptype FROM pg_depend
 /*+IndexScan(pg_depend_depender_index) */
 SELECT deptype FROM pg_depend
     WHERE classid = 'pg_class'::regclass and objid = 'yb'::regclass;
-ERROR:  Query error: ybctid not found in indexed table
+ERROR:  ybctid not found in indexed table
 /*+SeqScan(yb) */
 SELECT i FROM yb WHERE j = -5;
  i
@@ -381,6 +379,7 @@ UPDATE pg_index SET indisvalid = false
 UPDATE pg_index SET indisvalid = false
     WHERE indexrelid = 'yb_j_idx'::regclass;
 -- Force cache refresh.
+:force_cache_refresh
 \c
 -- 6. reindex (for YB indexes)
 REINDEX INDEX pg_depend_depender_index;
@@ -390,10 +389,10 @@ EXPLAIN (costs off)
 /*+SeqScan(pg_depend) */
 SELECT deptype FROM pg_depend
     WHERE classid = 'pg_class'::regclass and objid = 'yb'::regclass;
-                           QUERY PLAN
-----------------------------------------------------------------
- YB Seq Scan on pg_depend
-   Filter: ((classid = '1259'::oid) AND (objid = '54321'::oid))
+                               QUERY PLAN
+------------------------------------------------------------------------
+ Seq Scan on pg_depend
+   Storage Filter: ((classid = '1259'::oid) AND (objid = '54321'::oid))
 (2 rows)
 
 /*+SeqScan(pg_depend) */
@@ -425,10 +424,10 @@ SELECT deptype FROM pg_depend
 EXPLAIN (costs off)
 /*+SeqScan(yb) */
 SELECT i FROM yb WHERE j = -5;
-          QUERY PLAN
--------------------------------
- YB Seq Scan on yb
-   Filter: (j = '-5'::integer)
+              QUERY PLAN
+---------------------------------------
+ Seq Scan on yb
+   Storage Filter: (j = '-5'::integer)
 (2 rows)
 
 /*+SeqScan(yb) */
@@ -482,11 +481,26 @@ UPDATE pg_index SET indisvalid = false
 REINDEX (VERBOSE) INDEX yb_j_idx;
 INFO:  index "yb_j_idx" was reindexed
 \set VERBOSITY default
+-- unsupported command/options
+REINDEX INDEX CONCURRENTLY yb_j_idx;
+ERROR:  REINDEX CONCURRENTLY not supported yet
+LINE 1: REINDEX INDEX CONCURRENTLY yb_j_idx;
+        ^
+HINT:  Please report the issue on https://github.com/YugaByte/yugabyte-db/issues
+REINDEX (VERBOSE) INDEX CONCURRENTLY yb_j_idx;
+ERROR:  REINDEX CONCURRENTLY not supported yet
+LINE 1: REINDEX (VERBOSE) INDEX CONCURRENTLY yb_j_idx;
+        ^
+HINT:  Please report the issue on https://github.com/YugaByte/yugabyte-db/issues
+REINDEX (CONCURRENTLY) INDEX yb_j_idx;
+ERROR:  only REINDEX with VERBOSE option is supported
+REINDEX (tablespace somespace) INDEX yb_j_idx;
+ERROR:  only REINDEX with VERBOSE option is supported
 -- shared system index
 REINDEX INDEX pg_database_datname_index; -- fail
 ERROR:  cannot reindex shared system indexes
 -- make sure index isn't broken after failure
-/*+IndexOnlyScan(pg_database_datname_index)*/
+/*+IndexOnlyScan(pg_database pg_database_datname_index)*/
 SELECT datname from pg_database WHERE datname LIKE 'template%';
   datname
 -----------
@@ -533,10 +547,14 @@ SELECT i FROM ing WHERE j < -8 ORDER BY i;
          Index Cond: (j < '-8'::integer)
 (4 rows)
 
--- TODO(#12899): fix output
 /*+IndexScan(ing_j_idx)*/
 SELECT i FROM ing WHERE j < -8 ORDER BY i;
-ERROR:  Query error: Cannot decode value type kGroupEnd from the key encoding format: "!"
+ i
+----
+  9
+ 10
+(2 rows)
+
 EXPLAIN (costs off)
 /*+IndexScan(ing_j_idx)*/
 SELECT i FROM ing WHERE j = -9;
@@ -609,12 +627,12 @@ INSERT INTO parted SELECT (2 * g), g FROM generate_series(1, 9) g;
 EXPLAIN (costs off)
 /*+IndexOnlyScan(parted_i_idx)*/
 SELECT i FROM parted WHERE i = (2 * 5);
-                          QUERY PLAN
---------------------------------------------------------------
+                              QUERY PLAN
+-----------------------------------------------------------------------
  Append
-   ->  Index Only Scan using parted_odd_i_idx on parted_odd
+   ->  Index Only Scan using parted_odd_i_idx on parted_odd parted_1
          Index Cond: (i = 10)
-   ->  Index Only Scan using parted_even_i_idx on parted_even
+   ->  Index Only Scan using parted_even_i_idx on parted_even parted_2
          Index Cond: (i = 10)
 (5 rows)
 
@@ -641,23 +659,34 @@ SELECT i FROM parted_odd WHERE i = (2 * 5);
  10
 (1 row)
 
+-- REINDEX fails if not all child indexes are marked invalid
 UPDATE pg_index SET indisvalid = false
     WHERE indexrelid = 'parted_i_idx'::regclass;
 UPDATE pg_index SET indisvalid = false
     WHERE indexrelid = 'parted_odd_i_idx'::regclass;
 \c
-REINDEX INDEX parted_i_idx;
-ERROR:  REINDEX is not yet implemented for partitioned indexes
+REINDEX INDEX parted_i_idx; -- fail
+ERROR:  cannot reindex public indexes
+DETAIL:  For safety, indexes should not be serving reads during REINDEX.
+HINT:  Run UPDATE pg_index SET indisvalid = false WHERE indexrelid = '<index_name>'::regclass.
+UPDATE pg_index SET indisvalid = false
+    WHERE indexrelid = 'parted_even_i_idx'::regclass;
+\c
+REINDEX INDEX parted_i_idx; -- succeed
+-- we can also reindex just a child index
+UPDATE pg_index SET indisvalid = false
+    WHERE indexrelid = 'parted_odd_i_idx'::regclass;
+\c
 REINDEX INDEX parted_odd_i_idx;
 EXPLAIN (costs off)
 /*+IndexOnlyScan(parted_i_idx)*/
 SELECT i FROM parted WHERE i = (2 * 5);
-                          QUERY PLAN
---------------------------------------------------------------
+                              QUERY PLAN
+-----------------------------------------------------------------------
  Append
-   ->  Index Only Scan using parted_odd_i_idx on parted_odd
+   ->  Index Only Scan using parted_odd_i_idx on parted_odd parted_1
          Index Cond: (i = 10)
-   ->  Index Only Scan using parted_even_i_idx on parted_even
+   ->  Index Only Scan using parted_even_i_idx on parted_even parted_2
          Index Cond: (i = 10)
 (5 rows)
 

@@ -11,27 +11,33 @@
 // under the License.
 //
 
-#ifndef YB_TSERVER_TSERVER_SHARED_MEM_H
-#define YB_TSERVER_TSERVER_SHARED_MEM_H
+#pragma once
 
 #include <atomic>
+#include <memory>
 
 #include <boost/asio/ip/tcp.hpp>
+#include <boost/interprocess/ipc/message_queue.hpp>
+
+#include "yb/gutil/strings/escaping.h"
 
 #include "yb/tserver/tserver_util_fwd.h"
 
 #include "yb/util/atomic.h"
+#include "yb/util/monotime.h"
 #include "yb/util/net/net_fwd.h"
 #include "yb/util/slice.h"
+#include "yb/util/strongly_typed_bool.h"
+#include "yb/util/thread.h"
+#include "yb/util/uuid.h"
 
-namespace yb {
-namespace tserver {
+#include "yb/yql/pggate/ybc_pg_typedefs.h"
+
+namespace yb::tserver {
 
 class TServerSharedData {
  public:
-  // In per-db catalog version mode, this puts a limit on the maximum number of databases
-  // that can exist in a cluster.
-  static constexpr int32 kMaxNumDbCatalogVersions = 10000;
+  static constexpr uint32_t kMaxNumDbCatalogVersions = kYBCMaxNumDbCatalogVersions;
 
   TServerSharedData() {
     // All atomics stored in shared memory must be lock-free. Non-robust locks
@@ -68,16 +74,22 @@ class TServerSharedData {
     return catalog_version_.load(std::memory_order_acquire);
   }
 
-  void SetYsqlDbCatalogVersion(int index, uint64_t version) {
-    DCHECK_GE(index, 0);
+  void SetYsqlDbCatalogVersion(size_t index, uint64_t version) {
     DCHECK_LT(index, kMaxNumDbCatalogVersions);
     db_catalog_versions_[index].store(version, std::memory_order_release);
   }
 
-  uint64_t ysql_db_catalog_version(int index) const {
-    DCHECK_GE(index, 0);
+  uint64_t ysql_db_catalog_version(size_t index) const {
     DCHECK_LT(index, kMaxNumDbCatalogVersions);
     return db_catalog_versions_[index].load(std::memory_order_acquire);
+  }
+
+  void SetCatalogVersionTableInPerdbMode(bool perdb_mode) {
+    catalog_version_table_in_perdb_mode_.store(perdb_mode, std::memory_order_release);
+  }
+
+  std::optional<bool> catalog_version_table_in_perdb_mode() const {
+    return catalog_version_table_in_perdb_mode_.load(std::memory_order_acquire);
   }
 
   void SetPostgresAuthKey(uint64_t auth_key) {
@@ -88,6 +100,29 @@ class TServerSharedData {
     return postgres_auth_key_;
   }
 
+  void SetTserverUuid(const std::string& tserver_uuid) {
+    DCHECK_EQ(tserver_uuid.size(), 32);
+    a2b_hex(tserver_uuid.c_str(), tserver_uuid_, 16);
+  }
+
+  const unsigned char* tserver_uuid() const {
+    return tserver_uuid_;
+  }
+
+  void SetCronLeaderLease(MonoTime cron_leader_lease_end) {
+    cron_leader_lease_ = cron_leader_lease_end;
+  }
+
+  bool IsCronLeader() const;
+
+  void SetPid(pid_t pid) {
+    pid_ = pid;
+  }
+
+  pid_t pid() const {
+    return pid_;
+  }
+
  private:
   // Endpoint that should be used by local processes to access this tserver.
   Endpoint endpoint_;
@@ -95,11 +130,83 @@ class TServerSharedData {
 
   std::atomic<uint64_t> catalog_version_{0};
   uint64_t postgres_auth_key_;
+  unsigned char tserver_uuid_[16]; // Tserver UUID is stored as raw bytes.
 
   std::atomic<uint64_t> db_catalog_versions_[kMaxNumDbCatalogVersions] = {0};
+  // See same variable comments in CatalogManager.
+  std::atomic<std::optional<bool>> catalog_version_table_in_perdb_mode_{std::nullopt};
+
+  std::atomic<MonoTime> cron_leader_lease_{MonoTime::kUninitialized};
+
+  // pid of the local TServer
+  pid_t pid_;
 };
 
-}  // namespace tserver
-}  // namespace yb
+YB_STRONGLY_TYPED_BOOL(Create);
 
-#endif // YB_TSERVER_TSERVER_SHARED_MEM_H
+class SharedExchange {
+ public:
+  SharedExchange(SharedExchange&&);
+  ~SharedExchange();
+
+  std::byte* Obtain(size_t required_size);
+  Status SendRequest();
+  Result<Slice> FetchResponse(CoarseTimePoint deadline);
+  bool ResponseReady() const;
+  bool ReadyToSend() const;
+  void Respond(size_t size);
+  Result<size_t> Poll();
+  void SignalStop();
+
+  const std::string& instance_id() const;
+  uint64_t session_id() const;
+
+  static Status Cleanup(const std::string& instance_id);
+
+  static Result<SharedExchange> Make(
+      const std::string& instance_id, uint64_t session_id, Create create);
+
+ private:
+  class Impl;
+
+  explicit SharedExchange(std::unique_ptr<Impl> impl);
+  std::unique_ptr<Impl> impl_;
+};
+
+using SharedExchangeListener = std::function<void(size_t)>;
+
+class SharedExchangeThread {
+ public:
+  SharedExchangeThread(SharedExchange exchange, const SharedExchangeListener& listener);
+
+  ~SharedExchangeThread();
+
+  SharedExchange& exchange() {
+    return exchange_;
+  }
+
+  bool ReadyToShutdown() const {
+    return ready_to_complete_.load();
+  }
+
+  void StartShutdown();
+  void CompleteShutdown();
+
+ private:
+  SharedExchange exchange_;
+  ThreadPtr thread_;
+  std::atomic<bool> ready_to_complete_{false};
+};
+
+struct SharedExchangeMessage {
+  uint64_t session_id;
+  size_t size;
+};
+
+constexpr size_t kTooBigResponseMask = 1ULL << 63;
+constexpr size_t kBigSharedMemoryMask = 1ULL << 62;
+constexpr size_t kBigSharedMemoryIdShift = 40;
+
+std::string MakeSharedMemoryBigSegmentName(const std::string& instance_id, uint64_t id);
+
+}  // namespace yb::tserver

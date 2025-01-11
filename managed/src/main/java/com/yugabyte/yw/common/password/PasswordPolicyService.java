@@ -26,12 +26,14 @@ import java.util.UUID;
 import java.util.stream.Collectors;
 import javax.inject.Inject;
 import javax.inject.Singleton;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.ArrayUtils;
 import org.apache.commons.lang3.StringUtils;
 import play.data.validation.ValidationError;
 import play.libs.Json;
 
 @Singleton
+@Slf4j
 public class PasswordPolicyService {
   private static final char[] SPECIAL_CHARACTERS =
       "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~".toCharArray();
@@ -41,6 +43,8 @@ public class PasswordPolicyService {
   private static final String DEFAULT_MIN_DIGITS_PARAM = "yb.pwdpolicy.default_min_digits";
   private static final String DEFAULT_MIN_SPECIAL_CHAR_PARAM =
       "yb.pwdpolicy.default_min_special_chars";
+  private static final String DEFAULT_DISALLOWED_CHARS_PARAM =
+      "yb.pwdpolicy.default_disallowed_chars";
   private List<PasswordValidator> validators = new ArrayList<>();
 
   private final Config config;
@@ -69,6 +73,9 @@ public class PasswordPolicyService {
             CustomerConfigPasswordPolicyData::getMinSpecialCharacters,
             c -> ArrayUtils.contains(SPECIAL_CHARACTERS, c),
             "special characters"));
+    validators.add(
+        new PasswordDisAllowedCharactersValidators(
+            CustomerConfigPasswordPolicyData::getDisallowedCharacters));
   }
 
   public void checkPasswordPolicy(UUID customerUUID, String password) {
@@ -79,16 +86,14 @@ public class PasswordPolicyService {
     }
 
     List<ValidationError> errors =
-        validators
-            .stream()
+        validators.stream()
             .map(validator -> validator.validate(password, effectivePolicy))
             .filter(Objects::nonNull)
             .collect(Collectors.toList());
 
     if (!errors.isEmpty()) {
       String fullMessage =
-          errors
-              .stream()
+          errors.stream()
               .map(ValidationError::messages)
               .flatMap(List::stream)
               .collect(Collectors.joining("; "));
@@ -129,6 +134,7 @@ public class PasswordPolicyService {
       effectivePolicy.setMinLowercase(config.getInt(DEFAULT_MIN_LOWERCASE_PARAM));
       effectivePolicy.setMinDigits(config.getInt(DEFAULT_MIN_DIGITS_PARAM));
       effectivePolicy.setMinSpecialCharacters(config.getInt(DEFAULT_MIN_SPECIAL_CHAR_PARAM));
+      effectivePolicy.setDisallowedCharacters(config.getString(DEFAULT_DISALLOWED_CHARS_PARAM));
     } else {
       effectivePolicy = configuredPolicy;
     }

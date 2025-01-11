@@ -13,31 +13,65 @@
 //
 //
 
-#ifndef YB_ROCKSDB_ROCKSDB_FWD_H
-#define YB_ROCKSDB_ROCKSDB_FWD_H
+#pragma once
 
 #include <memory>
+
+#include "yb/util/clone_ptr.h"
+#include "yb/util/enums.h"
 
 namespace rocksdb {
 
 class CompactionContext;
 class CompactionFeed;
+class DataBlockAwareIndexInternalIterator;
 class DB;
+class DirectWriteHandler;
 class Env;
 class MemTable;
+class InternalIterator;
+class Iterator;
+class ReadFileFilter;
 class Statistics;
+class TableAwareReadFileFilter;
+class TableReader;
+class UserFrontier;
 class UserFrontiers;
+class WritableFile;
 class WriteBatch;
 
 struct BlockBasedTableOptions;
 struct CompactionContextOptions;
 struct CompactionInputFiles;
+struct KeyValueEntry;
 struct Options;
+struct ReadOptions;
 struct TableBuilderOptions;
 struct TableProperties;
 
+template <typename IteratorType, bool kSkipLastEntry>
+class IteratorWrapperBase;
+using IteratorWrapper = IteratorWrapperBase<InternalIterator, /* kSkipLastEntry = */ false>;
+
+template <typename IteratorType>
+class MergingIterator;
+
+template <typename IteratorWrapperType>
+class MergingIteratorBase;
+
+template <typename IteratorWrapperType>
+class MergeIteratorBuilderBase;
+using MergeIteratorBuilder = MergeIteratorBuilderBase<IteratorWrapper>;
+
 using CompactionContextPtr = std::unique_ptr<CompactionContext>;
 
-} // namespace rocksdb
+class DirectWriteHandler;
 
-#endif // YB_ROCKSDB_ROCKSDB_FWD_H
+YB_DEFINE_ENUM(FlushAbility, (kNoNewData)(kHasNewData)(kAlreadyFlushing));
+
+// Frontier should be copyable, but should still preserve its polymorphic nature. We cannot use
+// shared_ptr here, because we are planning to modify the copied value. If we used shared_ptr and
+// modified the copied value, the original value would also change.
+using UserFrontierPtr = yb::clone_ptr<UserFrontier>;
+
+} // namespace rocksdb

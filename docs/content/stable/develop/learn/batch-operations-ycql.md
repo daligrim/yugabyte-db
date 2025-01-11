@@ -1,8 +1,10 @@
 ---
 title: Batch operations in YCQL
 headerTitle: Batch operations
-linkTitle: 6. Batch operations
+linkTitle: Batch operations
 description: Learn how batch operations in YCQL send a set of operations as a single RPC call rather than one by one as individual RPC calls.
+tags:
+  other: ycql
 menu:
   stable:
     identifier: batch-operations-1-ycql
@@ -11,31 +13,19 @@ menu:
 type: docs
 ---
 
-<ul class="nav nav-tabs-alt nav-tabs-yb">
-  <li >
-    <a href="{{< relref "./batch-operations-ysql.md" >}}" class="nav-link">
-      <i class="icon-postgres" aria-hidden="true"></i>
-      YSQL
-    </a>
-  </li>
-
-  <li >
-    <a href="{{< relref "./batch-operations-ycql.md" >}}" class="nav-link active">
-      <i class="icon-cassandra" aria-hidden="true"></i>
-      YCQL
-    </a>
-  </li>
-</ul>
-
 Batch operations let you send multiple operations in a single RPC call to the database. The larger the batch size, the higher the latency for the entire batch. Although the latency for the entire batch of operations is higher than the latency of any single operation, the throughput of the batch of operations is much higher.
+
+{{<tip>}}
+For batch operations in [YSQL](/{{<version>}}/api/ysql), see [Stored Procedures](/{{<version>}}/explore/ysql-language-features/advanced-features/stored-procedures/) and [Transactions](../transactions/acid-transactions-ysql).
+{{</tip>}}
 
 ## Inserting data
 
 To insert data in a batch, prepared statements with the bind values are added to the write batch. This is done in order to reduce repeated statement parsing overhead.
 
-### Java Example
+### Java example
 
-In order to perform a batch insert operation in Java, first create a `BatchStatement` object. Next add the desired number of prepared and bound insert statements to it. Finally, execute the batch object. This is shown below.
+To perform a batch insert operation in Java, first create a `BatchStatement` object. Next add the desired number of prepared and bound insert statements to it. Finally, execute the batch object. This is shown below.
 
 ```java
 // Create a batch statement object.
@@ -112,9 +102,9 @@ SELECT * FROM table WHERE h = '...' AND r IN ('<value1>', '<value2>', ...);
 SELECT * FROM table WHERE h IN ('<value1>', '<value2>', ...) AND r IN ('<value1>', '<value2>', ...);
 ```
 
-## Sample Java Application
+## Sample Java application
 
-You can find a working example of using transactions with YugabyteDB in our [sample applications](../../../develop/explore-sample-apps/). This application writes batched key-value pairs with a configurable number of keys per batch. There are multiple readers and writers running in parallel performing these batch writes.
+You can find a working example of using transactions with YugabyteDB in the [yb-sample-apps](https://github.com/yugabyte/yb-sample-apps) repository. This application writes batched key-value pairs with a configurable number of keys per batch. There are multiple readers and writers running in parallel performing these batch writes.
 
 Here is how you can try out this sample application.
 

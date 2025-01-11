@@ -4,7 +4,6 @@ headerTitle: Column-level encryption
 linkTitle: Column-level encryption
 description: Using column-level encryption in a YugabyteDB cluster.
 headcontent: Enable encryption at rest with a user-generated key
-image: /images/section_icons/secure/prepare-nodes.png
 menu:
   stable:
     identifier: column-level-encryption
@@ -38,10 +37,10 @@ Open the YSQL shell (ysqlsh), specifying the `yugabyte` user and prompting for t
 $ ./ysqlsh -U yugabyte -W
 ```
 
-When prompted for the password, enter the `yugabyte` user password. You should be able to login and see a response like below.
+When prompted for the password, enter the `yugabyte` user password. You should be able to log in and see a response similar to the following:
 
 ```output
-ysqlsh (11.2-YB-2.5.0.0-b0)
+ysqlsh (11.2-YB-{{<yb-version version="stable">}}-b0)
 Type "help" for help.
 
 yugabyte=#

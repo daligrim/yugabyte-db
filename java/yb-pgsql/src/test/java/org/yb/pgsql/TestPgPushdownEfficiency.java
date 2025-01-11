@@ -2,14 +2,21 @@ package org.yb.pgsql;
 
 import org.junit.Test;
 import org.junit.runner.RunWith;
-import org.yb.util.YBTestRunnerNonTsanOnly;
+import org.yb.YBTestRunner;
 
 import java.sql.Statement;
+import java.util.Map;
 
 import static org.yb.AssertionWrappers.assertEquals;
 
-@RunWith(YBTestRunnerNonTsanOnly.class)
+@RunWith(YBTestRunner.class)
 public class TestPgPushdownEfficiency extends BasePgSQLTestWithRpcMetric {
+  @Override
+  protected Map<String, String> getTServerFlags() {
+    Map<String, String> flagMap = super.getTServerFlags();
+    flagMap.put("pg_client_use_shared_memory", "false");
+    return flagMap;
+  }
 
   @Test
   public void testSelect() throws Exception {

@@ -27,7 +27,7 @@
 
 #include <boost/preprocessor/cat.hpp>
 
-#include <glog/logging.h>
+#include "yb/util/logging.h"
 
 using std::vector;
 using std::regex;
@@ -70,6 +70,23 @@ vector<string> StringSplit(const string& arg, char delim) {
     splits.push_back(std::move(item));
   }
   return splits;
+}
+
+bool EqualsIgnoreCase(Slice a, Slice b) {
+  if (a.size() != b.size()) {
+    return false;
+  }
+
+  const uint8_t* a_ptr = a.data();
+  const uint8_t* b_ptr = b.data();
+  size_t size = a.size();
+
+  for (size_t i = 0; i < size; ++i) {
+    if (std::tolower(a_ptr[i]) != std::tolower(b_ptr[i])) {
+      return false;
+    }
+  }
+  return true;
 }
 
 bool StringStartsWithOrEquals(const string& s, const char* start, size_t start_len) {

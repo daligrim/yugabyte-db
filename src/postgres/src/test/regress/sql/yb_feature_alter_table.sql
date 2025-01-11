@@ -124,6 +124,9 @@ drop table test1;
 select * into test2 from atacc1;
 select * from test2;
 drop table test2;
+select * into unlogged table test3 from atacc1;
+select * from test3;
+drop table test3;
 
 -- test constraints
 alter table atacc1 add constraint checkb check (b < 0); -- should fail
@@ -139,11 +142,18 @@ alter table atacc1 drop constraint checkb2;
 insert into atacc1 values (5, 5, 5);
 alter table atacc1 drop constraint checkb;
 alter table atacc1 drop constraint if exists checkb2;
+alter table atacc1 drop constraint checkb2;
 alter table atacc1 drop constraint if exists checkb3;
 delete from atacc1 where b = 5;
 
 -- test rename
-alter table atacc1 rename b to e;
+alter table atacc1 rename b to d; -- should fail: d already exists
+alter table atacc1 rename b to f;
+alter table atacc1 rename column f to e;
+
+alter table if exists doesnt_exist_tab rename b to f;
+alter table if exists doesnt_exist_tab rename column f to e;
+
 select * from atacc1;
 
 -- try dropping all columns
@@ -405,35 +415,36 @@ select * from test_alter_column_type;
 
 alter table test_alter_column_type alter column a type varchar(1);
 alter table test_alter_column_type alter column a type varchar(5);
-alter table test_alter_column_type alter column a type varchar(1); --fails
-alter table test_alter_column_type alter column a type char(10); --fails
+alter table test_alter_column_type alter column a type varchar(1);
+alter table test_alter_column_type alter column a type char(10);
 
 alter table test_alter_column_type alter column b type name;
-alter table test_alter_column_type alter column b type varchar(100); --fails
+alter table test_alter_column_type alter column b type varchar(100);
 
 alter table test_alter_column_type alter column c type text;
-alter table test_alter_column_type alter column c type varchar(100); --fails
+alter table test_alter_column_type alter column c type varchar(100);
 
 alter table test_alter_column_type alter column d type char(1);
-alter table test_alter_column_type alter column d type varchar(100); --fails
-alter table test_alter_column_type alter column d type char(100); --fails
+alter table test_alter_column_type alter column d type varchar(100);
+alter table test_alter_column_type alter column d type char(100);
 
 alter table test_alter_column_type alter column e type varbit(1);
 alter table test_alter_column_type alter column e type varbit(5);
-alter table test_alter_column_type alter column e type varbit(1); --fails
+alter table test_alter_column_type alter column e type varbit(1);
 
-alter table test_alter_column_type alter column f type varchar(100); --fails
+alter table test_alter_column_type alter column f type varchar(100);
 alter table test_alter_column_type alter column f type varbit(100); --fails
-alter table test_alter_column_type alter column f type int;
+alter table test_alter_column_type alter column f type int; --fails
 
 alter table test_alter_column_type alter column g type varchar;
-alter table test_alter_column_type alter column g type varchar(5); --fails
-alter table test_alter_column_type alter column g type text; --fails
+alter table test_alter_column_type alter column g type varchar(5);
+alter table test_alter_column_type alter column g type text;
 
 alter table test_alter_column_type alter column h type varbit;
-alter table test_alter_column_type alter column h type varbit(5); --fails
+alter table test_alter_column_type alter column h type varbit(5);
 
-insert into test_alter_column_type values ('abcde', '-', '-', '-', B'10101', 0, '-', B'0');
+insert into test_alter_column_type values ('abcde', '-', '-', '-', B'10101', 0, '-', B'0'); --fails
+insert into test_alter_column_type values ('abcde', '-', '-', '-', B'1', 0, '-', B'0');
 
 select * from test_alter_column_type order by a;
 \d test_alter_column_type
@@ -497,10 +508,19 @@ ALTER TABLE demo DROP CONSTRAINT demoi;
 INSERT INTO demo VALUES (1);
 SELECT * FROM demo;
 
--- Test that an attemp to drop primary key column with sequence generator
+-- Test dropping a primary key column with sequence generator
 -- does not delete the associated sequence.
 CREATE TABLE tbl_serial_primary_key (k serial PRIMARY KEY, v text);
 ALTER TABLE tbl_serial_primary_key DROP COLUMN k;
 INSERT INTO tbl_serial_primary_key(v) VALUES ('ABC');
 SELECT * FROM tbl_serial_primary_key;
 DROP TABLE tbl_serial_primary_key;
+
+-- Test LOGGED / UNLOGGED, SET, RESET
+CREATE UNLOGGED TABLE test_tbl (i int); -- ok, UNLOGGED is ignored
+ALTER TABLE test_tbl SET UNLOGGED; -- ok, ignored
+ALTER TABLE test_tbl SET LOGGED; -- ok
+
+ALTER TABLE test_tbl SET (fillfactor = 101); -- fails: out of limit
+ALTER TABLE test_tbl SET (fillfactor = 100); -- ok
+ALTER TABLE test_tbl RESET (fillfactor); -- ok

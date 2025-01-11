@@ -18,7 +18,7 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.yb.util.YBTestRunnerNonTsanOnly;
+import org.yb.YBTestRunner;
 
 import java.sql.*;
 import java.util.*;
@@ -26,11 +26,10 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.yb.AssertionWrappers.*;
 
-@RunWith(value=YBTestRunnerNonTsanOnly.class)
+@RunWith(value=YBTestRunner.class)
 public class TestPgSequences extends BasePgSQLTest {
   private static final Logger LOG = LoggerFactory.getLogger(TestPgSequences.class);
 
@@ -41,6 +40,10 @@ public class TestPgSequences extends BasePgSQLTest {
     Map<String, String> flagMap = super.getTServerFlags();
     flagMap.put("ysql_sequence_cache_minval", Integer.toString(TURN_OFF_SEQUENCE_CACHE_FLAG));
     return flagMap;
+  }
+
+  protected Connection getConnectionWithNewCache() throws Exception {
+    return getConnectionBuilder().connect();
   }
 
   @After
@@ -96,6 +99,7 @@ public class TestPgSequences extends BasePgSQLTest {
 
   @Test
   public void testSequencesWithCache() throws Exception {
+
     try (Statement statement = connection.createStatement()) {
       statement.execute("CREATE SEQUENCE s1 CACHE 100");
       // Use only half of the cached values.
@@ -106,7 +110,7 @@ public class TestPgSequences extends BasePgSQLTest {
       }
     }
 
-    try (Connection connection2 = getConnectionBuilder().connect();
+    try (Connection connection2 = getConnectionWithNewCache();
         Statement statement = connection2.createStatement()) {
       ResultSet rs = statement.executeQuery("SELECT nextval('s1')");
       assertTrue(rs.next());
@@ -117,6 +121,7 @@ public class TestPgSequences extends BasePgSQLTest {
 
   @Test
   public void testSequencesWithCacheAndIncrement() throws Exception {
+
     try (Statement statement = connection.createStatement()) {
       statement.execute("CREATE SEQUENCE s1 CACHE 50 INCREMENT 3");
       for (int i = 1; i <= 21; i+=3) {
@@ -126,7 +131,7 @@ public class TestPgSequences extends BasePgSQLTest {
       }
     }
 
-    try (Connection connection2 = getConnectionBuilder().connect();
+    try (Connection connection2 = getConnectionWithNewCache();
         Statement statement = connection2.createStatement()) {
       ResultSet rs = statement.executeQuery("SELECT nextval('s1')");
       assertTrue(rs.next());
@@ -189,6 +194,7 @@ public class TestPgSequences extends BasePgSQLTest {
 
   @Test
   public void testSequenceWithMaxValueAndCache() throws Exception {
+
     try (Statement statement = connection.createStatement()) {
       statement.execute("CREATE SEQUENCE s1 MAXVALUE 5 CACHE 10");
       ResultSet rs = statement.executeQuery("SELECT nextval('s1')");
@@ -196,7 +202,7 @@ public class TestPgSequences extends BasePgSQLTest {
       assertEquals(1, rs.getInt("nextval"));
     }
 
-    try (Connection connection2 = getConnectionBuilder().connect();
+    try (Connection connection2 = getConnectionWithNewCache();
         Statement statement = connection2.createStatement()) {
       // Since the previous client already got all the available sequence numbers in its cache,
       // we should get an error when we request another sequence number from another client.
@@ -493,6 +499,7 @@ public class TestPgSequences extends BasePgSQLTest {
 
   @Test
   public void testLastvalInAnotherSessionFails() throws Exception {
+
     try (Statement statement = connection.createStatement()) {
       statement.execute("CREATE SEQUENCE s1");
       statement.execute("SELECT nextval('s1')");
@@ -764,6 +771,7 @@ public class TestPgSequences extends BasePgSQLTest {
 
   @Test
   public void testNextValAsDefaultValueInTable() throws Exception {
+
     try (Statement statement = connection.createStatement()) {
       statement.execute("CREATE SEQUENCE s1 CACHE 20");
       statement.execute("CREATE TABLE t(k int NOT NULL DEFAULT nextval('s1'), v int)");
@@ -774,7 +782,7 @@ public class TestPgSequences extends BasePgSQLTest {
       }
     }
 
-    try (Connection connection2 = getConnectionBuilder().connect();
+    try (Connection connection2 = getConnectionWithNewCache();
         Statement statement = connection2.createStatement()) {
       // Because of our current implementation, the first value is 22 for now instead of 21.
       for (int k = 21; k <= 30; k++) {
@@ -963,9 +971,72 @@ public class TestPgSequences extends BasePgSQLTest {
       statement2.execute("ALTER SEQUENCE s1 CYCLE");
 
       WaitUntilTServerGetsNewYSqlCatalogVersion();
-      rs = ExecuteQueryWithRetry(statement,"SELECT nextval('s1')");
+      rs = ExecuteQueryWithRetry(statement2,"SELECT nextval('s1')");
       assertTrue(rs.next());
       assertEquals(Long.MAX_VALUE, rs.getLong("nextval"));
+    }
+  }
+
+  /**
+   * Create use and drop a sequence, verifying that generated numbers are sequential, hence
+   * confirming there is no interference with concurrent activities in the cluster.
+   */
+  private class TestSequenceIsolation extends Thread {
+    private static final String SEQ_NAME = "myseq1";
+    private static final int NEXT_COUNT = 997;
+
+    private String dbName;
+    private volatile boolean success = false;
+
+    public TestSequenceIsolation(String dbName) {
+      this.dbName = dbName;
+    }
+
+    @Override
+    public void run() {
+      try (Connection conn = getConnectionBuilder().withDatabase(dbName).connect();
+           Statement stmt = conn.createStatement()) {
+        stmt.execute(String.format("CREATE SEQUENCE %s CACHE 100", SEQ_NAME));
+        for (int i = 1; i <= NEXT_COUNT; i++) {
+          ResultSet rs = stmt.executeQuery(String.format("SELECT nextval('%s')", SEQ_NAME));
+          assertTrue(rs.next());
+          assertEquals(i, rs.getInt(1));
+          assertFalse(rs.next());
+        }
+        stmt.execute(String.format("DROP SEQUENCE %s", SEQ_NAME));
+        success = true;
+      } catch (Exception ex) {
+        LOG.error(String.format("Failed sequence isolation test for database %s: ", dbName), ex);
+      }
+    }
+
+    public boolean isSucceeded() throws InterruptedException {
+      join();
+      return success;
+    }
+
+  }
+
+  /**
+   * Test that sequences in different databases can be used independently from each other.
+   * @throws Exception
+   */
+  @Test
+  public void testMultiDbIsolation() throws Exception {
+    final int DB_COUNT = 3;
+    try (Statement stmt = connection.createStatement()) {
+      for (int i = 1; i <= DB_COUNT; i++) {
+        stmt.execute(String.format("CREATE DATABASE mydb%d", i));
+      }
+    }
+    ArrayList<TestSequenceIsolation> workers = new ArrayList<TestSequenceIsolation>(DB_COUNT);
+    for (int i = 1; i <= DB_COUNT; i++) {
+      TestSequenceIsolation worker = new TestSequenceIsolation(String.format("mydb%d", i));
+      worker.start();
+      workers.add(worker);
+    }
+    for (TestSequenceIsolation worker : workers) {
+      assertTrue(worker.isSucceeded());
     }
   }
 }

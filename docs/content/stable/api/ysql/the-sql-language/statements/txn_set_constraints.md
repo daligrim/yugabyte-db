@@ -5,7 +5,7 @@ linkTitle: SET CONSTRAINTS
 summary: SET CONSTRAINTS
 description: Use the `SET CONSTRAINTS` statement to set the timing of constraint checking within the current transaction.
 menu:
-  stable:
+  stable_api:
     identifier: txn_set_constraints
     parent: statements
 type: docs
@@ -17,29 +17,9 @@ Use the `SET CONSTRAINTS` statement to set the timing of constraint checking wit
 
 ## Syntax
 
-<ul class="nav nav-tabs nav-tabs-yb">
-  <li >
-    <a href="#grammar" class="nav-link active" id="grammar-tab" data-toggle="tab" role="tab" aria-controls="grammar" aria-selected="true">
-      <i class="fas fa-file-alt" aria-hidden="true"></i>
-      Grammar
-    </a>
-  </li>
-  <li>
-    <a href="#diagram" class="nav-link" id="diagram-tab" data-toggle="tab" role="tab" aria-controls="diagram" aria-selected="false">
-      <i class="fas fa-project-diagram" aria-hidden="true"></i>
-      Diagram
-    </a>
-  </li>
-</ul>
-
-<div class="tab-content">
-  <div id="grammar" class="tab-pane fade show active" role="tabpanel" aria-labelledby="grammar-tab">
-  {{% includeMarkdown "../../syntax_resources/the-sql-language/statements/set_constraints.grammar.md" %}}
-  </div>
-  <div id="diagram" class="tab-pane fade" role="tabpanel" aria-labelledby="diagram-tab">
-  {{% includeMarkdown "../../syntax_resources/the-sql-language/statements/set_constraints.diagram.md" %}}
-  </div>
-</div>
+{{%ebnf%}}
+  set_constraints
+{{%/ebnf%}}
 
 ## Semantics
 

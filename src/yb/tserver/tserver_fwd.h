@@ -11,8 +11,7 @@
 // under the License.
 //
 
-#ifndef YB_TSERVER_TSERVER_FWD_H
-#define YB_TSERVER_TSERVER_FWD_H
+#pragma once
 
 #include <functional>
 
@@ -27,6 +26,7 @@ namespace yb {
 namespace client {
 
 class TransactionPool;
+class YBPgsqlOp;
 
 }
 
@@ -36,7 +36,13 @@ class Heartbeater;
 class LocalTabletServer;
 class MetricsSnapshotter;
 class PgTableCache;
+class PgResponseCache;
+class PgSequenceCache;
+class PgSharedMemoryPool;
+class SharedExchange;
+class SharedMemorySegmentHandle;
 class TSTabletManager;
+class TableMutationCountSender;
 class TabletPeerLookupIf;
 class TabletServer;
 class TabletServerAdminServiceProxy;
@@ -53,7 +59,20 @@ YB_STRONGLY_TYPED_BOOL(AllowSplitTablet);
 
 using TransactionPoolProvider = std::function<client::TransactionPool&()>;
 
+template <typename, typename = std::void_t<>>
+struct HasTabletConsensusInfo : std::false_type {};
+
+template <typename T>
+struct HasTabletConsensusInfo<
+    T, std::void_t<decltype(std::declval<T>().tablet_consensus_info())>>
+    : std::true_type {};
+
+template <typename, typename = std::void_t<>>
+struct HasRaftConfigOpidIndex : std::false_type {};
+
+template <typename T>
+struct HasRaftConfigOpidIndex<
+    T, std::void_t<decltype(std::declval<T>().raft_config_opid_index())>>
+    : std::true_type {};
 } // namespace tserver
 } // namespace yb
-
-#endif // YB_TSERVER_TSERVER_FWD_H

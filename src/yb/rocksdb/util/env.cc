@@ -26,8 +26,12 @@
 
 #include "yb/rocksdb/options.h"
 
+#include "yb/util/path_util.h"
 #include "yb/util/result.h"
 #include "yb/util/status_log.h"
+
+using std::unique_ptr;
+using std::shared_ptr;
 
 namespace rocksdb {
 
@@ -83,13 +87,30 @@ yb::Result<uint64_t> Env::GetFileSize(const std::string& fname) {
   return result;
 }
 
-void Env::CleanupFile(const std::string& fname) {
-  WARN_NOT_OK(DeleteFile(fname), "Failed to cleanup " + fname);
+bool Env::CleanupFile(const std::string& fname, const std::string& log_prefix) {
+  Status s;
+  WARN_NOT_OK(s = DeleteFile(fname), log_prefix + "Failed to cleanup " + fname);
+  return s.ok();
 }
 
 void Env::GetChildrenWarnNotOk(const std::string& dir,
                                std::vector<std::string>* result) {
   WARN_NOT_OK(GetChildren(dir, result), "Failed to get children " + dir);
+}
+
+yb::Result<std::vector<std::string>> Env::GetChildren(const std::string& dir) {
+  std::vector<std::string> result;
+  RETURN_NOT_OK(GetChildren(dir, &result));
+  return result;
+}
+
+Status Env::CreateDirs(const std::string& dirname) {
+  auto status = FileExists(dirname);
+  if (status.IsNotFound()) {
+    RETURN_NOT_OK(CreateDirs(yb::DirName(dirname)));
+    return CreateDir(dirname);
+  }
+  return status;
 }
 
 Logger::~Logger() {

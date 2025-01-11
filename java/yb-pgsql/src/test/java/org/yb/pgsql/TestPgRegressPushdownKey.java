@@ -16,7 +16,7 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.yb.util.YBTestRunnerNonTsanOnly;
+import org.yb.YBTestRunner;
 
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -48,8 +48,8 @@ import static org.yb.AssertionWrappers.*;
 // CREATE INDEX airports_scatter_idx ON airports((iso_region, elevation_ft) HASH,
 //                                               coordinates, ident, name);
 
-@RunWith(value=YBTestRunnerNonTsanOnly.class)
-public class TestPgRegressPushdownKey extends BasePgSQLTest {
+@RunWith(value=YBTestRunner.class)
+public class TestPgRegressPushdownKey extends BasePgRegressTest {
   private static final Logger LOG = LoggerFactory.getLogger(TestPgRegressPushdownKey.class);
 
   @Override

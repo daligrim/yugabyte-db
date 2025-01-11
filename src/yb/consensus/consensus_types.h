@@ -11,8 +11,7 @@
 // under the License.
 //
 
-#ifndef YB_CONSENSUS_CONSENSUS_TYPES_H
-#define YB_CONSENSUS_CONSENSUS_TYPES_H
+#pragma once
 
 #include "yb/common/hybrid_time.h"
 
@@ -26,7 +25,14 @@ struct ConsensusOptions {
   std::string tablet_id;
 };
 
+// Return value for GetFollowerCommunicationTimes.
+struct FollowerCommunicationTime {
+  std::string peer_uuid;
+  MonoTime last_successful_communication;
+
+  explicit FollowerCommunicationTime(std::string peer_uuid, MonoTime last_successful_communication)
+      : peer_uuid(peer_uuid), last_successful_communication(last_successful_communication) {}
+};
+
 } // namespace consensus
 } // namespace yb
-
-#endif // YB_CONSENSUS_CONSENSUS_TYPES_H

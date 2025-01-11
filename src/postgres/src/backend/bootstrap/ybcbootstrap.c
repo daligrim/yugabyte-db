@@ -92,19 +92,6 @@ static void YBCAddSysCatalogColumns(YBCPgStatement yb_stmt,
 									IndexStmt *pkey_idx,
 									const bool key)
 {
-	if (tupdesc->tdhasoid)
-	{
-		/* Add the OID column if the table was declared with OIDs. */
-		YBCAddSysCatalogColumn(yb_stmt,
-							   pkey_idx,
-							   "oid",
-							   ObjectIdAttributeNumber,
-							   OIDOID,
-							   0,
-							   key);
-	}
-
-	/* Add the rest of the columns. */
 	for (int attno = 0; attno < tupdesc->natts; attno++)
 	{
 		Form_pg_attribute attr = TupleDescAttr(tupdesc, attno);
@@ -118,33 +105,40 @@ static void YBCAddSysCatalogColumns(YBCPgStatement yb_stmt,
 	}
 }
 
-void YBCCreateSysCatalogTable(const char *table_name,
-                              Oid table_oid,
-                              TupleDesc tupdesc,
-                              bool is_shared_relation,
-                              IndexStmt *pkey_idx)
+void
+YBCCreateSysCatalogTable(const char *table_name,
+						 Oid table_oid,
+						 TupleDesc tupdesc,
+						 bool is_shared_relation,
+						 IndexStmt *pkey_idx)
 {
 	/* Database and schema are fixed when running inidb. */
 	Assert(IsBootstrapProcessingMode());
 	char           *db_name     = "template1";
 	char           *schema_name = "pg_catalog";
 	YBCPgStatement yb_stmt      = NULL;
+	YBCPgYbrowidMode ybrowid_mode = (pkey_idx == NULL
+									 ? PG_YBROWID_MODE_RANGE
+									 : PG_YBROWID_MODE_NONE);
 
 	HandleYBStatus(YBCPgNewCreateTable(db_name,
-	                                   schema_name,
-	                                   table_name,
-	                                   TemplateDbOid,
-	                                   table_oid,
-	                                   is_shared_relation,
-	                                   false, /* if_not_exists */
-	                                   pkey_idx == NULL, /* add_primary_key */
-	                                   true, /* is_colocated_via_database */
-	                                   InvalidOid /* tablegroup_oid */,
-	                                   InvalidOid /* colocation_id */,
-	                                   InvalidOid /* tablespace_oid */,
-	                                   false /* is_matview */,
-	                                   InvalidOid /* matviewPgTableId */,
-	                                   &yb_stmt));
+									   schema_name,
+									   table_name,
+									   Template1DbOid,
+									   table_oid,
+									   is_shared_relation,
+									   true /* is_sys_catalog_table */,
+									   false, /* if_not_exists */
+									   ybrowid_mode,
+									   true, /* is_colocated_via_database */
+									   InvalidOid /* tablegroup_oid */,
+									   InvalidOid /* colocation_id */,
+									   InvalidOid /* tablespace_oid */,
+									   false /* is_matview */,
+									   InvalidOid /* pg_table_oid */,
+									   InvalidOid /* old_relfilenode_oid */,
+									   false /* is_truncate */,
+									   &yb_stmt));
 
 	/* Add all key columns first, then the regular columns */
 	if (pkey_idx != NULL)

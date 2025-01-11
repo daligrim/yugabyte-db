@@ -19,6 +19,7 @@ import java.time.temporal.ChronoUnit;
 import java.util.Arrays;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 import org.junit.Before;
 import org.junit.Test;
@@ -27,12 +28,12 @@ import org.json.JSONObject;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
+import org.yb.client.TestUtils;
 import org.yb.minicluster.MiniYBCluster;
 import org.yb.util.TableProperties;
 import org.yb.util.YBBackupException;
 import org.yb.util.YBBackupUtil;
-import org.yb.util.YBTestRunnerNonSanitizersOrMac;
+import org.yb.util.YBTestRunnerNonTsanAsan;
 
 import static org.yb.AssertionWrappers.assertArrayEquals;
 import static org.yb.AssertionWrappers.assertEquals;
@@ -40,15 +41,23 @@ import static org.yb.AssertionWrappers.assertFalse;
 import static org.yb.AssertionWrappers.assertTrue;
 import static org.yb.AssertionWrappers.fail;
 
-@RunWith(value=YBTestRunnerNonSanitizersOrMac.class)
+@RunWith(value=YBTestRunnerNonTsanAsan.class)
 public class TestYsqlPartitionedBackup extends BasePgSQLTest {
   private static final Logger LOG = LoggerFactory.getLogger(TestYsqlPartitionedBackup.class);
 
   @Before
-  public void initYBBackupUtil() {
+  public void initYBBackupUtil() throws Exception {
     YBBackupUtil.setTSAddresses(miniCluster.getTabletServers());
     YBBackupUtil.setMasterAddresses(masterAddresses);
     YBBackupUtil.setPostgresContactPoint(miniCluster.getPostgresContactPoints().get(0));
+    YBBackupUtil.maybeStartYbControllers(miniCluster);
+  }
+
+  @Override
+  protected Map<String, String> getMasterFlags() {
+    Map<String, String> flagMap = super.getMasterFlags();
+    flagMap.put("ysql_legacy_colocated_database_creation", "false");
+    return flagMap;
   }
 
   @Override
@@ -108,13 +117,17 @@ public class TestYsqlPartitionedBackup extends BasePgSQLTest {
     String backupDir = YBBackupUtil.getTempBackupDir();
     String output = YBBackupUtil.runYbBackupCreate("--backup_location", backupDir,
         "--keyspace", "ysql.yugabyte");
-    backupDir = new JSONObject(output).getString("snapshot_url");
+    if (!TestUtils.useYbController()) {
+        backupDir = new JSONObject(output).getString("snapshot_url");
+      }
     YBBackupUtil.runYbBackupRestore(backupDir, "--keyspace", "ysql.yb2");
     partitionedTestVerifyInsertDataHelper();
   }
 
   private void partitionedTestCleanupHelper() throws Exception {
     try (Statement stmt = connection.createStatement()) {
+      if (isTestRunningWithConnectionManager())
+        waitForStatsToGetUpdated();
       stmt.execute("DROP DATABASE yb2");
     }
   }
@@ -377,6 +390,45 @@ public class TestYsqlPartitionedBackup extends BasePgSQLTest {
       plan = getQueryPlanString(stmt, "SELECT k1, k2 FROM rtest_2 WHERE k1=1 ORDER BY k2 DESC");
       assertTrue(plan.contains("Sort"));
     }
+    partitionedTestCleanupHelper();
+  }
+
+  @Test
+  public void testColocatedPartitionedTable() throws Exception {
+    // This test is to test if we correctly preserve tablegroup oid before the
+    // creation of the first colocated partitioned table, not before table partitions.
+    // Preserving implicit tablegroup oid before the creation of the first table relation
+    // is needed to ensure the success of backup && restore of a colocated database.
+    String dbName = "colocated_db";
+    String backupDir = null;
+    try (Statement stmt = connection.createStatement()) {
+      stmt.execute(String.format("CREATE DATABASE %s COLOCATION=true", dbName));
+    }
+    try (Connection conn = getConnectionBuilder().withDatabase(dbName).connect();
+         Statement stmt = conn.createStatement()) {
+      // Create a partitioned table and its table partitions.
+      createPartitionedTable(stmt, "htest", YSQLPartitionType.HASH);
+      createPartition(stmt, "htest", YSQLPartitionType.HASH, 1);
+      stmt.execute("CREATE INDEX ON htest_1(k1, k2) INCLUDE (k3, v1)");
+      createPartition(stmt, "htest", YSQLPartitionType.HASH, 2);
+
+      stmt.execute("INSERT INTO htest VALUES (1, 2, 3, 4, 5)");
+
+      backupDir = YBBackupUtil.getTempBackupDir();
+      String output = YBBackupUtil.runYbBackupCreate("--backup_location", backupDir,
+          "--keyspace", String.format("ysql.%s", dbName));
+      if (!TestUtils.useYbController()) {
+        backupDir = new JSONObject(output).getString("snapshot_url");
+      }
+    }
+
+    YBBackupUtil.runYbBackupRestore(backupDir, "--keyspace", "ysql.yb2");
+
+    try (Connection conn = getConnectionBuilder().withDatabase("yb2").connect();
+         Statement stmt = conn.createStatement()) {
+      partitionedTestVerifyInsertedDataHelper(stmt, "htest");
+    }
+
     partitionedTestCleanupHelper();
   }
 }

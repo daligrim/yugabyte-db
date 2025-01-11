@@ -5,6 +5,7 @@ package com.yugabyte.yw.commissioner.tasks.subtasks;
 import com.google.api.client.util.Throwables;
 import com.yugabyte.yw.commissioner.AbstractTaskBase;
 import com.yugabyte.yw.commissioner.BaseTaskDependencies;
+import com.yugabyte.yw.common.config.UniverseConfKeys;
 import com.yugabyte.yw.forms.UniverseTaskParams;
 import com.yugabyte.yw.models.Universe;
 import java.time.Duration;
@@ -49,11 +50,13 @@ public class WaitForLeaderBlacklistCompletion extends AbstractTaskBase {
     int numIters = 0;
     double epsilon = 0.00001d;
     // Get the master addresses and certificate info.
-    Universe universe = Universe.getOrBadRequest(taskParams().universeUUID);
+    Universe universe = Universe.getOrBadRequest(taskParams().getUniverseUUID());
     String masterAddresses = universe.getMasterAddresses();
     String certificate = universe.getCertificateNodetoNode();
     log.info("Running {} on masterAddress = {}.", getName(), masterAddresses);
     long startTime = System.currentTimeMillis();
+    boolean failOnTimeout =
+        confGetter.getConfForScope(universe, UniverseConfKeys.leaderBlacklistFailOnTimeout);
     try {
 
       client = ybService.getClient(masterAddresses, certificate);
@@ -99,6 +102,13 @@ public class WaitForLeaderBlacklistCompletion extends AbstractTaskBase {
               numIters,
               percent,
               numErrors);
+          if (failOnTimeout) {
+            throw new RuntimeException(
+                String.format(
+                    "Wait for leader blacklisting timed out after %d milliseconds. Percent"
+                        + " completed: %f%%. Remaining tablets to leader blacklist: %d.",
+                    timeElaped, percent, response.getRemaining()));
+          }
           break;
         }
       }

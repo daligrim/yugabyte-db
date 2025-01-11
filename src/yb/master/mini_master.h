@@ -29,11 +29,12 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_MASTER_MINI_MASTER_H
-#define YB_MASTER_MINI_MASTER_H
+#pragma once
 
 #include <string>
 #include <vector>
+
+#include "yb/common/hybrid_time.h"
 
 #include "yb/gutil/macros.h"
 #include "yb/gutil/port.h"
@@ -83,7 +84,7 @@ class MiniMaster {
 
   // Restart the master on the same ports as it was previously bound.
   // Requires that the master is currently started.
-  Status Restart();
+  Status Restart(bool wait_until_catalog_manager_is_leader = false);
 
   // Use custom master_addresses, rpc_bind_addresses, and broadcast_addresses.
   // Warning: this can be used only when starting a master on its own.
@@ -118,6 +119,10 @@ class MiniMaster {
 
   FsManager& fs_manager() const;
 
+  std::string ToString() const;
+
+  HybridTime Now() const;
+
  private:
   Status StartDistributedMasterOnPorts(uint16_t rpc_port, uint16_t web_port,
                                        const std::vector<uint16_t>& peer_ports);
@@ -148,5 +153,3 @@ class MiniMaster {
 
 } // namespace master
 } // namespace yb
-
-#endif /* YB_MASTER_MINI_MASTER_H */

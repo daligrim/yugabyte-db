@@ -15,8 +15,8 @@ import com.google.inject.Inject;
 import com.google.inject.Singleton;
 import com.typesafe.config.Config;
 import java.time.Duration;
-import java.util.concurrent.ExecutorService;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -27,7 +27,7 @@ import lombok.extern.slf4j.Slf4j;
 @Singleton
 public class PlatformExecutorFactory {
 
-  public static final int SHUTDOWN_TIMEOUT_MINUTES = 5;
+  public static final int SHUTDOWN_TIMEOUT_MINUTES = 1;
 
   private final Config config;
   private final ShutdownHookHandler shutdownHookHandler;
@@ -58,7 +58,8 @@ public class PlatformExecutorFactory {
     return "yb." + poolName + confKey;
   }
 
-  public ExecutorService createExecutor(String configPoolName, ThreadFactory namedThreadFactory) {
+  public ThreadPoolExecutor createExecutor(
+      String configPoolName, ThreadFactory namedThreadFactory) {
     return createExecutor(
         configPoolName,
         ybCorePoolSize(configPoolName),
@@ -68,18 +69,19 @@ public class PlatformExecutorFactory {
         namedThreadFactory);
   }
 
-  public ExecutorService createExecutor(
+  public ThreadPoolExecutor createExecutor(
       String poolName, int corePoolSize, int maxPoolSize, ThreadFactory namedThreadFactory) {
     return createExecutor(
-        poolName, corePoolSize, maxPoolSize, Duration.ZERO, 0, namedThreadFactory);
+        poolName, corePoolSize, maxPoolSize, Duration.ZERO, Integer.MAX_VALUE, namedThreadFactory);
   }
 
-  public ExecutorService createFixedExecutor(
+  public ThreadPoolExecutor createFixedExecutor(
       String poolName, int poolSize, ThreadFactory namedThreadFactory) {
-    return createExecutor(poolName, poolSize, poolSize, Duration.ZERO, 0, namedThreadFactory);
+    return createExecutor(
+        poolName, poolSize, poolSize, Duration.ZERO, Integer.MAX_VALUE, namedThreadFactory);
   }
 
-  public ExecutorService createExecutor(
+  public ThreadPoolExecutor createExecutor(
       String poolName,
       int corePoolSize,
       int maxPoolSize,
@@ -92,15 +94,21 @@ public class PlatformExecutorFactory {
             maxPoolSize,
             keepAliveTime.getSeconds(),
             TimeUnit.SECONDS,
-            new LinkedBlockingQueue<>(queueCapacity == 0 ? Integer.MAX_VALUE : queueCapacity),
+            queueCapacity <= 0
+                ? new SynchronousQueue<>()
+                : new LinkedBlockingQueue<>(queueCapacity),
             namedThreadFactory);
     shutdownHookHandler.addShutdownHook(
-        () -> {
-          log.debug("Shutting down thread pool - {}", poolName);
-          boolean isTerminated =
-              MoreExecutors.shutdownAndAwaitTermination(
-                  executor, SHUTDOWN_TIMEOUT_MINUTES, TimeUnit.MINUTES);
-          log.debug("Shutdown status for thread pool- {} is {}", poolName, isTerminated);
+        executor,
+        (exec) -> {
+          // Do not use the executor directly as it can create strong reference.
+          if (exec != null) {
+            log.debug("Shutting down thread pool - {}", poolName);
+            boolean isTerminated =
+                MoreExecutors.shutdownAndAwaitTermination(
+                    exec, SHUTDOWN_TIMEOUT_MINUTES, TimeUnit.MINUTES);
+            log.debug("Shutdown status for thread pool- {} is {}", poolName, isTerminated);
+          }
         });
     return executor;
   }

@@ -22,6 +22,7 @@ import static play.mvc.Http.Status.NOT_FOUND;
 import static play.mvc.Http.Status.OK;
 import static play.mvc.Http.Status.UNAUTHORIZED;
 import static play.test.Helpers.contentAsString;
+import static play.test.Helpers.fakeRequest;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.yugabyte.yw.common.metrics.MetricService;
@@ -57,9 +58,19 @@ public class AssertHelper {
     assertErrorResponse(result, errorStr);
   }
 
+  public static void assertUnauthorizedNoException(Result result, String errorStr) {
+    assertEquals(UNAUTHORIZED, result.status());
+    assertEquals(errorStr, contentAsString(result));
+  }
+
   public static void assertForbidden(Result result, String errorStr) {
     assertEquals(FORBIDDEN, result.status());
     assertEquals(errorStr, contentAsString(result));
+  }
+
+  public static void assertForbiddenWithException(Result result, String errorStr) {
+    assertEquals(FORBIDDEN, result.status());
+    assertErrorResponse(result, errorStr);
   }
 
   public static void assertNotFound(Result result, String errorStr) {
@@ -87,6 +98,10 @@ public class AssertHelper {
     } else {
       assertEquals(value, targetNode.asText());
     }
+  }
+
+  public static void assertNoKey(JsonNode json, String key) {
+    assertFalse(json.has(key));
   }
 
   // Allows specifying a JsonPath to the expected node.
@@ -129,9 +144,15 @@ public class AssertHelper {
   }
 
   public static void assertJsonEqual(JsonNode expectedJson, JsonNode actualJson) {
+    assertJsonEqual(null, expectedJson, actualJson);
+  }
+
+  public static void assertJsonEqual(
+      String failMessage, JsonNode expectedJson, JsonNode actualJson) {
     expectedJson
         .fieldNames()
-        .forEachRemaining(field -> assertEquals(expectedJson.get(field), actualJson.get(field)));
+        .forEachRemaining(
+            field -> assertEquals(failMessage, expectedJson.get(field), actualJson.get(field)));
   }
 
   public static void assertAuditEntry(int expectedNumEntries, UUID customerUUID) {
@@ -147,7 +168,8 @@ public class AssertHelper {
 
   /** If using @Transactional you will have to use assertPlatformExceptionInTransaction */
   public static Result assertPlatformException(ThrowingRunnable runnable) {
-    return assertThrows(PlatformServiceException.class, runnable).buildResult();
+    return assertThrows(PlatformServiceException.class, runnable)
+        .buildResult(fakeRequest().build());
   }
 
   public static Metric assertMetricValue(

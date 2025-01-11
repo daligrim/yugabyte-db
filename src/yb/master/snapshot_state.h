@@ -11,8 +11,7 @@
 // under the License.
 //
 
-#ifndef YB_MASTER_SNAPSHOT_STATE_H
-#define YB_MASTER_SNAPSHOT_STATE_H
+#pragma once
 
 #include "yb/common/hybrid_time.h"
 #include "yb/common/snapshot.h"
@@ -28,13 +27,8 @@
 
 #include "yb/util/async_task_util.h"
 
-DECLARE_int64(max_concurrent_snapshot_rpcs);
-DECLARE_int64(max_concurrent_snapshot_rpcs_per_tserver);
-
 namespace yb {
 namespace master {
-
-YB_STRONGLY_TYPED_BOOL(ForClient);
 
 struct TabletSnapshotOperation {
   TabletId tablet_id;
@@ -42,6 +36,7 @@ struct TabletSnapshotOperation {
   TxnSnapshotId snapshot_id;
   SysSnapshotEntryPB::State state;
   HybridTime snapshot_hybrid_time;
+  int64_t serial_no;
 
   std::string ToString() const {
     return YB_STRUCT_TO_STRING(tablet_id, snapshot_id, state, snapshot_hybrid_time);
@@ -52,6 +47,7 @@ using TabletSnapshotOperations = std::vector<TabletSnapshotOperation>;
 
 class SnapshotState : public StateWithTablets {
  public:
+  // TODO: Should we throttle per tserver instead of per snapshot?
   SnapshotState(
       SnapshotCoordinatorContext* context, const TxnSnapshotId& id,
       const tserver::TabletSnapshotOpRequestPB& request,
@@ -89,6 +85,27 @@ class SnapshotState : public StateWithTablets {
     return throttler_;
   }
 
+  bool HasTtl() const {
+    return retention_duration_hours_ ? true : false;
+  }
+
+  Result<bool> Complete() const;
+
+  // Whether to block object (table / tablet) cleanup until the retention window specified in
+  // retention_duration_hours (if set) has passed. If true, the objects will be hidden instead
+  // of deleted until retention_duration_hours have passed.
+  bool ShouldBlockObjectCleanup() const {
+    return HasTtl() && !schedule_id() && !imported_;
+  }
+
+  bool ShouldAddToCoveringMap() const {
+    return ShouldBlockObjectCleanup() && AllInState(SysSnapshotEntryPB::COMPLETE);
+  }
+
+  bool ShouldRemoveFromCoveringMap() const {
+    return ShouldBlockObjectCleanup() && AllInState(SysSnapshotEntryPB::DELETING);
+  }
+
   Result<tablet::CreateSnapshotData> SysCatalogSnapshotData(
       const tablet::SnapshotOperation& operation) const;
 
@@ -96,39 +113,55 @@ class SnapshotState : public StateWithTablets {
   // The `options` argument for `ToPB` and `ToEntryPB` controls which entry types are serialized.
   // Pass `nullopt` to serialize all entry types.
   Status ToPB(
-      SnapshotInfoPB* out, ListSnapshotsDetailOptionsPB options);
+      SnapshotInfoPB* out, const ListSnapshotsDetailOptionsPB& options) const;
   Status ToEntryPB(
       SysSnapshotEntryPB* out, ForClient for_client,
-      ListSnapshotsDetailOptionsPB options);
+      const ListSnapshotsDetailOptionsPB& options) const;
   Status StoreToWriteBatch(docdb::KeyValueWriteBatchPB* out);
   Status TryStartDelete();
+  bool delete_started() const;
   void PrepareOperations(TabletSnapshotOperations* out);
   void SetVersion(int value);
   bool NeedCleanup() const;
   bool ShouldUpdate(const SnapshotState& other) const;
   void DeleteAborted(const Status& status);
+  bool HasExpired(HybridTime now) const;
+
+  size_t ResetRunning() override;
 
  private:
-  bool IsTerminalFailure(const Status& status) override;
+  std::optional<SysSnapshotEntryPB::State> GetTerminalStateForStatus(const Status& status) override;
   Status CheckDoneStatus(const Status& status) override;
 
-  TxnSnapshotId id_;
-  HybridTime snapshot_hybrid_time_;
-  HybridTime previous_snapshot_hybrid_time_;
+  const TxnSnapshotId id_;
+  const HybridTime snapshot_hybrid_time_;
+  const HybridTime previous_snapshot_hybrid_time_;
   SysRowEntries entries_;
   // When snapshot is taken as a part of snapshot schedule schedule_id_ will contain this
   // schedule id. Otherwise it will be nil.
-  SnapshotScheduleId schedule_id_;
+  const SnapshotScheduleId schedule_id_;
   int64_t version_;
   bool delete_started_ = false;
   AsyncTaskTracker cleanup_tracker_;
   AsyncTaskThrottler throttler_;
+
+  // How long to retain this snapshot. See the comment in SysSnapshotEntryPB for a longer
+  // description.
+  std::optional<int32_t> retention_duration_hours_ = std::nullopt;
+
+  // Whether this snapshot is imported. Imported snapshots do not block object cleanup.
+  bool imported_;
 };
 
-Result<docdb::KeyBytes> EncodedSnapshotKey(
+Result<dockv::KeyBytes> EncodedSnapshotKey(
     const TxnSnapshotId& id, SnapshotCoordinatorContext* context);
+
+class ListSnapshotsDetailOptionsFactory {
+ public:
+  static ListSnapshotsDetailOptionsPB CreateWithNoDetails();
+
+  ListSnapshotsDetailOptionsFactory() = delete;
+};
 
 } // namespace master
 } // namespace yb
-
-#endif  // YB_MASTER_SNAPSHOT_STATE_H

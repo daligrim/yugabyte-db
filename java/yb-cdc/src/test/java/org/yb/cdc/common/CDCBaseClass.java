@@ -50,6 +50,8 @@ public class CDCBaseClass extends BaseMiniClusterTest {
 
   protected String CDC_BATCH_SIZE_GFLAG = "cdc_snapshot_batch_size";
   protected String CDC_INTENT_SIZE_GFLAG = "cdc_max_stream_intent_records";
+  protected String CDC_ENABLE_CONSISTENT_RECORDS = "cdc_enable_consistent_records";
+  protected String CDC_POPULATE_SAFEPOINT_RECORD = "cdc_populate_safepoint_record";
 
   // Postgres settings.
   protected static final String DEFAULT_PG_DATABASE = "yugabyte";
@@ -123,7 +125,10 @@ public class CDCBaseClass extends BaseMiniClusterTest {
 
     flagMap.put("ysql_beta_features", "true");
     flagMap.put("ysql_sleep_before_retry_on_txn_conflict", "false");
-    flagMap.put("ysql_max_write_restart_attempts", "2");
+    flagMap.put("ysql_pg_conf_csv", maxQueryLayerRetriesConf(2));
+    flagMap.put("ysql_enable_packed_row", "false");
+
+    flagMap.put("cdc_enable_implicit_checkpointing", "true");
 
     return flagMap;
   }
@@ -144,9 +149,10 @@ public class CDCBaseClass extends BaseMiniClusterTest {
   }
 
   @Before
-  public void initYBBackupUtil() {
+  public void initYBBackupUtil() throws Exception {
     YBBackupUtil.setMasterAddresses(masterAddresses);
     YBBackupUtil.setPostgresContactPoint(miniCluster.getPostgresContactPoints().get(0));
+    YBBackupUtil.maybeStartYbControllers(miniCluster);
   }
 
   @Before
@@ -541,6 +547,14 @@ public class CDCBaseClass extends BaseMiniClusterTest {
       "-force",
       flag,
       value);
+  }
+
+  protected void splitTablet(String masterAddresses, String tabletId) throws Exception {
+    runProcess(TestUtils.findBinary("yb-admin"),
+      "--master_addresses",
+      masterAddresses,
+      "split_tablet",
+      tabletId);
   }
 
   /**

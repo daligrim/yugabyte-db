@@ -1,9 +1,9 @@
 ---
-title: Benchmark YSQL performance with YCSB
+title: Benchmark YSQL performance using YCSB and JDBC
 headerTitle: YCSB
 linkTitle: YCSB
-description: Benchmark YSQL performance with YCSB using the standard JDBC binding.
-headcontent: Benchmark YSQL performance with YCSB using the standard JDBC binding.
+description: Learn how to test the YSQL API using the YCSB benchmark.
+headcontent: Benchmark YSQL performance using YCSB with standard JDBC binding
 menu:
   preview:
     identifier: ycsb-1-ysql
@@ -17,21 +17,21 @@ type: docs
 <ul class="nav nav-tabs-alt nav-tabs-yb">
 
   <li >
-    <a href="{{< relref "./ycsb-jdbc.md" >}}" class="nav-link active">
+    <a href="../ycsb-jdbc/" class="nav-link active">
       <i class="icon-postgres" aria-hidden="true"></i>
       JDBC Binding
     </a>
   </li>
 
   <li >
-    <a href="{{< relref "./ycsb-ysql.md" >}}" class="nav-link">
+    <a href="../ycsb-ysql/" class="nav-link">
       <i class="icon-postgres" aria-hidden="true"></i>
       YSQL Binding
     </a>
   </li>
 
   <li >
-    <a href="{{< relref "./ycsb-ycql.md" >}}" class="nav-link">
+    <a href="../ycsb-ycql/" class="nav-link">
       <i class="icon-cassandra" aria-hidden="true"></i>
       YCQL Binding
     </a>
@@ -63,13 +63,13 @@ $ tar -xzf ycsb.tar.gz
 $ cd YCSB
 ```
 
-Ensure that you have the YSQL shell [ysqlsh](../../admin/ysqlsh/) and that its location is included in the `PATH` variable, as follows:
+Ensure that you have the YSQL shell [ysqlsh](../../api/ysqlsh/) and that its location is included in the `PATH` variable, as follows:
 
 ```sh
 $ export PATH=$PATH:/path/to/ysqlsh
 ```
 
-You can find `ysqlsh` in your YugabyteDB installation's `bin` directory. For example:
+You can find ysqlsh in your YugabyteDB installation's `bin` directory. For example:
 
 ```sh
 $ export PATH=$PATH:/Users/yugabyte/code/bin
@@ -202,4 +202,4 @@ When run on a 3-node cluster of `c5.4xlarge` AWS instances (16 cores, 32GB of RA
 | Workload E | 16,642 | 15ms scan | Not applicable |
 | Workload F | 29,500 | 2ms | 15ms read-modify-write |
 
-For an additional example, refer to [Example: YCSB workload with automatic tablet splitting example](../../architecture/docdb-sharding/tablet-splitting/#example-ycsb-workload-with-automatic-tablet-splitting).
+For an additional example, refer to [Example: YCSB workload with automatic tablet splitting example](../../architecture/docdb-sharding/tablet-splitting/#ycsb-workload-with-automatic-tablet-splitting-example).

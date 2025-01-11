@@ -31,6 +31,8 @@
 #include <sys/uio.h>
 #include <time.h>
 
+#include <fstream>
+#include <limits>
 #include <set>
 #include <vector>
 
@@ -43,8 +45,6 @@
 #endif  // defined(__APPLE__)
 #include <sys/resource.h>
 
-#include <glog/logging.h>
-
 #include "yb/gutil/atomicops.h"
 #include "yb/gutil/bind.h"
 #include "yb/gutil/callback.h"
@@ -56,8 +56,9 @@
 #include "yb/util/debug/trace_event.h"
 #include "yb/util/env.h"
 #include "yb/util/errno.h"
+#include "yb/util/faststring.h"
 #include "yb/util/file_system_posix.h"
-#include "yb/util/flag_tags.h"
+#include "yb/util/flags.h"
 #include "yb/util/format.h"
 #include "yb/util/locks.h"
 #include "yb/util/logging.h"
@@ -66,11 +67,13 @@
 #include "yb/util/path_util.h"
 #include "yb/util/result.h"
 #include "yb/util/slice.h"
+#include "yb/util/stack_trace_tracker.h"
 #include "yb/util/status.h"
 #include "yb/util/status_format.h"
 #include "yb/util/status_log.h"
 #include "yb/util/stopwatch.h"
 #include "yb/util/thread_restrictions.h"
+#include "yb/util/env_util.h"
 
 // Copied from falloc.h. Useful for older kernels that lack support for
 // hole punching; fallocate(2) will return EOPNOTSUPP.
@@ -92,7 +95,7 @@
 #endif
 
 // See KUDU-588 for details.
-DEFINE_bool(writable_file_use_fsync, false,
+DEFINE_UNKNOWN_bool(writable_file_use_fsync, false,
             "Use fsync(2) instead of fdatasync(2) for synchronizing dirty "
             "data to disk.");
 TAG_FLAG(writable_file_use_fsync, advanced);
@@ -105,18 +108,22 @@ TAG_FLAG(writable_file_use_fsync, advanced);
 #define FLAGS_never_fsync_default false
 #endif
 
-DEFINE_bool(never_fsync, FLAGS_never_fsync_default,
+DEFINE_UNKNOWN_bool(never_fsync, FLAGS_never_fsync_default,
             "Never fsync() anything to disk. This is used by tests to speed up runtime and improve "
             "stability. This is very unsafe to use in production.");
 
 TAG_FLAG(never_fsync, advanced);
 TAG_FLAG(never_fsync, unsafe);
 
-DEFINE_int32(o_direct_block_size_bytes, 4096,
+DEFINE_NON_RUNTIME_bool(use_cgroups_memory, false,
+             "use cgroup memory max value instead of total memory of the node.");
+TAG_FLAG(use_cgroups_memory, advanced);
+
+DEFINE_UNKNOWN_int32(o_direct_block_size_bytes, 4096,
              "Size of the block to use when flag durable_wal_write is set.");
 TAG_FLAG(o_direct_block_size_bytes, advanced);
 
-DEFINE_int32(o_direct_block_alignment_bytes, 4096,
+DEFINE_UNKNOWN_int32(o_direct_block_alignment_bytes, 4096,
              "Alignment (in bytes) for blocks used for O_DIRECT operations.");
 TAG_FLAG(o_direct_block_alignment_bytes, advanced);
 
@@ -126,12 +133,13 @@ DEFINE_test_flag(bool, simulate_fs_without_fallocate, false,
 DEFINE_test_flag(int64, simulate_free_space_bytes, -1,
     "If a non-negative value, GetFreeSpaceBytes will return the specified value.");
 
-DECLARE_bool(never_fsync);
+DEFINE_test_flag(bool, skip_file_close, false, "If true, file will not be closed.");
 
 using namespace std::placeholders;
 using base::subtle::Atomic64;
 using base::subtle::Barrier_AtomicIncrement;
 using std::vector;
+using std::string;
 using strings::Substitute;
 
 static __thread uint64_t thread_local_id;
@@ -226,6 +234,9 @@ static Status DoOpen(const string& filename, Env::CreateMode mode, int* fd, int 
   switch (mode) {
     case Env::CREATE_IF_NON_EXISTING_TRUNCATE:
       flags |= O_CREAT | O_TRUNC;
+      break;
+    case Env::CREATE_NONBLOCK_IF_NON_EXISTING:
+      flags |= O_CREAT | O_NONBLOCK;
       break;
     case Env::CREATE_NON_EXISTING:
       flags |= O_CREAT | O_EXCL;
@@ -368,11 +379,19 @@ class PosixWritableFile : public WritableFile {
   Status Close() override {
     TRACE_EVENT1("io", "PosixWritableFile::Close", "path", filename_);
     ThreadRestrictions::AssertIOAllowed();
+    if (FLAGS_TEST_skip_file_close) {
+      return Status::OK();
+    }
     Status s;
 
-    // If we've allocated more space than we used, truncate to the
+    // size_on_disk can be either pre_allocated_size_ or pre_allocated_size_ from
+    // previous writer. If we've allocated more space than we used, truncate to the
     // actual size of the file and perform Sync().
-    if (filesize_ < pre_allocated_size_) {
+    uint64_t size_on_disk = lseek(fd_, 0, SEEK_END);
+    if (size_on_disk < 0) {
+       return STATUS_IO_ERROR(filename_, errno);
+    }
+    if (filesize_ < size_on_disk) {
       if (ftruncate(fd_, filesize_) < 0) {
         s = STATUS_IO_ERROR(filename_, errno);
         pending_sync_ = true;
@@ -440,6 +459,22 @@ class PosixWritableFile : public WritableFile {
   const string& filename() const override { return filename_; }
 
  protected:
+    void UnwrittenRemaining(struct iovec** remaining_iov, ssize_t written, int* remaining_count) {
+      size_t bytes_to_consume = written;
+      do {
+        if (bytes_to_consume >= (*remaining_iov)->iov_len) {
+          bytes_to_consume -= (*remaining_iov)->iov_len;
+          (*remaining_iov)++;
+          (*remaining_count)--;
+        } else {
+          (*remaining_iov)->iov_len -= bytes_to_consume;
+          (*remaining_iov)->iov_base =
+              static_cast<uint8_t*>((*remaining_iov)->iov_base) + bytes_to_consume;
+          bytes_to_consume = 0;
+        }
+      } while (bytes_to_consume > 0);
+    }
+
     const std::string filename_;
     int fd_;
     bool sync_on_close_;
@@ -462,19 +497,30 @@ class PosixWritableFile : public WritableFile {
       nbytes += data.size();
     }
 
-    ssize_t written = writev(fd_, iov, narrow_cast<int>(n));
+    struct iovec* remaining_iov = iov;
+    int remaining_count = narrow_cast<int>(n);
+    ssize_t total_written = 0;
 
-    if (PREDICT_FALSE(written == -1)) {
-      int err = errno;
-      return STATUS_IO_ERROR(filename_, err);
+    while (remaining_count > 0) {
+      ssize_t written = writev(fd_, remaining_iov, remaining_count);
+      if (PREDICT_FALSE(written == -1)) {
+        if (errno == EINTR || errno == EAGAIN) {
+          continue;
+        }
+        return STATUS_IO_ERROR(filename_, errno);
+      }
+
+      TrackStackTrace(StackTraceTrackingGroup::kWriteIO, written);
+      UnwrittenRemaining(&remaining_iov, written, &remaining_count);
+      total_written += written;
     }
 
-    filesize_ += written;
+    filesize_ += total_written;
 
-    if (PREDICT_FALSE(written != nbytes)) {
+    if (PREDICT_FALSE(total_written != nbytes)) {
       return STATUS_FORMAT(
           IOError, "writev error: expected to write $0 bytes, wrote $1 bytes instead",
-          nbytes, written);
+          nbytes, total_written);
     }
 
     return Status::OK();
@@ -488,19 +534,14 @@ class PosixDirectIOWritableFile final : public PosixWritableFile {
                             bool sync_on_close)
       : PosixWritableFile(fname, fd, file_size, false /* sync_on_close */) {
 
-    if (file_size != 0) {
-      // For now, we don't support appending to an already existing file (of non-zero size).
-      // TODO(hector): If file size is not a multiple of block_size_, read the
-      // last aligned block.
-      LOG(FATAL) << "file size != 0";
-    }
-
-    next_write_offset_ = 0;
+    next_write_offset_ = file_size;
     last_block_used_bytes_ = 0;
     block_size_ = FLAGS_o_direct_block_size_bytes;
     last_block_idx_ = 0;
     has_new_data_ = false;
-    real_size_ = 0;
+    real_size_ = file_size;
+    LOG_IF(FATAL, file_size % block_size_ != 0) << "file_size is not a multiple of "
+      << "block_size_ during PosixDirectIOWritableFile's initialization";
     CHECK_GE(block_size_, 512);
   }
 
@@ -546,16 +587,22 @@ class PosixDirectIOWritableFile final : public PosixWritableFile {
   Status Close() override {
     TRACE_EVENT1("io", "PosixDirectIOWritableFile::Close", "path", filename_);
     ThreadRestrictions::AssertIOAllowed();
+    if (FLAGS_TEST_skip_file_close) {
+      return Status::OK();
+    }
     RETURN_NOT_OK(Sync());
     LOG(INFO) << "Closing file " << filename_ << " with " << block_ptr_vec_.size() << " blocks";
-    off_t fsize;
-    fsize = lseek(fd_, 0, SEEK_END);
-    CHECK_EQ(fsize, std::max(filesize_, pre_allocated_size_));
-
-    if (real_size_ < filesize_ || real_size_ < pre_allocated_size_) {
+    uint64_t size_on_disk = lseek(fd_, 0, SEEK_END);
+    if (size_on_disk < 0) {
+       return STATUS_IO_ERROR(filename_, errno);
+    }
+    // size_on_disk can be filesize_, pre_allocated_size_, or pre_allocated_size_
+    // from other previous writer.
+    if (real_size_ < size_on_disk) {
       LOG(INFO) << filename_ << ": Truncating file from size: " << filesize_
                 << " to size: " << real_size_
-                << ". Preallocated size: " << pre_allocated_size_;
+                << ". Preallocated size: " << pre_allocated_size_
+                << ". Size on disk: " << size_on_disk;
       if (ftruncate(fd_, real_size_) != 0) {
         return STATUS_IO_ERROR(filename_, errno);
       }
@@ -645,23 +692,35 @@ class PosixDirectIOWritableFile final : public PosixWritableFile {
       iov[j].iov_len = block_size_;
     }
     ssize_t bytes_to_write = blocks_to_write * block_size_;
-    ssize_t written = pwritev(fd_, iov, narrow_cast<int>(blocks_to_write), next_write_offset_);
 
-    if (PREDICT_FALSE(written == -1)) {
-      int err = errno;
-      return STATUS_IO_ERROR(filename_, err);
+    struct iovec* remaining_iov = iov;
+    int remaining_blocks = narrow_cast<int>(blocks_to_write);
+    ssize_t total_written = 0;
+
+    while (remaining_blocks > 0) {
+      ssize_t written = pwritev(
+          fd_, remaining_iov, remaining_blocks, next_write_offset_);
+      if (PREDICT_FALSE(written == -1)) {
+        if (errno == EINTR || errno == EAGAIN) {
+          continue;
+        }
+        return STATUS_IO_ERROR(filename_, errno);
+      }
+      TrackStackTrace(StackTraceTrackingGroup::kWriteIO, written);
+      next_write_offset_ += written;
+
+      UnwrittenRemaining(&remaining_iov, written, &remaining_blocks);
+      total_written += written;
     }
 
-    if (PREDICT_FALSE(written != bytes_to_write)) {
+    if (PREDICT_FALSE(total_written != bytes_to_write)) {
       return STATUS(IOError,
                     Substitute("pwritev error: expected to write $0 bytes, wrote $1 bytes instead",
-                               bytes_to_write, written));
+                               bytes_to_write, total_written));
     }
 
-    filesize_ = next_write_offset_ + written;
+    filesize_ = next_write_offset_;
     CHECK_EQ(filesize_, align_up(filesize_, block_size_));
-
-    next_write_offset_ = filesize_;
 
     if (last_block_used_bytes_ != block_size_) {
       // Next write will happen at filesize_ - block_size_ offset in the file if the last block is
@@ -742,6 +801,7 @@ class PosixRWFile final : public RWFile {
         // An error: return a non-ok status.
         return STATUS_IO_ERROR(filename_, errno);
       }
+      TrackStackTrace(StackTraceTrackingGroup::kReadIO, r);
       Slice this_result(dst, r);
       DCHECK_LE(this_result.size(), rem);
       if (this_result.size() == 0) {
@@ -765,6 +825,7 @@ class PosixRWFile final : public RWFile {
       int err = errno;
       return STATUS_IO_ERROR(filename_, err);
     }
+    TrackStackTrace(StackTraceTrackingGroup::kWriteIO, written);
 
     if (PREDICT_FALSE(written != implicit_cast<ssize_t>(data.size()))) {
       return STATUS(IOError,
@@ -893,7 +954,7 @@ static int LockOrUnlock(const std::string& fname,
                         int fd,
                         bool lock,
                         bool recursive_lock_ok) {
-  std::lock_guard<std::mutex> guard(mutex_locked_files);
+  std::lock_guard guard(mutex_locked_files);
   if (lock) {
     // If recursive locks on the same file must be disallowed, but the specified file name already
     // exists in the locked_files set, then it is already locked, so we fail this lock attempt.
@@ -995,8 +1056,8 @@ class PosixEnv : public Env {
   }
 
   Status GetChildren(const std::string& dir,
-                             ExcludeDots exclude_dots,
-                             std::vector<std::string>* result) override {
+                     ExcludeDots exclude_dots,
+                     std::vector<std::string>* result) override {
     TRACE_EVENT1("io", "PosixEnv::GetChildren", "path", dir);
     ThreadRestrictions::AssertIOAllowed();
     result->clear();
@@ -1092,12 +1153,26 @@ class PosixEnv : public Env {
   }
 
   Status LinkFile(const std::string& src,
-                          const std::string& target) override {
+                  const std::string& target) override {
     if (link(src.c_str(), target.c_str()) != 0) {
       if (errno == EXDEV) {
         return STATUS(NotSupported, "No cross FS links allowed");
       }
-      return STATUS_IO_ERROR(src, errno);
+      return STATUS_IO_ERROR(Format("Link $0 => $1", target, src), errno);
+    }
+    return Status::OK();
+  }
+
+  Status SymlinkPath(const std::string& pointed_to, const std::string& new_symlink) override {
+    // Unlink if already linked.
+    if (unlink(new_symlink.c_str()) != 0) {
+      // It's ok for the link not to exist already.
+      if (errno != ENOENT) {
+        return STATUS_IO_ERROR(Format("Unlink $0", new_symlink), errno);
+      }
+    }
+    if (symlink(pointed_to.c_str(), new_symlink.c_str()) != 0) {
+      return STATUS_IO_ERROR(Format("Symlink $0 => $1", new_symlink, pointed_to), errno);
     }
     return Status::OK();
   }
@@ -1170,7 +1245,9 @@ class PosixEnv : public Env {
       dir = buf;
     }
     // Directory may already exist
-    WARN_NOT_OK(CreateDir(dir), "Create test dir failed");
+    if (!DirExists(dir)) {
+      WARN_NOT_OK(CreateDir(dir), "Create test dir failed");
+    }
     // /tmp may be a symlink, so canonicalize the path.
     return Canonicalize(dir, result);
   }
@@ -1256,6 +1333,17 @@ class PosixEnv : public Env {
       *is_dir = S_ISDIR(sbuf.st_mode);
     }
     return s;
+  }
+
+  Result<bool> IsSymlink(const std::string& path) override {
+    TRACE_EVENT1("io", "PosixEnv::InSymlink", "path", path);
+    ThreadRestrictions::AssertIOAllowed();
+    struct stat sbuf;
+    if (lstat(path.c_str(), &sbuf) != 0) {
+      return STATUS_IO_ERROR(path, errno);
+    } else {
+      return S_ISLNK(sbuf.st_mode);
+    }
   }
 
   Result<bool> IsExecutableFile(const std::string& path) override {
@@ -1354,6 +1442,23 @@ class PosixEnv : public Env {
     return Status::OK();
   }
 
+  static constexpr int64_t kUndefinedMemoryLimit = -1;
+
+  int64_t ReadCgroupMemoryLimit(const std::string& path) {
+    faststring value;
+    Status s = ReadFileToString(Env::Default(), path, &value);
+    if (s.ok()) {
+      try {
+        return stoull(value.ToString());
+      } catch (const std::exception& e) {
+        LOG(WARNING) << "Unable to parse memory limit: " << e.what();
+      }
+    } else {
+      LOG(WARNING) << "Failed to read cgroup limit file: " << s.ToString();
+    }
+    return kUndefinedMemoryLimit;
+  }
+
   Status GetTotalRAMBytes(int64_t* ram) override {
 #if defined(__APPLE__)
     int mib[2];
@@ -1364,11 +1469,36 @@ class PosixEnv : public Env {
     mib[1] = HW_MEMSIZE;
     CHECK_ERR(sysctl(mib, 2, ram, &length, nullptr, 0)) << "sysctl CTL_HW HW_MEMSIZE failed";
 #else
+
+    if (FLAGS_use_cgroups_memory) {
+      const std::string kCGroupV2MemoryPath = "/sys/fs/cgroup/memory.max";
+      const std::string kCGroupV1MemoryPath = "/sys/fs/cgroup/memory/memory.limit_in_bytes";
+      const int64_t kCGroupMaxMemoryLimit = std::numeric_limits<int64_t>::max();
+
+      int64_t memory_limit = kUndefinedMemoryLimit;
+      // Read cgroup memory limit in order (V2, V1).
+      memory_limit = ReadCgroupMemoryLimit(kCGroupV2MemoryPath);
+      LOG(INFO) << "Memory limit from cgroup V2: " << memory_limit;
+      if (memory_limit == kUndefinedMemoryLimit) {
+        LOG(WARNING) << "Memory limit from cgroup V2: " << memory_limit
+                     << " fallback to cgroup v1";
+        memory_limit = ReadCgroupMemoryLimit(kCGroupV1MemoryPath);
+        LOG(INFO) << "Memory limit from cgroup V1: " << memory_limit;
+      }
+
+      if (memory_limit > 0 && memory_limit < kCGroupMaxMemoryLimit) {
+        *ram = memory_limit;
+        return Status::OK();
+      }
+    }
+
     struct sysinfo info;
     if (sysinfo(&info) < 0) {
       return STATUS_IO_ERROR("sysinfo() failed", errno);
     }
+    LOG(INFO) << "Using memory limit from sysinfo(): " << info.totalram;
     *ram = info.totalram;
+
 #endif
     return Status::OK();
   }
@@ -1592,17 +1722,45 @@ class PosixFileFactory : public FileFactory {
                                     std::unique_ptr<WritableFile>* result) {
     uint64_t file_size = 0;
     if (opts.mode == PosixEnv::OPEN_EXISTING) {
-      auto lseek_result = lseek(fd, 0, SEEK_END);
+      uint64_t lseek_result;
+      if (opts.initial_offset.has_value()) {
+        lseek_result = lseek(fd, opts.initial_offset.value(), SEEK_SET);
+      } else {
+        // Default starting offset will be at the end of file.
+        lseek_result = lseek(fd, 0, SEEK_END);
+      }
       if (lseek_result < 0) {
         return STATUS_IO_ERROR(fname, errno);
       }
       file_size = lseek_result;
     }
 #if defined(__linux__)
-    if (opts.o_direct)
-      *result = std::make_unique<PosixDirectIOWritableFile>(
-          fname, fd, file_size, opts.sync_on_close);
-    else
+    if (opts.o_direct) {
+      const size_t last_block_used_bytes = file_size % FLAGS_o_direct_block_size_bytes;
+      // We always initialize at the end of last aligned full block.
+      *result = std::make_unique<PosixDirectIOWritableFile>(fname, fd,
+                                                            file_size - last_block_used_bytes,
+                                                            opts.sync_on_close);
+      if (last_block_used_bytes != 0) {
+        // The o_direct option is turned on and file size is not a multiple of
+        // FLAGS_o_direct_block_size_bytes. In order to successfully reopen file
+        // for durable write, we read the last incomplete block data from disk,
+        // then append it to buffer.
+        Slice last_block_slice;
+        std::unique_ptr<uint8_t[]> last_block_scratch(new uint8_t[last_block_used_bytes]);
+        std::unique_ptr<RandomAccessFile> readable_file;
+        RETURN_NOT_OK(NewRandomAccessFile(fname, &readable_file));
+        RETURN_NOT_OK(env_util::ReadFully(readable_file.get(),
+                                          file_size - last_block_used_bytes,
+                                          last_block_used_bytes,
+                                          &last_block_slice, last_block_scratch.get()));
+        RETURN_NOT_OK((*result)->Append(last_block_slice));
+        RETURN_NOT_OK((*result)->Sync());
+        // Even after the Sync, this last_block_slice will still be in memory buffer until
+        // we have a full block flushed from memory to disk.
+      }
+      return Status::OK();
+    }
 #endif
     *result = std::make_unique<PosixWritableFile>(fname, fd, file_size, opts.sync_on_close);
     return Status::OK();

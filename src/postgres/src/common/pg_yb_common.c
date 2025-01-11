@@ -25,6 +25,7 @@
  *-------------------------------------------------------------------------
  */
 
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -68,15 +69,26 @@ YBIsEnabledInPostgresEnvVar()
 }
 
 bool
+YBIsLocalInitdbEnvVar()
+{
+	static int cached_value = -1;
+	if (cached_value == -1)
+	{
+		cached_value = YBCIsEnvVarTrue("YB_PG_LOCAL_NODE_INITDB");
+	}
+	return cached_value;
+}
+
+bool
 YBShouldAllowRunningAsAnyUser()
 {
 	if (YBIsEnabledInPostgresEnvVar())
-    {
+	{
 		return true;
 	}
 	static int cached_value = -1;
 	if (cached_value == -1)
-    {
+	{
 		cached_value = YBCIsEnvVarTrue("YB_PG_ALLOW_RUNNING_AS_ANY_USER");
 	}
 	return cached_value;
@@ -87,7 +99,7 @@ bool YBIsInitDbModeEnvVarSet()
 
 	static int cached_value = -1;
 	if (cached_value == -1)
-    {
+	{
 		cached_value = YBCIsEnvVarTrue("YB_PG_INITDB_MODE");
 	}
 	return cached_value;
@@ -121,6 +133,17 @@ YBUnsupportedFeatureSignalLevel()
 		// TODO(dmitry): Remove 'YB_SUPPRESS_UNSUPPORTED_ERROR'
 		cached_value = YBCIsEnvVarTrue("YB_SUPPRESS_UNSUPPORTED_ERROR") ||
 									 YBCIsEnvVarTrue("FLAGS_ysql_suppress_unsupported_error") ? WARNING : ERROR;
+	}
+	return cached_value;
+}
+
+bool
+YBSuppressUnsafeAlterNotice()
+{
+	static int cached_value = -1;
+	if (cached_value == -1) {
+		cached_value =
+			YBCIsEnvVarTrue("FLAGS_ysql_suppress_unsafe_alter_notice");
 	}
 	return cached_value;
 }
@@ -161,6 +184,12 @@ const char *YBGetCurrentMetricNodeName()
 	return getenv("FLAGS_metric_node_name");
 }
 
+const char *
+YbGetTmpDir()
+{
+	return getenv("FLAGS_tmp_dir");
+}
+
 int YBGetMaxClockSkewUsec() {
 	const int kDefaultClockSkewUsec = 500 * 1000;  // from physical_time.cc
 	const char *clock_skew_str = getenv("FLAGS_max_clock_skew_usec");
@@ -168,6 +197,15 @@ int YBGetMaxClockSkewUsec() {
 		return atoi(clock_skew_str);
 	}
 	return kDefaultClockSkewUsec;
+}
+
+int YBGetHeartbeatIntervalMs() {
+	const int kDefaultHeartbeatIntervalMs = 1000;  // from heartbeater.cc
+	const char *yb_heartbeat_interval_ms_str = getenv("FLAGS_heartbeat_interval_ms");
+	if (yb_heartbeat_interval_ms_str) {
+		return atoi(yb_heartbeat_interval_ms_str);
+	}
+	return kDefaultHeartbeatIntervalMs;
 }
 
 int YBGetYsqlOutputBufferSize() {
@@ -180,19 +218,6 @@ int YBGetYsqlOutputBufferSize() {
 	// 256KB as a default.
 	return 256 * 1024;
 
-}
-
-bool
-YBIsRefreshMatviewFailureInjected()
-{
-	static int cached_value = -1;
-	if (cached_value == -1)
-	{
-		cached_value = YBCIsEnvVarTrueWithDefault(
-			"FLAGS_TEST_yb_test_fail_matview_refresh_after_creation",
-			false /* default_value */);
-	}
-	return cached_value;
 }
 
 bool
@@ -212,4 +237,30 @@ YBIsCollationEnabled()
 #else
 	return false;
 #endif
+}
+
+bool
+YBColocateDatabaseByDefault()
+{
+	static int cached_value = -1;
+	if (cached_value == -1)
+	{
+		cached_value = YBCIsEnvVarTrueWithDefault("FLAGS_ysql_colocate_database_by_default",
+												  false /* default_value */);
+	}
+	return cached_value;
+}
+
+Oid YBGetDatabaseOidFromEnv(const char *database_name)
+{
+	char *env_var = psprintf("YB_DATABASE_OID_%s", database_name);
+	const char *database_oid_str = getenv(env_var);
+	pfree(env_var);
+	if (database_oid_str)
+	{
+		unsigned long full_oid = strtoul(database_oid_str, NULL, 10);
+		if (full_oid <= OID_MAX)
+			return (Oid) full_oid;
+	}
+	return InvalidOid;
 }

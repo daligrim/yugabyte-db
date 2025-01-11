@@ -40,12 +40,16 @@
 #include <rapidjson/istreamwrapper.h>
 #include <rapidjson/writer.h>
 
+#include "yb/gutil/casts.h"
+#include "yb/gutil/once.h"
+
 #include "yb/util/env_util.h"
 #include "yb/util/path_util.h"
 #include "yb/util/status.h"
 #include "yb/util/status_log.h"
+#include "yb/util/flags.h"
 
-DEFINE_string(version_file_json_path, "",
+DEFINE_NON_RUNTIME_string(version_file_json_path, "",
               "Path to directory containing JSON file with version info.");
 
 using std::string;
@@ -125,8 +129,9 @@ Status VersionInfo::ReadVersionDataFromFile() {
 
   std::string config_file_path = JoinPathSegments(version_file_path, kVersionJsonFileName);
   std::ifstream json_file(config_file_path);
-  SCHECK(!json_file.fail(),
-          IllegalState, strings::Substitute("Could not open JSON file $0", config_file_path));
+  SCHECK(
+      !json_file.fail(), IllegalState,
+      strings::Substitute("Could not open JSON file $0: $1", config_file_path, strerror(errno)));
 
   rapidjson::IStreamWrapper isw(json_file);
   rapidjson::Document d;
@@ -177,6 +182,17 @@ Status VersionInfo::ReadVersionDataFromFile() {
     version_data->pb.set_build_clean_repo(d["build_clean_repo"] == "true");
   }
 
+  if (d.HasMember("ysql_major_version")) {
+    SCHECK(
+        d["ysql_major_version"].IsString(), IllegalState,
+        Format(
+            "Key $0 is of invalid type $1", "ysql_major_version",
+            d["ysql_major_version"].GetType()));
+
+    version_data->pb.set_ysql_major_version(
+        make_unsigned(atoi(d["ysql_major_version"].GetString())));
+  }
+
   std::atomic_store_explicit(&version_data_,
                              static_cast<std::shared_ptr<const VersionData>>(version_data),
                              std::memory_order_release);
@@ -196,6 +212,19 @@ std::shared_ptr<const VersionData> VersionInfo::GetVersionData() {
 
 void VersionInfo::InitInternal(Status* status_dest) {
   *status_dest = ReadVersionDataFromFile();
+}
+
+uint32 VersionInfo::YsqlMajorVersion() {
+  static uint32 ysql_major_version;
+  static GoogleOnceType once = GOOGLE_ONCE_INIT;
+  void (*get_ysql_major_version)(uint32*) = [](uint32* ysql_major_version) {
+    VersionInfoPB version_info;
+    VersionInfo::GetVersionInfoPB(&version_info);
+    *ysql_major_version = version_info.ysql_major_version();
+  };
+  GoogleOnceInitArg(&once, get_ysql_major_version, &ysql_major_version);
+
+  return ysql_major_version;
 }
 
 } // namespace yb

@@ -1,5 +1,5 @@
-import React, { FC, useState } from 'react';
-import moment from 'moment';
+import { FC, useState } from 'react';
+import moment from 'moment-timezone';
 import { useQuery } from 'react-query';
 import { useSelector } from 'react-redux';
 import { CartesianGrid, Line, LineChart, ReferenceLine, Tooltip, XAxis, YAxis } from 'recharts';
@@ -7,13 +7,15 @@ import { CartesianGrid, Line, LineChart, ReferenceLine, Tooltip, XAxis, YAxis } 
 import { getAlertConfigurations } from '../../../actions/universe';
 import { queryLagMetricsForUniverse } from '../../../actions/xClusterReplication';
 import { api } from '../../../redesign/helpers/api';
+import { getStrictestReplicationLagAlertThreshold } from '../ReplicationUtils';
+import { AlertTemplate } from '../../../redesign/features/alerts/TemplateComposer/ICustomVariables';
 
 import './LagGraph.scss';
 
-const ALERT_NAME = 'Replication Lag';
-
 const METRIC_NAME = 'tserver_async_replication_lag_micros';
-// TODO: Rename. Confusing to call this LagGraph when we have another "lag graph".
+
+// TODO: Decide whether we need this component.
+// JIRA: https://yugabyte.atlassian.net/browse/PLAT-5708
 interface LagGraphProps {
   replicationUUID: string;
   sourceUniverseUUID: string;
@@ -29,7 +31,7 @@ export const LagGraph: FC<LagGraphProps> = ({ replicationUUID, sourceUniverseUUI
   const nodePrefix = universeInfo?.universeDetails.nodePrefix;
 
   const { data: metrics } = useQuery(
-    ['xcluster-metric', replicationUUID, nodePrefix, 'metric', 'lagGraph'],
+    ['xcluster-metric', replicationUUID, nodePrefix, 'metric'],
     () => queryLagMetricsForUniverse(nodePrefix, replicationUUID),
     {
       enabled: !currentUniverseLoading
@@ -37,7 +39,7 @@ export const LagGraph: FC<LagGraphProps> = ({ replicationUUID, sourceUniverseUUI
   );
 
   const configurationFilter = {
-    name: ALERT_NAME,
+    template: AlertTemplate.REPLICATION_LAG,
     targetUuid: sourceUniverseUUID
   };
 
@@ -46,25 +48,27 @@ export const LagGraph: FC<LagGraphProps> = ({ replicationUUID, sourceUniverseUUI
     () => getAlertConfigurations(configurationFilter),
     {
       onSuccess: (data) => {
-        if (Array.isArray(data) && data.length > 0) {
-          const configuration = data[0];
-          setMaxConfiguredLag(configuration.thresholds.SEVERE.threshold);
+        const strictestReplicationLagAlertThreshold = getStrictestReplicationLagAlertThreshold(
+          data
+        );
+        if (strictestReplicationLagAlertThreshold) {
+          setMaxConfiguredLag(strictestReplicationLagAlertThreshold);
         }
       }
     }
   );
 
   if (
-    !metrics?.data.tserver_async_replication_lag_micros ||
-    !Array.isArray(metrics.data.tserver_async_replication_lag_micros.data)
+    !metrics?.tserver_async_replication_lag_micros ||
+    !Array.isArray(metrics.tserver_async_replication_lag_micros.data)
   ) {
     return null;
   }
 
-  const metricAliases = metrics.data[METRIC_NAME].layout.yaxis.alias;
+  const metricAliases = metrics[METRIC_NAME].layout.yaxis.alias;
   const committedLagName = metricAliases['async_replication_committed_lag_micros'];
 
-  const replicationNodeMetrics = metrics.data[METRIC_NAME].data.filter(
+  const replicationNodeMetrics = metrics[METRIC_NAME].data.filter(
     (x: any) => x.name === committedLagName
   );
 
@@ -78,6 +82,7 @@ export const LagGraph: FC<LagGraphProps> = ({ replicationUUID, sourceUniverseUUI
       if (parsedY > maxLagInMetric) {
         maxLagInMetric = parsedY;
       }
+
       const momentObj = currentUserTimezone
         ? (moment(xAxis) as any).tz(currentUserTimezone)
         : moment(xAxis);

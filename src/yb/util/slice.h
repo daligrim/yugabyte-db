@@ -33,9 +33,9 @@
 // whether to use gutil-based memeq/memcmp substitutes; if it is unset, Slice
 // will fall back to standard memcmp.
 
-#ifndef YB_UTIL_SLICE_H_
-#define YB_UTIL_SLICE_H_
+#pragma once
 
+#include <compare>
 #include <string>
 #include <string_view>
 
@@ -60,6 +60,8 @@ class Slice {
   // Create a slice that refers to d[0,n-1].
   Slice(const char* d, size_t n) : Slice(to_uchar_ptr(d), n) {}
 
+  Slice(const std::byte* d, size_t n) : Slice(pointer_cast<const uint8_t*>(d), n) {}
+
   // Create a slice that refers to [begin, end).
   Slice(const uint8_t* begin, const uint8_t* end) : begin_(begin), end_(end) {}
 
@@ -76,6 +78,9 @@ class Slice {
   template <class CharTraits, class Allocator>
   Slice(const std::basic_string<char, CharTraits, Allocator>& s) // NOLINT(runtime/explicit)
       : Slice(to_uchar_ptr(s.data()), s.size()) {}
+
+  Slice(const std::string_view& view) // NOLINT(runtime/explicit)
+      : begin_(to_uchar_ptr(view.begin())), end_(to_uchar_ptr(view.end())) {}
 
   // Create a slice that refers to s[0,strlen(s)-1]
   Slice(const char* s) // NOLINT(runtime/explicit)
@@ -111,6 +116,7 @@ class Slice {
   // Return true iff the length of the referenced data is zero
   bool empty() const { return begin_ == end_; }
 
+  // GreaterOrEqual and Less compare this slice with concatenation of slices arg0 + args.
   template <class... Args>
   bool GreaterOrEqual(const Slice& arg0, Args&&... args) const {
     return !Less(arg0, std::forward<Args>(args)...);
@@ -126,20 +132,35 @@ class Slice {
   uint8_t operator[](size_t n) const;
 
   // Change this slice to refer to an empty array
-  void clear() {
+  void Clear() {
     begin_ = to_uchar_ptr("");
     end_ = begin_;
   }
 
+  [[deprecated]] void clear() {
+    Clear();
+  }
+
   // Drop the first "n" bytes from this slice.
-  void remove_prefix(size_t n);
+  void RemovePrefix(size_t n);
+
+  [[deprecated]] void remove_prefix(size_t n) {
+    RemovePrefix(n);
+  }
 
   Slice Prefix(size_t n) const;
+
+  // N could be larger than current size than the current slice is returned.
+  Slice PrefixNoLongerThan(size_t n) const;
 
   Slice WithoutPrefix(size_t n) const;
 
   // Drop the last "n" bytes from this slice.
-  void remove_suffix(size_t n);
+  void RemoveSuffix(size_t n);
+
+  [[deprecated]] void remove_suffix(size_t n) {
+    RemoveSuffix(n);
+  }
 
   Slice Suffix(size_t n) const;
 
@@ -149,13 +170,28 @@ class Slice {
     memcpy(buffer, begin_, size());
   }
 
-  // Truncate the slice to "n" bytes
+  void AppendTo(std::string* out) const;
+  void AssignTo(std::string* out) const;
+
+  void AppendTo(faststring* out) const;
+
+  // Truncate the slice to "n" bytes, "n" should be less or equal to the current size.
   void truncate(size_t n);
+
+  // Make the slice no longer than "n" bytes. N could be larger than current size than nothing is
+  // done.
+  void MakeNoLongerThan(size_t n);
 
   char consume_byte();
 
+  char consume_byte_back();
+
+  bool FirstByteIs(char c) const {
+    return !empty() && *begin_ == c;
+  }
+
   bool TryConsumeByte(char c) {
-    if (empty() || *begin_ != c) {
+    if (!FirstByteIs(c)) {
       return false;
     }
     ++begin_;
@@ -177,7 +213,11 @@ class Slice {
 
   void CopyToBuffer(std::string* buffer) const;
 
-  explicit operator std::string_view() const { return std::string_view(cdata(), size()); }
+  operator std::string_view() const { return AsStringView(); }
+
+  std::string_view AsStringView() const {
+    return std::string_view(cdata(), size());
+  }
 
   // Return a string that contains the copy of the referenced data.
   std::string ToBuffer() const;
@@ -249,6 +289,8 @@ class Slice {
 
   size_t DynamicMemoryUsage() const { return 0; }
 
+  bool Contains(const Slice& rhs) const;
+
   // Return a Slice representing bytes for any type which is laid out contiguously in memory.
   template<class T, class = typename std::enable_if<std::is_pod<T>::value, void>::type>
   static Slice FromPod(const T* data) {
@@ -257,10 +299,6 @@ class Slice {
 
  private:
   friend bool operator==(const Slice& x, const Slice& y);
-
-  bool DoLess() const {
-    return !empty();
-  }
 
   template <class... Args>
   bool DoLess(const Slice& arg0, Args&&... args) const {
@@ -274,7 +312,12 @@ class Slice {
       return cmp < 0;
     }
 
-    return Slice(begin_ + arg0_size, end_).DoLess(std::forward<Args>(args)...);
+    if constexpr (sizeof...(Args)) {
+      return Slice(begin_ + arg0_size, end_).DoLess(std::forward<Args>(args)...);
+    }
+
+    // args is absent and this.starts_with(arg0) => definitely not less than arg0.
+    return false;
   }
 
   static bool MemEqual(const void* a, const void* b, size_t n) {
@@ -291,34 +334,6 @@ class Slice {
   // Intentionally copyable
 };
 
-struct SliceParts {
-  SliceParts(const Slice* _parts, int _num_parts) :
-      parts(_parts), num_parts(_num_parts) { }
-  SliceParts() : parts(nullptr), num_parts(0) {}
-
-  template<size_t N>
-  SliceParts(const std::array<Slice, N>& input) // NOLINT
-      : parts(input.data()), num_parts(N) {
-  }
-
-  std::string ToDebugHexString() const;
-
-  // Sum of sizes of all slices.
-  size_t SumSizes() const;
-
-  // Copy content of all slice to specified buffer.
-  void* CopyAllTo(void* out) const {
-    return CopyAllTo(static_cast<char*>(out));
-  }
-
-  char* CopyAllTo(char* out) const;
-
-  Slice TheOnlyPart() const;
-
-  const Slice* parts;
-  int num_parts;
-};
-
 inline bool operator==(const Slice& x, const Slice& y) {
   return ((x.size() == y.size()) &&
           (Slice::MemEqual(x.data(), y.data(), x.size())));
@@ -329,7 +344,7 @@ inline bool operator!=(const Slice& x, const Slice& y) {
 }
 
 inline std::ostream& operator<<(std::ostream& o, const Slice& s) {
-  return o << s.ToDebugString(16); // should be enough for anyone...
+  return o << s.ToDebugString(32); // should be enough for anyone...
 }
 
 inline int Slice::compare(const Slice& b) const {
@@ -396,6 +411,10 @@ inline bool operator>=(const Slice& lhs, const Slice& rhs) {
   return lhs.compare(rhs) >= 0;
 }
 
+inline std::strong_ordering operator<=>(const Slice& lhs, const Slice& rhs) {
+  return lhs.compare(rhs) <=> 0;
+}
+
 }  // namespace yb
 
 namespace rocksdb {
@@ -404,5 +423,3 @@ typedef yb::Slice Slice;
 typedef yb::SliceParts SliceParts;
 
 }  // namespace rocksdb
-
-#endif // YB_UTIL_SLICE_H_

@@ -46,7 +46,6 @@ namespace yb {
 using yb::rpc::DumpRunningRpcsRequestPB;
 using yb::rpc::DumpRunningRpcsResponsePB;
 using yb::rpc::Messenger;
-using std::shared_ptr;
 using std::stringstream;
 
 using namespace std::placeholders;
@@ -63,16 +62,63 @@ bool GetBool(const Map& map, const typename Map::key_type& key, bool default_val
   return ParseLeadingBoolValue(it->second, default_value);
 }
 
-void RpczPathHandler(Messenger* messenger,
-                     const Webserver::WebRequest& req, Webserver::WebResponse* resp) {
+void MakeAshUuidsHumanReadable(rpc::RpcCallInProgressPB* pb) {
+  if (!pb->has_wait_state() || !pb->wait_state().has_metadata()) {
+    return;
+  }
+  AshMetadataPB* metadata_pb = pb->mutable_wait_state()->mutable_metadata();
+  // Convert root_request_id and top_level_node_id from binary to
+  // human-readable formats
+  if (metadata_pb->has_root_request_id()) {
+    Result<Uuid> result = Uuid::FromSlice(metadata_pb->root_request_id());
+    if (result.ok()) {
+      metadata_pb->set_root_request_id(result.ToString());
+    }
+  }
+  if (metadata_pb->has_top_level_node_id()) {
+    Result<Uuid> result = Uuid::FromSlice(metadata_pb->top_level_node_id());
+    if (result.ok()) {
+      metadata_pb->set_top_level_node_id(result.ToString());
+    }
+  }
+}
+
+void MakeAshUuidsHumanReadable(rpc::RpcConnectionPB* pb) {
+  for (int i = 0; i < pb->calls_in_flight_size(); i++) {
+    MakeAshUuidsHumanReadable(pb->mutable_calls_in_flight(i));
+  }
+}
+
+void MakeAshUuidsHumanReadable(DumpRunningRpcsResponsePB* dump_resp) {
+  for (int i = 0; i < dump_resp->inbound_connections_size(); i++) {
+    MakeAshUuidsHumanReadable(dump_resp->mutable_inbound_connections(i));
+  }
+  for (int i = 0; i < dump_resp->outbound_connections_size(); i++) {
+    MakeAshUuidsHumanReadable(dump_resp->mutable_outbound_connections(i));
+  }
+  if (dump_resp->has_local_calls()) {
+    MakeAshUuidsHumanReadable(dump_resp->mutable_local_calls());
+  }
+}
+
+void RpczPathHandler(
+    Messenger* messenger, bool show_local_calls, const Webserver::WebRequest& req,
+    Webserver::WebResponse* resp) {
   std::stringstream *output = &resp->output;
   DumpRunningRpcsRequestPB dump_req;
   DumpRunningRpcsResponsePB dump_resp;
 
+  const bool get_wait_state = GetBool(req.parsed_args, "get_wait_state", false);
+  dump_req.set_get_wait_state(get_wait_state);
+  dump_req.set_export_wait_state_code_as_string(true);
   dump_req.set_include_traces(GetBool(req.parsed_args, "include_traces", false));
   dump_req.set_dump_timed_out(GetBool(req.parsed_args, "timed_out", false));
+  dump_req.set_get_local_calls(show_local_calls);
 
   WARN_NOT_OK(messenger->DumpRunningRpcs(dump_req, &dump_resp), "DumpRunningRpcs failed");
+  if (get_wait_state) {
+    MakeAshUuidsHumanReadable(&dump_resp);
+  }
 
   JsonWriter writer(output, JsonWriter::PRETTY);
   writer.Protobuf(dump_resp);
@@ -80,9 +126,10 @@ void RpczPathHandler(Messenger* messenger,
 
 } // anonymous namespace
 
-void AddRpczPathHandlers(Messenger* messenger, Webserver* webserver) {
+void AddRpczPathHandlers(Messenger* messenger, bool show_local_calls, Webserver* webserver) {
   webserver->RegisterPathHandler(
-      "/rpcz", "RPCs", std::bind(RpczPathHandler, messenger, _1, _2), false, false);
+      "/rpcz", "RPCs", std::bind(RpczPathHandler, messenger, show_local_calls, _1, _2), false,
+      false);
 }
 
 } // namespace yb

@@ -1,6 +1,5 @@
 package models
 
 type RestoreResponse struct {
-
-	Data RestoreData `json:"data"`
+    Restore []RestoreDetails `json:"restore"`
 }

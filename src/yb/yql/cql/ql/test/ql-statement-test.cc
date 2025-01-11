@@ -15,6 +15,8 @@
 
 #include "yb/gutil/strings/substitute.h"
 
+#include "yb/ash/wait_state.h"
+
 #include "yb/client/client.h"
 
 #include "yb/util/async_util.h"
@@ -25,9 +27,6 @@
 #include "yb/yql/cql/ql/util/errcodes.h"
 
 using std::string;
-using std::unique_ptr;
-using std::shared_ptr;
-using strings::Substitute;
 
 namespace yb {
 namespace ql {
@@ -43,6 +42,7 @@ class TestQLStatement : public QLTestBase {
   }
 
   Status ExecuteAsync(Statement *stmt, QLProcessor *processor, Callback<void(const Status&)> cb) {
+    ADOPT_WAIT_STATE(ash::WaitStateInfo::CreateIfAshIsEnabled<ash::WaitStateInfo>());
     return stmt->ExecuteAsync(processor, StatementParameters(),
                               Bind(&TestQLStatement::ExecuteAsyncDone, Unretained(this), cb));
   }

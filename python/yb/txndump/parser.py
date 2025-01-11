@@ -4,10 +4,12 @@
 Generic binary transaction dump parser.
 """
 
+import gzip
 import os
 import sys
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from enum import Enum
 from functools import total_ordering
 from io import BytesIO
@@ -16,7 +18,7 @@ from typing import Any, Dict, Generic, List, NamedTuple, Optional, Set, TypeVar
 from uuid import UUID
 from yb.txndump.io import BinaryIO
 from yb.txndump.model import DocHybridTime, HybridTime, ReadHybridTime, SubDocKey, \
-    TransactionStatus, decode_value, read_txn_id
+    Tombstone, TransactionStatus, decode_value, read_slice, read_txn_id
 
 
 class CommitTimeReason(Enum):
@@ -34,6 +36,8 @@ class RemoveReason(Enum):
     kProcessCleanup = 2
     kStatusReceived = 3
     kAbortReceived = 4
+    kShutdown = 5
+    kSetDB = 6
 
 
 class WriteBatchEntryType(Enum):
@@ -56,15 +60,25 @@ class TransactionConflictData(NamedTuple):
     failed: bool = False
 
 
-def load_transaction_conflict_data(inp: BinaryIO) -> Optional[TransactionConflictData]:
+def load_transaction_conflict_data(inp: BinaryIO, struct_size: int) \
+        -> Optional[TransactionConflictData]:
     txn_id = read_txn_id(inp)
     if txn_id is None:
         return None
-    status = TransactionStatus(inp.read_uint32())
-    inp.read_uint32()
     commit_time = HybridTime.load(inp)
     priority = inp.read_uint64()
     failed = inp.read_uint64() != 0
+    status = inp.read_uint32()
+
+    bytes_read = (
+        16  # txn_id
+        + 8  # commit_time
+        + 8  # priority
+        + 8  # failed
+        + 4)  # status
+    inp.read(struct_size - bytes_read)
+
+    status = TransactionStatus(status)
     return TransactionConflictData(txn_id, status, commit_time, priority, failed)
 
 
@@ -94,18 +108,21 @@ class Analyzer:
 class DumpProcessor:
     def __init__(self, analyzer):
         self.cnt_commands = 0
+        self.cnt_bytes = 0
         self.start_time = monotonic()
         self.analyzer = analyzer
         self.txns = {}
         self.commands = {
-            1: DumpProcessor.parse_apply,
+            1: DumpProcessor.parse_apply_intent,
             2: DumpProcessor.parse_read,
             3: DumpProcessor.parse_commit,
             4: DumpProcessor.parse_status,
             5: DumpProcessor.parse_conflicts,
             6: DumpProcessor.parse_applied,
             7: DumpProcessor.parse_remove,
+            8: DumpProcessor.parse_remove_intent,
         }
+        self.conflict_data_size = 0
 
     def process(self, input_path: str):
         if os.path.isdir(input_path):
@@ -118,13 +135,16 @@ class DumpProcessor:
     def process_file(self, fname: str):
         # path, processing_file = os.path.split(fname)
         print("Processing {}".format(fname))
-        with open(fname, 'rb') as raw_input:
+        file_open = gzip.open if fname.endswith('.gz') else open
+        with file_open(fname, 'rb') as raw_input:
             inp = BinaryIO(raw_input)
+            self.read_header(inp)
             while True:
                 size = inp.read_int64()
                 if size is None:
                     break
                 body = inp.read(size)
+                self.cnt_bytes += 8 + size
                 block = BinaryIO(BytesIO(body))
                 cmd = block.read_int8()
                 self.commands[cmd](self, block)
@@ -132,28 +152,39 @@ class DumpProcessor:
                 if len(left) != 0:
                     raise Exception("Extra data left in block {}: {}".format(cmd, left))
                 self.cnt_commands += 1
-                if self.cnt_commands % 10000 == 0:
-                    print("Parsed {} commands, passed: {}".format(
-                        self.cnt_commands, monotonic() - self.start_time))
+                if self.cnt_commands % 100000 == 0:
+                    print("Parsed {} commands, {} bytes, passed: {}".format(
+                        self.cnt_commands, self.cnt_bytes, monotonic() - self.start_time))
 
-    def parse_apply(self, inp: BinaryIO):
+    def read_header(self, inp: BinaryIO):
+        self.conflict_data_size = inp.read_uint64()
+
+    def parse_apply_intent(self, inp: BinaryIO):
         tablet = inp.read(32).decode('utf-8')
-        txn = read_txn_id(inp)
-        log_ht = HybridTime.load(inp)
-        inp.read_int64()  # Sequence no
-        count = inp.read_int32()
-        for i in range(0, count):
-            cmd = WriteBatchEntryType(inp.read_int8())
-            if cmd == WriteBatchEntryType.kTypeValue:
-                key = SubDocKey.decode(inp.read_varbytes(), True)
-                value = decode_value(inp.read_varbytes())
-                self.analyzer.apply_row(tablet, txn, key, value, log_ht)
-            else:
-                raise Exception('Not supported write batch entry type: {}'.format(cmd))
+        txn_id = read_txn_id(inp)
+        key_bytes = read_slice(inp)
+        key = SubDocKey.decode(key_bytes, False)
+        commit_ht = HybridTime.load(inp)
+        write_id = inp.read_uint32()
+        value = decode_value(inp.read())
+        key = SubDocKey(
+            hash_components=key.hash_components,
+            range_components=key.range_components,
+            sub_keys=key.sub_keys,
+            doc_ht=DocHybridTime(hybrid_time=commit_ht, write_id=write_id))
+        self.analyzer.apply_row(tablet, txn_id, key, value, commit_ht)
+
+        txn = self.get_transaction(txn_id)
+        txn.add_log(
+            commit_ht, "write", write_id, tablet, key, value)
+
+    def parse_remove_intent(self, inp: BinaryIO):
+        txn_id = read_txn_id(inp)
+        key = inp.read()
 
     def parse_read(self, inp: BinaryIO):
         tablet = inp.read(32).decode('utf-8')
-        txn = read_txn_id(inp)
+        txn_id = read_txn_id(inp)
         read_time = ReadHybridTime.load(inp)
         write_time = DocHybridTime.load(inp)
         same_transaction = inp.read_bool()
@@ -163,13 +194,17 @@ class DumpProcessor:
         value_len = inp.read_uint64()
         value = decode_value(inp.read(value_len))
         self.analyzer.read_value(
-            tablet, txn, key, value, read_time.read, write_time, same_transaction)
+            tablet, txn_id, key, value, read_time.read, write_time, same_transaction)
+
+        txn = self.get_transaction(txn_id)
+        txn.add_log(
+            read_time.read, "read", tablet, write_time, key, value, same_transaction)
 
     def parse_commit(self, inp: BinaryIO):
         txn_id = read_txn_id(inp)
         commit_time = HybridTime.load(inp)
         txn = self.get_transaction(txn_id)
-        tablets = inp.read_uint32()
+        tablets = inp.read_uint64()
         if txn.commit_time.valid():
             if txn.commit_time != commit_time:
                 raise Exception('Wrong commit time {} vs {}'.format(commit_time, txn))
@@ -199,7 +234,7 @@ class DumpProcessor:
         if not hybrid_time.valid():
             txn.aborted = True
         while True:
-            txn_data = load_transaction_conflict_data(inp)
+            txn_data = load_transaction_conflict_data(inp, self.conflict_data_size)
             if txn_data is None:
                 break
             txn.add_log(hybrid_time, "see conflict", txn_data)
@@ -262,26 +297,21 @@ K = TypeVar('K')
 T = TypeVar('T')
 
 
+@dataclass
 class Update(Generic[T]):
-    def __init__(self, doc_ht: DocHybridTime, txn_id: UUID, value: T, log_ht: HybridTime):
-        self.doc_ht = doc_ht
-        self.txn_id = txn_id
-        self.value = value
-        self.log_ht = log_ht
-
-    def __eq__(self, other):
-        return self.doc_ht == other.doc_ht and self.txn_id == other.txn_id and \
-               self.value == other.value and self.log_ht == other.log_ht
+    doc_ht: DocHybridTime
+    txn_id: UUID
+    value: T
+    log_ht: HybridTime
 
 
+@dataclass
 class Read(Generic[T]):
-    def __init__(self, read_time: HybridTime, value: T, write_time: DocHybridTime, txn_id: UUID,
-                 same_transaction: bool):
-        self.read_time = read_time
-        self.value = value
-        self.write_time = write_time
-        self.txn_id = txn_id
-        self.same_transaction = same_transaction
+    read_time: HybridTime
+    value: T
+    write_time: DocHybridTime
+    txn_id: UUID
+    same_transaction: bool
 
 
 class KeyData(Generic[T]):
@@ -333,7 +363,7 @@ class AnalyzerBase(Analyzer, ABC, Generic[K, T]):
         self.get_row(row_key).updates.append(Update(key.doc_ht, txn_id, row_value, log_ht))
 
     def read_value(
-        self, tablet: str, txn_id: UUID, key, value, read_time: HybridTime,
+            self, tablet: str, txn_id: UUID, key, value, read_time: HybridTime,
             write_time: DocHybridTime, same_transaction: bool):
         if write_time.hybrid_time > read_time:
             return
@@ -370,7 +400,7 @@ class AnalyzerBase(Analyzer, ABC, Generic[K, T]):
 
     def analyze_key(self, key: K):
         updates = sorted(self.rows[key].updates,
-                         key=lambda upd: (upd.doc_ht, upd.txn_id))
+                         key=lambda upd: (upd.doc_ht, upd.txn_id, upd.log_ht))
         filtered_reads = filter(
             lambda x:
                 not x.same_transaction and
@@ -386,11 +416,11 @@ class AnalyzerBase(Analyzer, ABC, Generic[K, T]):
             if prev_update is not None and prev_update == update:
                 same_updates += 1
                 continue
-            else:
-                self.check_same_updates(key, prev_update, same_updates)
-                same_updates = 1
 
-            new_value: str = self.analyze_update(key, update, old_value)
+            self.check_same_updates(key, prev_update, same_updates)
+            same_updates = 1
+
+            new_value = self.analyze_update(key, update, old_value)
 
             read_idx = self.analyze_read(
                 key, reads, read_idx, update.doc_ht.hybrid_time, old_value)
@@ -402,11 +432,31 @@ class AnalyzerBase(Analyzer, ABC, Generic[K, T]):
     def analyze_read(
             self, key: int, reads: List[Read[T]], read_idx: int, hybrid_time: HybridTime,
             old_value: str) -> int:
+        last_tombstone_read_ht = None
+        last_tombstone_write_ht = None
         while read_idx < len(reads) and hybrid_time > reads[read_idx].read_time:
             read = reads[read_idx]
             read_idx += 1
             read_txn = read.txn_id
             read_value = read.value
+
+            if read_value is None:
+                continue
+            if read_value == Tombstone.kTombstone:
+                last_tombstone_read_ht = max(
+                        last_tombstone_read_ht or HybridTime(repr=HybridTime.kMin),
+                        read.read_time)
+                last_tombstone_write_ht = max(
+                        last_tombstone_write_ht or HybridTime(repr=HybridTime.kMin),
+                        read.write_time.hybrid_time)
+                continue
+            if last_tombstone_read_ht:
+                if read.read_time == last_tombstone_read_ht and \
+                        read.write_time.hybrid_time < last_tombstone_write_ht:
+                    read_value = Tombstone.kTombstone
+                else:
+                    last_tombstone_read_ht = None
+                    last_tombstone_write_ht = None
             if old_value != read_value:
                 self.error(
                     read.read_time,

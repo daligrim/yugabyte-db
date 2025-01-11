@@ -5,12 +5,14 @@ linkTitle: Interval representation
 description: Explains how interval value is represented internally as three fields (months, days, and seconds). [YSQL]
 image: /images/section_icons/api/subsection.png
 menu:
-  stable:
+  stable_api:
     identifier: interval-representation
     parent: type-interval
     weight: 10
 type: indexpage
+showRightNav: true
 ---
+
 {{< tip title="Download and install the date-time utilities code." >}}
 The code on this page and on its child, [Modeling the internal representation and comparing the model with the actual implementation](./internal-representation-model/), depends on the code presented in the section [User-defined _interval_ utility functions](../interval-utilities/). This is included in the larger [code kit](../../../download-date-time-utilities/) that includes all of the reusable code that the overall _[date-time](../../../../type_datetime/)_ section describes and uses.
 {{< /tip >}}

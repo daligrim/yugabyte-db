@@ -7,31 +7,33 @@
  * http://github.com/YugaByte/yugabyte-db/blob/master/licenses/POLYFORM-FREE-TRIAL-LICENSE-1.0.0.txt
  */
 
-import React, { FC } from 'react';
+import { FC } from 'react';
 import * as Yup from 'yup';
 import { Field, FormikProps } from 'formik';
 import { toast } from 'react-toastify';
-import { uniqBy } from 'lodash';
 import { Col, Row } from 'react-bootstrap';
 import { useMutation, useQuery, useQueryClient } from 'react-query';
-import { fetchTablesInUniverse } from '../../../actions/xClusterReplication';
 import { YBModalForm } from '../../common/forms';
 import { YBFormSelect, YBNumericInput } from '../../common/forms/fields';
 import { YBLoading } from '../../common/indicators';
 import { BACKUP_API_TYPES } from '../common/IBackup';
-import { TABLE_TYPE_MAP } from '../../../redesign/helpers/dtos';
-import { createPITRConfig } from '../common/PitrAPI';
+import { createPITRConfig, getNameSpaces } from '../common/PitrAPI';
+import { AllowedTasks, TableTypeLabel } from '../../../redesign/helpers/dtos';
+import { isActionFrozen } from '../../../redesign/helpers/utils';
+import { UNIVERSE_TASKS } from '../../../redesign/helpers/constants';
+
 import './PointInTimeRecoveryEnableModal.scss';
 
 interface PointInTimeRecoveryEnableModalProps {
   universeUUID: string;
   visible: boolean;
+  allowedTasks: AllowedTasks;
   onHide: () => void;
 }
 
 const PITR_SUPPORTED_APIS = [
-  TABLE_TYPE_MAP[BACKUP_API_TYPES.YSQL],
-  TABLE_TYPE_MAP[BACKUP_API_TYPES.YCQL]
+  TableTypeLabel[BACKUP_API_TYPES.YSQL],
+  TableTypeLabel[BACKUP_API_TYPES.YCQL]
 ];
 
 interface Form_Values {
@@ -41,49 +43,67 @@ interface Form_Values {
 }
 
 const initialValues: Form_Values = {
-  api_type: { value: BACKUP_API_TYPES.YSQL, label: TABLE_TYPE_MAP[BACKUP_API_TYPES.YSQL] },
+  api_type: { value: BACKUP_API_TYPES.YSQL, label: TableTypeLabel[BACKUP_API_TYPES.YSQL] },
   database: null,
-  retention_interval: 1
+  retention_interval: 7
 };
+
+const REFETCH_CONFIGS_INTERVAL = 5000; //ms
 
 export const PointInTimeRecoveryEnableModal: FC<PointInTimeRecoveryEnableModalProps> = ({
   universeUUID,
   visible,
+  allowedTasks,
   onHide
 }) => {
   const queryClient = useQueryClient();
 
-  const { data: tablesInUniverse, isLoading: isTableListLoading } = useQuery(
-    [universeUUID, 'tables'],
-    () => fetchTablesInUniverse(universeUUID!),
+  const { data: nameSpaces, isLoading } = useQuery(
+    [universeUUID, 'namespaces'],
+    () => getNameSpaces(universeUUID),
     {
       enabled: visible
     }
   );
 
-  const createPITR = useMutation((values: any) => createPITRConfig(universeUUID, values), {
-    onSuccess: (_, variables) => {
-      toast.success(`Point-in-time recovery enabled successfully for ${variables.keyspaceName}`);
-      queryClient.invalidateQueries(['scheduled_sanpshots']);
-      onHide();
-    },
-    onError: (err: any) => {
-      toast.error(err?.response?.data?.error ?? 'An Error occurred');
-      onHide();
+  const createPITR = useMutation(
+    (values: any) =>
+      createPITRConfig(universeUUID, values.tableType, values.keyspaceName, values.payload),
+    {
+      onSuccess: (resp, variables) => {
+        toast.success(
+          <span>
+            Point-in-time recovery is being enabled for {variables.keyspaceName}. Click &nbsp;
+            <a href={`/tasks/${resp.data.taskUUID}`} target="_blank" rel="noopener noreferrer">
+              here
+            </a>
+            &nbsp; for task details.
+          </span>
+        );
+        //refetch after 5 secs
+        setTimeout(() => {
+          queryClient.invalidateQueries(['scheduled_sanpshots']);
+        }, REFETCH_CONFIGS_INTERVAL);
+        onHide();
+      },
+      onError: (err: any) => {
+        toast.error(err?.response?.data?.error ?? 'An Error occurred');
+        onHide();
+      }
     }
-  });
+  );
 
   const handleSubmit = async (
     values: any,
     { setSubmitting }: { setSubmitting: any; setFieldError: any }
   ) => {
     setSubmitting(false);
+    const tableType = values.api_type.label;
+    const keyspaceName = values.database.value;
     const payload = {
-      tableType: values.api_type.value,
-      keyspaceName: values.database.value,
       retentionPeriodInSeconds: Number(values.retention_interval) * 24 * 60 * 60
     };
-    createPITR.mutateAsync(payload);
+    createPITR.mutateAsync({ tableType, keyspaceName, payload });
   };
 
   const validationSchema = Yup.object().shape({
@@ -92,30 +112,32 @@ export const PointInTimeRecoveryEnableModal: FC<PointInTimeRecoveryEnableModalPr
 
   if (!visible) return null;
 
-  if (isTableListLoading) return <YBLoading />;
+  if (isLoading) return <YBLoading />;
+
+  const isCreateActionFrozen = isActionFrozen(allowedTasks, UNIVERSE_TASKS.ENABLE_PITR);
 
   return (
     <YBModalForm
       title="Enable Point-in-time Recovery"
       visible={visible}
       onHide={onHide}
+      isButtonDisabled={isCreateActionFrozen}
       submitLabel="Enable"
       onFormSubmit={handleSubmit}
       showCancelButton
       dialogClassName="pitr-enable-modal"
+      submitTestId="EnablePitrSubmitBtn"
+      cancelTestId="EnablePitrCancelBtn"
       initialValues={initialValues}
       validationSchema={validationSchema}
       render={({ values, setFieldValue, errors }: FormikProps<Form_Values>) => {
-        const tablesByAPI = tablesInUniverse?.data.filter(
+        const nameSpacesByAPI = nameSpaces?.filter(
           (t: any) => t.tableType === values['api_type'].value
         );
-
-        const uniqueKeyspaces = uniqBy(tablesByAPI, 'keySpace').map((t: any) => {
-          return {
-            label: t.keySpace,
-            value: t.keySpace
-          };
-        });
+        const nameSpacesList = nameSpacesByAPI.map((nameSpace: any) => ({
+          label: nameSpace.name,
+          value: nameSpace.name
+        }));
 
         return (
           <>
@@ -135,6 +157,7 @@ export const PointInTimeRecoveryEnableModal: FC<PointInTimeRecoveryEnableModalPr
                   components={{
                     IndicatorSeparator: null
                   }}
+                  id="PitrApiTypeSelector"
                 />
               </Col>
             </Row>
@@ -144,13 +167,14 @@ export const PointInTimeRecoveryEnableModal: FC<PointInTimeRecoveryEnableModalPr
                   name="database"
                   component={YBFormSelect}
                   label="Select the Database you want to enable point-in-time recovery for"
-                  options={uniqueKeyspaces}
+                  options={nameSpacesList}
                   onChange={(_: any, val: any) => {
                     setFieldValue('database', val);
                   }}
                   components={{
                     IndicatorSeparator: null
                   }}
+                  id="PitrDBNameSelector"
                 />
               </Col>
             </Row>
@@ -164,9 +188,10 @@ export const PointInTimeRecoveryEnableModal: FC<PointInTimeRecoveryEnableModalPr
                       component={YBNumericInput}
                       input={{
                         onChange: (val: number) => setFieldValue('retention_interval', val),
-                        value: values['retention_interval']
+                        value: values['retention_interval'],
+                        id: 'PitrRetentionPeriodInput'
                       }}
-                      minVal={1}
+                      minVal={2}
                     />
                   </Col>
                   <Col lg={3}>Day(s)</Col>

@@ -15,6 +15,8 @@
 
 #include "yb/client/client.h"
 
+#include "yb/common/schema_pbutil.h"
+
 #include "yb/consensus/consensus.pb.h"
 #include "yb/consensus/consensus.proxy.h"
 
@@ -23,9 +25,13 @@
 #include "yb/integration-tests/external_mini_cluster.h"
 #include "yb/integration-tests/yb_table_test_base.h"
 
+#include "yb/master/master_client.proxy.h"
 #include "yb/master/master_cluster.proxy.h"
+#include "yb/master/master_ddl.proxy.h"
 
 #include "yb/tools/yb-admin_client.h"
+
+#include "yb/tserver/tserver_service.pb.h"
 
 #include "yb/util/backoff_waiter.h"
 #include "yb/util/monotime.h"
@@ -223,6 +229,152 @@ TEST_F_EX(LoadBalancerTest, MultiZoneTest, LoadBalancerOddTabletsTest) {
   ASSERT_OK(WaitFor([&]() -> Result<bool> {
     return client_->IsLoadBalanced(narrow_cast<int>(num_tablet_servers() + 1));
   },  kDefaultTimeout * 2, "IsLoadBalanced"));
+}
+
+class LoadBalancerManyTabletsTest : public LoadBalancerTest {
+ protected:
+  int num_tablets() override { return 12; }
+};
+
+TEST_F_EX(LoadBalancerTest, TableWithNullPartitionInfo, LoadBalancerManyTabletsTest) {
+  ASSERT_OK(yb_admin_client_->ModifyPlacementInfo("c.r.z0,c.r.z1,c.r.z2", 3, ""));
+  ASSERT_OK(yb_admin_client_->SetPreferredZones({"c.r.z1"}));
+
+  {
+    // Delete and recreate a new table with special configuration (see replication_info below).
+    YBTableTestBase::DeleteTable();
+    master::CreateTableRequestPB req;
+    master::CreateTableResponsePB resp;
+
+    req.set_name(table_name().table_name());
+    SchemaToPB(client::internal::GetSchema(schema_), req.mutable_schema());
+    req.mutable_namespace_()->set_name(table_name().namespace_name());
+    req.mutable_partition_schema()->set_hash_schema(PartitionSchemaPB::MULTI_COLUMN_HASH_SCHEMA);
+    req.mutable_schema()->mutable_table_properties()->set_num_tablets(num_tablets());
+
+    // As part of GHI #15698, we want to create a table with a null replication_info, but that still
+    // passes the has_replication_info() check.
+    req.mutable_replication_info();
+    ASSERT_TRUE(req.has_replication_info());
+
+    rpc::RpcController rpc;
+    rpc.set_timeout(kDefaultTimeout);
+    auto proxy_ddl = GetMasterLeaderProxy<master::MasterDdlProxy>();
+    ASSERT_OK(proxy_ddl.CreateTable(req, &resp, &rpc));
+    table_exists_ = true;
+  }
+
+  ASSERT_OK(WaitFor(
+      [&]() { return AreLeadersOnPreferredOnly(); }, kDefaultTimeout, "AreLeadersOnPreferredOnly"));
+
+  // Add a new node to zone 1.
+  std::vector<std::string> extra_opts;
+  extra_opts.push_back("--placement_cloud=c");
+  extra_opts.push_back("--placement_region=r");
+  extra_opts.push_back("--placement_zone=z1");
+  ASSERT_OK(external_mini_cluster()->AddTabletServer(true, extra_opts));
+  ASSERT_OK(
+      external_mini_cluster()->WaitForTabletServerCount(num_tablet_servers() + 1, kDefaultTimeout));
+
+  WaitForLoadBalanceCompletion();
+  // Since we do an intersection of preferred leaders with the tablet's replication info to
+  // determine possible leader placement, this bug used to also ignore preferred leader placements.
+  // Check that preferred leaders are being respected.
+  EXPECT_OK(WaitFor(
+      [&]() { return AreLeadersOnPreferredOnly(); }, kDefaultTimeout, "AreLeadersOnPreferredOnly"));
+
+  {
+    // Get tablet locations to ensure we only have one copy of each tablet in each zone.
+    auto proxy_client = GetMasterLeaderProxy<master::MasterClientProxy>();
+    std::vector<std::unordered_set<std::string>> replicas(num_tablet_servers() + 1);
+
+    master::GetTableLocationsRequestPB req;
+    master::GetTableLocationsResponsePB resp;
+    req.set_max_returned_locations(num_tablets());
+    req.mutable_table()->set_table_name(table_name().table_name());
+    req.mutable_table()->mutable_namespace_()->set_name(table_name().namespace_name());
+
+    rpc::RpcController rpc;
+    rpc.set_timeout(MonoDelta::FromMilliseconds(client_rpc_timeout_ms()));
+    ASSERT_OK(proxy_client.GetTableLocations(req, &resp, &rpc));
+
+    for (const auto& loc : resp.tablet_locations()) {
+      for (const auto& replica : loc.replicas()) {
+        for (size_t i = 0; i < num_tablet_servers() + 1; ++i) {
+          if (replica.ts_info().permanent_uuid() ==
+              external_mini_cluster()->tablet_server(i)->instance_id().permanent_uuid()) {
+            replicas[i].insert(loc.tablet_id());
+            break;
+          }
+        }
+      }
+    }
+
+    // Print tablet locations.
+    for (size_t i = 0; i < num_tablet_servers() + 1; ++i) {
+      LOG(INFO) << Format(
+          "For ts $0, tablets are $1 with count $2",
+          external_mini_cluster()->tablet_server(i)->instance_id().permanent_uuid(),
+          ToString(replicas[i]), replicas[i].size());
+    }
+
+    // Both zone1 tservers should have half the number of tablets.
+    ASSERT_EQ(replicas[0].size(), num_tablets());
+    ASSERT_EQ(replicas[2].size(), num_tablets());
+    ASSERT_EQ(replicas[1].size(), num_tablets() / 2);
+    ASSERT_EQ(replicas[3].size(), num_tablets() / 2);
+
+    // Check that tservers in zone1 don't share any tablets.
+    for (const auto& tablet_id : replicas[1]) {
+      ASSERT_FALSE(replicas[3].contains(tablet_id));
+    }
+  }
+}
+
+TEST_F(LoadBalancerManyTabletsTest, LimitRbsToUnresponsiveNode) {
+  // Test that when a tserver fails to heartbeat to the master leader, we don't overwhelm it with
+  // RBS. See issue #23487 where these nodes would be reported as UNKNOWN which would not count
+  // towards our RBS limits.
+  const int kNumConcurrentRBS = 3;
+  ASSERT_OK(external_mini_cluster()->SetFlagOnMasters(
+      "load_balancer_max_concurrent_tablet_remote_bootstraps_per_table",
+      ToString(kNumConcurrentRBS)));
+  ASSERT_OK(external_mini_cluster()->SetFlagOnMasters(
+      "load_balancer_max_concurrent_tablet_remote_bootstraps", ToString(kNumConcurrentRBS)));
+  // Don't set a limit on overreplication, we want RBS to be the limiting factor.
+  ASSERT_OK(external_mini_cluster()->SetFlagOnMasters(
+      "load_balancer_max_over_replicated_tablets", "100"));
+
+  ASSERT_OK(yb_admin_client_->SetLoadBalancerEnabled(false));
+
+  // Add a new node. Pause heartbeats to master and pause completion of RBS for it.
+  ASSERT_OK(external_mini_cluster()->AddTabletServer(true));
+  ASSERT_OK(
+      external_mini_cluster()->WaitForTabletServerCount(num_tablet_servers() + 1, kDefaultTimeout));
+  auto new_node = external_mini_cluster()->tablet_server(num_tablet_servers());
+
+  ASSERT_OK(external_mini_cluster()->SetFlag(new_node, "TEST_tserver_disable_heartbeat", "true"));
+  ASSERT_OK(
+      external_mini_cluster()->SetFlag(new_node, "TEST_pause_rbs_before_download_wal", "true"));
+
+  ASSERT_OK(yb_admin_client_->SetLoadBalancerEnabled(true));
+
+  // Allow the LB to do a number of passes. It should try to add kNumConcurrentRBS to this new node,
+  // and then get stuck waiting for these RBSs to complete.
+  SleepFor(MonoDelta::FromSeconds(5));
+  ASSERT_FALSE(ASSERT_RESULT(client_->IsLoadBalancerIdle()));
+
+  // Check the number of added tablets on the new node.
+  auto new_node_tablets = ASSERT_RESULT(external_mini_cluster()->GetTablets(new_node));
+  ASSERT_EQ(new_node_tablets.size(), kNumConcurrentRBS);
+  for (const auto& tablet : new_node_tablets) {
+    ASSERT_EQ(tablet.state(), tablet::RaftGroupStatePB::NOT_STARTED);
+  }
+
+  // Resume RBS on the new node. LB should be able to complete now, even with no heartbeats.
+  ASSERT_OK(
+      external_mini_cluster()->SetFlag(new_node, "TEST_pause_rbs_before_download_wal", "false"));
+  WaitForLoadBalanceCompletion();
 }
 
 } // namespace integration_tests

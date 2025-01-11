@@ -36,7 +36,9 @@ package yb.tserver;
 option java_package = "org.yb.tserver";
 
 import "yb/common/common.proto";
+import "yb/common/common_net.proto";
 import "yb/common/common_types.proto";
+import "yb/common/opid.proto";
 import "yb/consensus/metadata.proto";
 import "yb/tablet/metadata.proto";
 import "yb/tablet/operations.proto";
@@ -53,6 +55,9 @@ message ChangeMetadataResponsePB {
   optional TabletServerErrorPB error = 1;
 
   optional fixed64 propagated_hybrid_time = 2;
+
+  // CDC SDK Create Stream context
+  optional OpIdPB cdc_sdk_snapshot_safe_op_id = 3;
 }
 
 message GetSafeTimeRequestPB {
@@ -118,18 +123,6 @@ message BackfillIndexResponsePB {
   optional uint64 number_rows_processed = 5;
 }
 
-message CopartitionTableRequestPB {
-  // UUID of server this request is addressed to.
-  optional bytes dest_uuid = 1;
-  optional bytes table_id = 2;
-  optional bytes tablet_id = 3;
-  optional string table_name = 4;
-}
-
-message CopartitionTableResponsePB {
-  optional TabletServerErrorPB error = 1;
-}
-
 // A create tablet request.
 message CreateTabletRequestPB {
   // UUID of server this request is addressed to.
@@ -162,10 +155,25 @@ message CreateTabletRequestPB {
   optional bool colocated = 13 [ default = false ];
 
   repeated bytes snapshot_schedules = 16;
+
+  repeated StatefulServiceKind hosted_stateful_services = 17;
+
+  // In case the table was rewritten, explicitly store the TableId containing the PG table OID
+  // (as the table's TableId no longer matches).
+  optional bytes pg_table_id = 18;
+
+  optional uint32 wal_retention_secs = 19;
+
+  // If set to true, retention barriers will be set on the tablet.
+  optional bool cdc_sdk_set_retention_barriers = 20;
 }
 
 message CreateTabletResponsePB {
   optional TabletServerErrorPB error = 1;
+
+  // CDC SDK Create dynamic table context. The initial safe_op_id for a tablet of a
+  // dynamically added table.
+  optional OpIdPB cdc_sdk_safe_op_id = 2;
 }
 
 message PrepareDeleteTransactionTabletRequestPB {
@@ -240,6 +248,9 @@ message FlushTabletsRequestPB {
 
   // Whether we want to flush or compact all tablets in the server.
   optional bool all_tablets = 5;
+
+  // Only flush/compact regular RocksDB, not intents RocksDB.
+  optional bool regular_only = 6;
 }
 
 message FlushTabletsResponsePB {
@@ -293,6 +304,21 @@ message UpgradeYsqlResponsePB {
   optional TabletServerErrorPB error = 1;
 }
 
+message WaitForYsqlBackendsCatalogVersionRequestPB {
+  optional uint32 database_oid = 1; // required
+  optional uint64 catalog_version = 2; // required
+  optional int32 requestor_pg_backend_pid = 4; // optional
+  // Previously known number of YSQL backends that have not reached the requested catalog version.
+  // -1 means unknown.
+  optional int32 prev_num_lagging_backends = 3; // required
+}
+
+message WaitForYsqlBackendsCatalogVersionResponsePB {
+  optional TabletServerErrorPB error = 1;
+  // Number of YSQL backends that have not reached the requested catalog version.
+  optional int32 num_lagging_backends = 2;
+}
+
 message TestRetryRequestPB {
   // UUID of server this request is addressed to.
   optional bytes dest_uuid = 2;
@@ -303,6 +329,11 @@ message TestRetryRequestPB {
   required int32 num_retries = 4;
 }
 
+message TestRetryResponsePB {
+  optional TabletServerErrorPB error = 1;
+  optional fixed64 propagated_hybrid_time = 2;
+}
+
 message UpdateTransactionTablesVersionRequestPB {
   required uint64 version = 1;
 }
@@ -311,9 +342,29 @@ message UpdateTransactionTablesVersionResponsePB {
   optional TabletServerErrorPB error = 1;
 }
 
-message TestRetryResponsePB {
+message CloneTabletResponsePB {
   optional TabletServerErrorPB error = 1;
   optional fixed64 propagated_hybrid_time = 2;
+}
+
+message ClonePgSchemaRequestPB {
+  optional bytes source_db_name = 1;
+  optional bytes target_db_name = 2;
+  optional fixed64 restore_ht = 3;
+  optional bytes source_owner = 4;
+  optional bytes target_owner = 5;
+}
+
+message ClonePgSchemaResponsePB {
+  optional TabletServerErrorPB error = 1;
+}
+
+message EnableDbConnsRequestPB {
+  optional bytes target_db_name = 1;
+}
+
+message EnableDbConnsResponsePB {
+  optional TabletServerErrorPB error = 1;
 }
 
 service TabletServerAdminService {
@@ -342,9 +393,6 @@ service TabletServerAdminService {
   // Marks an index table as having completed backfilling.
   rpc BackfillDone(tablet.ChangeMetadataRequestPB) returns (ChangeMetadataResponsePB);
 
-  // Create a co-partitioned table in an existing tablet
-  rpc CopartitionTable(CopartitionTableRequestPB) returns (CopartitionTableResponsePB);
-
   rpc FlushTablets(FlushTabletsRequestPB) returns (FlushTabletsResponsePB);
 
   rpc CountIntents(CountIntentsRequestPB) returns (CountIntentsResponsePB);
@@ -358,8 +406,18 @@ service TabletServerAdminService {
 
   rpc UpgradeYsql(UpgradeYsqlRequestPB) returns (UpgradeYsqlResponsePB);
 
+  rpc WaitForYsqlBackendsCatalogVersion(WaitForYsqlBackendsCatalogVersionRequestPB)
+      returns (WaitForYsqlBackendsCatalogVersionResponsePB);
+
   rpc UpdateTransactionTablesVersion(UpdateTransactionTablesVersionRequestPB)
       returns (UpdateTransactionTablesVersionResponsePB);
+
+  rpc CloneTablet(tablet.CloneTabletRequestPB) returns (CloneTabletResponsePB);
+
+  // Create PG objects (database, tables and indexes) of the clone database.
+  rpc ClonePgSchema(ClonePgSchemaRequestPB) returns (ClonePgSchemaResponsePB);
+
+  rpc EnableDbConns(EnableDbConnsRequestPB) returns (EnableDbConnsResponsePB);
 
   // For test purposes: returns TryAgain error until specified number of calls is done.
   rpc TestRetry(TestRetryRequestPB) returns (TestRetryResponsePB);

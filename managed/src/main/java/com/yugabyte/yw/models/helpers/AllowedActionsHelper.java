@@ -14,6 +14,7 @@ import static com.yugabyte.yw.common.NodeActionType.START_MASTER;
 import static com.yugabyte.yw.forms.UniverseDefinitionTaskParams.ClusterType.PRIMARY;
 import static com.yugabyte.yw.models.helpers.NodeDetails.NodeState.Live;
 
+import com.yugabyte.yw.commissioner.Common.CloudType;
 import com.yugabyte.yw.common.NodeActionType;
 import com.yugabyte.yw.common.PlatformServiceException;
 import com.yugabyte.yw.common.Util;
@@ -22,6 +23,7 @@ import com.yugabyte.yw.models.Universe;
 import com.yugabyte.yw.models.helpers.NodeDetails.NodeState;
 import java.util.Arrays;
 import java.util.Set;
+import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -37,7 +39,9 @@ public class AllowedActionsHelper {
     this.node = node;
   }
 
-  /** @throws PlatformServiceException if action not allowed on this node */
+  /**
+   * @throws PlatformServiceException if action not allowed on this node
+   */
   public void allowedOrBadRequest(NodeActionType action) {
     String errMsg = nodeActionErrOrNull(action);
     if (errMsg != null) {
@@ -58,6 +62,16 @@ public class AllowedActionsHelper {
       LOG.trace(nodeActionAllowedErr);
       return false;
     }
+    if (universe
+        .getUniverseDetails()
+        .getPrimaryCluster()
+        .userIntent
+        .providerType
+        .equals(CloudType.kubernetes)) {
+      if (nodeActionType == NodeActionType.REPLACE) {
+        return false;
+      }
+    }
     return true;
   }
 
@@ -68,10 +82,14 @@ public class AllowedActionsHelper {
    * @return error string if the node is not allowed to perform the action otherwise null.
    */
   private String nodeActionErrOrNull(NodeActionType action) {
+    // Temporarily no validation for Hard Reboot task to unblock cloud.
+    // Starting a discussion on desired impl of removeMasterErrOrNull and
+    // removeSingleNodeErrOrNull. We will add validation after.
     if (action == NodeActionType.STOP
         || action == NodeActionType.REMOVE
-        || action == NodeActionType.REBOOT) {
-      String errorMsg = removeMasterErrOrNull(action);
+        || action == NodeActionType.REBOOT
+        || action == NodeActionType.DECOMMISSION) {
+      String errorMsg = removeProcessesErrOrNull(action);
       if (errorMsg != null) {
         return errorMsg;
       }
@@ -81,7 +99,7 @@ public class AllowedActionsHelper {
       }
     }
 
-    if (action == NodeActionType.DELETE) {
+    if (action == NodeActionType.DELETE || action == NodeActionType.DECOMMISSION) {
       String errorMsg = deleteSingleNodeErrOrNull(action);
       if (errorMsg != null) {
         return errorMsg;
@@ -97,7 +115,9 @@ public class AllowedActionsHelper {
       // TODO: Clean this up as this null is probably test artifact
       return errorMsg(action, "It is in null state");
     }
-    if (!node.state.allowedActions().contains(action)) {
+    try {
+      node.validateActionOnState(action);
+    } catch (RuntimeException ex) {
       return errorMsg(action, "It is in " + node.state + " state");
     }
     return null;
@@ -109,10 +129,7 @@ public class AllowedActionsHelper {
       if (node.isMaster) {
         // a primary node is being removed
         long numNodesUp =
-            universe
-                .getUniverseDetails()
-                .getNodesInCluster(cluster.uuid)
-                .stream()
+            universe.getUniverseDetails().getNodesInCluster(cluster.uuid).stream()
                 .filter(n -> n != node && n.state == Live)
                 .count();
         if (numNodesUp == 0) {
@@ -123,50 +140,71 @@ public class AllowedActionsHelper {
     return null;
   }
 
-  private String removeMasterErrOrNull(NodeActionType action) {
+  private String removeProcessesErrOrNull(NodeActionType action) {
     UniverseDefinitionTaskParams.Cluster cluster = universe.getCluster(node.placementUuid);
     if (cluster.clusterType == PRIMARY) {
       if (node.isMaster) {
-        // a primary node is being removed
-        long numMasterNodesUp =
-            universe
-                .getUniverseDetails()
-                .getNodesInCluster(cluster.uuid)
-                .stream()
-                .filter(n -> n.isMaster && n.state == Live)
-                .count();
-        if (numMasterNodesUp <= (cluster.userIntent.replicationFactor + 1) / 2) {
-          return errorMsg(
-              action,
-              "As it will under replicate the masters (count = "
-                  + numMasterNodesUp
-                  + ", replicationFactor = "
-                  + cluster.userIntent.replicationFactor
-                  + ")");
-        }
+        return removePrimaryProcessOrNull(action, cluster, true);
+      } else if (node.isTserver && cluster.userIntent.dedicatedNodes) {
+        return removePrimaryProcessOrNull(action, cluster, false);
       }
+    }
+    return null;
+  }
+
+  private String removePrimaryProcessOrNull(
+      NodeActionType action, UniverseDefinitionTaskParams.Cluster cluster, boolean isMaster) {
+    Predicate<NodeDetails> predicate = n -> isMaster ? n.isMaster : n.isTserver;
+    long numOtherNodesUp =
+        universe.getUniverseDetails().getNodesInCluster(cluster.uuid).stream()
+            .filter(predicate)
+            .filter(n -> n.state == Live)
+            .filter(n -> !n.nodeName.equals(node.nodeName))
+            .count();
+    if (numOtherNodesUp < (cluster.userIntent.replicationFactor + 1) / 2) {
+      long currentCount = numOtherNodesUp;
+      if (predicate.test(node) && node.state == Live) {
+        currentCount++;
+      }
+      String processName = isMaster ? "masters" : "tservers";
+      return errorMsg(
+          action,
+          "As it will under replicate the "
+              + processName
+              + " (count = "
+              + currentCount
+              + ", replicationFactor = "
+              + cluster.userIntent.replicationFactor
+              + ")");
     }
     return null;
   }
 
   private String deleteSingleNodeErrOrNull(NodeActionType action) {
     UniverseDefinitionTaskParams.Cluster cluster = universe.getCluster(node.placementUuid);
-    if ((cluster.clusterType == PRIMARY) && (node.state == NodeState.Decommissioned)) {
+    if ((cluster.clusterType == PRIMARY)
+        && ((node.state == NodeState.Decommissioned) || action == NodeActionType.DECOMMISSION)) {
       int nodesInCluster = universe.getUniverseDetails().getNodesInCluster(cluster.uuid).size();
-      if (nodesInCluster <= cluster.userIntent.replicationFactor) {
+      int minNodes =
+          cluster.userIntent.dedicatedNodes
+              ? cluster.userIntent.replicationFactor * 2
+              : cluster.userIntent.replicationFactor;
+      if (nodesInCluster <= minNodes) {
         return errorMsg(
             action,
-            "Unable to have less nodes than RF (count = "
-                + nodesInCluster
-                + ", replicationFactor = "
-                + cluster.userIntent.replicationFactor
-                + ")");
+            String.format(
+                "Unable to have less nodes than %s (count = %d, replicationFactor = %d)",
+                cluster.userIntent.dedicatedNodes ? "2 * RF" : "RF",
+                nodesInCluster,
+                cluster.userIntent.replicationFactor));
       }
     }
     return null;
   }
 
-  /** @return err message if disallowed or null */
+  /**
+   * @return err message if disallowed or null
+   */
   private String startMasterErrOrNull() {
     if (node.isMaster) {
       return errorMsg(START_MASTER, "It is already master.");

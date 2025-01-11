@@ -1,16 +1,12 @@
 // Copyright (c) YugaByte, Inc.
 
-import React, { Fragment } from 'react';
-import moment from 'moment';
+import { Fragment } from 'react';
 import { YBModal } from '../../../common/forms/fields';
+import { ybFormatDate } from '../../../../redesign/helpers/DateUtils';
 
 export const CertificateDetails = ({ certificate, visible, onHide }) => {
-  const certStart = certificate.creationTime
-    ? moment(certificate.creationTime).format('DD MMMM YYYY')
-    : '';
-  const certExpiry = certificate.expiryDate
-    ? moment(certificate.expiryDate).format('DD MMMM YYYY')
-    : '';
+  const certStart = certificate.creationTime ? ybFormatDate(certificate.creationTime) : '';
+  const certExpiry = certificate.expiryDate ? ybFormatDate(certificate.expiryDate) : '';
 
   const isVaultCert = certificate.type === 'HashicorpVault';
 
@@ -29,7 +25,7 @@ export const CertificateDetails = ({ certificate, visible, onHide }) => {
         <div>{certExpiry}</div>
       </li>
       <li>
-        <label>Certificate</label>
+        <label>{certificate.type === 'CustomCertHostPath' ? "Root CA Certificate" : "Certificate"}</label>
         <div>{certificate.certificate}</div>
       </li>
       {certificate.privateKey && (
@@ -62,6 +58,28 @@ export const CertificateDetails = ({ certificate, visible, onHide }) => {
           </li>
         </Fragment>
       )}
+      {
+        certificate.type === 'CustomCertHostPath' && (
+          <>
+            <li>
+              <label>Database Node Certificate Path</label>
+              <div>{certificate.customCertInfo?.nodeCertPath ?? '-'}</div>
+            </li>
+            <li>
+              <label>Database Node Certificate Private Key</label>
+              <div>{certificate.customCertInfo?.nodeKeyPath ?? '-'}</div>
+            </li>
+            <li>
+              <label>Client Certificate</label>
+              <div>{certificate.customCertInfo?.clientCertPath ?? '-'}</div>
+            </li>
+            <li>
+              <label>Client Certificate Private Key</label>
+              <div>{certificate.customCertInfo?.clientKeyPath ?? '-'}</div>
+            </li>
+          </>
+        )
+      }
     </>
   );
 
@@ -70,7 +88,7 @@ export const CertificateDetails = ({ certificate, visible, onHide }) => {
       hcVaultCertParams: { vaultAddr, vaultToken, engine, mountPath, role, ttl, ttlExpiry }
     } = certificate;
 
-    const tokenExpiry = ttl && ttlExpiry ? moment(ttlExpiry).format('DD MMMM YYYY') : 'Wont Expire';
+    const tokenExpiry = ttl && ttlExpiry ? ybFormatDate(ttlExpiry) : 'Wont Expire';
 
     return (
       <>

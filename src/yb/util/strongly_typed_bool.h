@@ -11,10 +11,9 @@
 // under the License.
 //
 
-#ifndef YB_UTIL_STRONGLY_TYPED_BOOL_H
-#define YB_UTIL_STRONGLY_TYPED_BOOL_H
+#pragma once
 
-#include <vector>
+#include <initializer_list>
 
 #include <boost/preprocessor/cat.hpp>
 
@@ -29,38 +28,36 @@
 namespace yb {
 
 template <class Tag>
+struct StronglyTypedBoolProxy {
+  bool value;
+
+  constexpr operator bool() const { return value; }
+  constexpr auto operator!() const { return StronglyTypedBoolProxy<Tag>{!value}; }
+};
+
+template <class Tag>
 class StronglyTypedBool {
  public:
-  static const StronglyTypedBool<Tag> kTrue;
-  static const StronglyTypedBool<Tag> kFalse;
-  static const std::initializer_list<StronglyTypedBool<Tag>> kValues;
+  static constexpr StronglyTypedBoolProxy<Tag> kTrue{true};
+  static constexpr StronglyTypedBoolProxy<Tag> kFalse{false};
+  static constexpr std::initializer_list<StronglyTypedBool<Tag>> kValues = {
+    StronglyTypedBool<Tag>(false), StronglyTypedBool<Tag>(true)
+  };
+
+  constexpr StronglyTypedBool(StronglyTypedBoolProxy<Tag> proxy) : value_(proxy.value) {} // NOLINT
 
   // This is public so that we can construct a strongly-typed boolean value out of a regular one if
   // needed. In that case we'll have to spell out the class name, which will enforce readability.
-  explicit StronglyTypedBool(bool value) : value_(value) {}
+  constexpr explicit StronglyTypedBool(bool value) : value_(value) {}
 
   // These operators return regular bools so that it is easy to use strongly-typed bools in logical
   // expressions.
-  operator bool() const { return value_; }
-  StronglyTypedBool<Tag> operator!() const { return StronglyTypedBool<Tag>(!value_); }
-  bool get() const { return value_; }
+  constexpr operator bool() const { return value_; }
+  constexpr auto operator!() const { return StronglyTypedBool<Tag>(!value_); }
+  constexpr bool get() const { return value_; }
 
  private:
   bool value_;
 };
 
-template <class Tag>
-const StronglyTypedBool<Tag> StronglyTypedBool<Tag>::kTrue(true);
-
-template <class Tag>
-const StronglyTypedBool<Tag> StronglyTypedBool<Tag>::kFalse(false);
-
-template <class Tag>
-const std::initializer_list<StronglyTypedBool<Tag>> StronglyTypedBool<Tag>::kValues {
-  StronglyTypedBool<Tag>::kFalse,
-  StronglyTypedBool<Tag>::kTrue
-};
-
 }  // namespace yb
-
-#endif // YB_UTIL_STRONGLY_TYPED_BOOL_H

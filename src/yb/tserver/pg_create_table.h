@@ -11,15 +11,14 @@
 // under the License.
 //
 
-#ifndef YB_TSERVER_PG_CREATE_TABLE_H
-#define YB_TSERVER_PG_CREATE_TABLE_H
+#pragma once
 
 #include "yb/client/client_fwd.h"
 #include "yb/client/schema.h"
 #include "yb/client/yb_table_name.h"
 
 #include "yb/common/common_fwd.h"
-#include "yb/common/partition.h"
+#include "yb/dockv/partition.h"
 #include "yb/common/pg_types.h"
 
 #include "yb/tserver/pg_client.fwd.h"
@@ -43,6 +42,8 @@ class PgCreateTable {
     return indexed_table_id_;
   }
 
+  void SetXClusterSourceTableId(const PgObjectId& xcluster_source_table_id);
+
  private:
   Status AddColumn(const PgCreateColumnPB& req);
   void EnsureYBbasectidColumnCreated();
@@ -52,16 +53,15 @@ class PgCreateTable {
 
   const PgCreateTableRequestPB& req_;
   client::YBTableName table_name_;
-  boost::optional<YBHashSchema> hash_schema_;
+  boost::optional<dockv::YBHashSchema> hash_schema_;
   std::vector<std::string> range_columns_;
   client::YBSchemaBuilder schema_builder_;
   PgObjectId indexed_table_id_;
   bool ybbasectid_added_ = false;
+  PgObjectId xcluster_source_table_id_;
 };
 
 Status CreateSequencesDataTable(client::YBClient* client, CoarseTimePoint deadline);
 
 }  // namespace tserver
 }  // namespace yb
-
-#endif  // YB_TSERVER_PG_CREATE_TABLE_H

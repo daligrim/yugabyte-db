@@ -40,8 +40,10 @@
 
 #include <glog/stl_logging.h>
 
+#include "yb/common/schema_pbutil.h"
 #include "yb/common/wire_protocol.h"
 
+#include "yb/consensus/log.messages.h"
 #include "yb/consensus/log-test-base.h"
 #include "yb/consensus/log_index.h"
 #include "yb/consensus/opid_util.h"
@@ -49,11 +51,13 @@
 #include "yb/gutil/stl_util.h"
 #include "yb/gutil/strings/substitute.h"
 
+#include "yb/util/backoff_waiter.h"
 #include "yb/util/random.h"
 #include "yb/util/size_literals.h"
 #include "yb/util/stopwatch.h"
+#include "yb/util/flags.h"
 
-DEFINE_int32(num_batches, 10000,
+DEFINE_NON_RUNTIME_int32(num_batches, 10000,
              "Number of batches to write to/read from the Log in TestWriteManyBatches");
 
 DECLARE_int32(log_min_segments_to_retain);
@@ -61,11 +65,19 @@ DECLARE_bool(never_fsync);
 DECLARE_bool(writable_file_use_fsync);
 DECLARE_int32(o_direct_block_alignment_bytes);
 DECLARE_int32(o_direct_block_size_bytes);
+DECLARE_bool(TEST_simulate_abrupt_server_restart);
+DECLARE_bool(TEST_skip_file_close);
+DECLARE_int64(reuse_unclosed_segment_threshold_bytes);
+DECLARE_int32(min_segment_size_bytes_to_rollover_at_flush);
 
 namespace yb {
 namespace log {
 
+using namespace std::literals;
+
 using std::shared_ptr;
+using std::vector;
+using std::string;
 using consensus::MakeOpId;
 using strings::Substitute;
 
@@ -128,7 +140,7 @@ class LogTest : public LogTestBase {
     header.set_major_version(0);
     header.set_minor_version(0);
     header.set_unused_tablet_id(kTestTablet);
-    SchemaToPB(GetSimpleTestSchema(), header.mutable_schema());
+    SchemaToPB(GetSimpleTestSchema(), header.mutable_deprecated_schema());
 
     LogSegmentFooterPB footer;
     footer.set_num_entries(10);
@@ -155,6 +167,8 @@ class LogTest : public LogTestBase {
 
   void DoCorruptionTest(CorruptionType type, CorruptionPosition place,
                         Status expected_status, int expected_entries);
+
+  void DoReuseLastSegmentTest(bool durable_wal_write);
 
   Result<std::vector<OpId>> AppendAndCopy(size_t num_batches, size_t num_entries_per_batch);
 
@@ -205,6 +219,85 @@ class LogTest : public LogTestBase {
       const double commit_probability, const int num_approx_term_changes,
       const int num_approx_term_changes_with_index_rollback);
 };
+
+void LogTest::DoReuseLastSegmentTest(bool durable_wal_write) {
+  // log_->Close() simulates crash now
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_simulate_abrupt_server_restart) = true;
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_skip_file_close) = true;
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_reuse_unclosed_segment_threshold_bytes) = 512_KB;
+  // Restore value options_.durable_wal_write back later.
+  bool temp = options_.durable_wal_write;
+  options_.durable_wal_write = durable_wal_write;
+
+  uint64_t num_batches = 10;
+  if (AllowSlowTests()) {
+    num_batches = FLAGS_num_batches;
+  }
+  BuildLog();
+  LOG_TIMING(INFO, "Wrote batches to log") {
+    AppendReplicateBatchToLog(num_batches);
+  }
+  // Check number of entries.
+  SegmentSequence segments;
+  ASSERT_OK(log_->GetLogReader()->GetSegmentsSnapshot(&segments));
+  uint32_t num_entries = ASSERT_RESULT(GetEntries(segments));
+  ASSERT_EQ(num_entries, num_batches);
+
+  // Simulate crash then insert entries.
+  size_t segment_num_before_crash = segments.size();
+  ASSERT_OK(log_->Close());
+  BuildLog();
+  ASSERT_OK(log_->GetLogReader()->GetSegmentsSnapshot(&segments));
+  // Make sure segments number didn't get increase after restart.
+  ASSERT_EQ(segments.size(), segment_num_before_crash);
+  num_entries = ASSERT_RESULT(GetEntries(segments));
+  ASSERT_EQ(num_entries, num_batches);
+  LOG_TIMING(INFO, "Wrote batches to log") {
+    AppendReplicateBatchToLog(num_batches);
+  }
+  ASSERT_OK(log_->GetLogReader()->GetSegmentsSnapshot(&segments));
+  num_entries = ASSERT_RESULT(GetEntries(segments));
+  ASSERT_EQ(num_entries, num_batches*2);
+
+  // Close this segment properly and add another segment.
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_skip_file_close) = false;
+  ASSERT_OK(log_->AllocateSegmentAndRollOver());
+  LOG_TIMING(INFO, "Wrote batches to log") {
+    AppendReplicateBatchToLog(num_batches);
+  }
+  ASSERT_OK(log_->GetLogReader()->GetSegmentsSnapshot(&segments));
+  num_entries = ASSERT_RESULT(GetEntries(segments));
+  ASSERT_EQ(num_entries, num_batches*3);
+
+  // Simulate log crashs in the middle of writing an entry.
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_skip_file_close) = true;
+  segment_num_before_crash = segments.size();
+  ASSERT_OK(log_->TEST_WriteCorruptedEntryBatchAndSync());
+  ASSERT_OK(log_->Close());
+  BuildLog();
+  ASSERT_OK(log_->GetLogReader()->GetSegmentsSnapshot(&segments));
+  // Make sure segments number didn't get increase after restart.
+  ASSERT_EQ(segments.size(), segment_num_before_crash);
+  num_entries = ASSERT_RESULT(GetEntries(segments));
+  ASSERT_EQ(num_entries, num_batches*3);
+
+  // Test log index.
+  int64_t wal_segment_number = ASSERT_RESULT(
+                    log_->GetLogReader()->LookupOpWalSegmentNumber(/*op_index=*/1));
+  ASSERT_EQ(1, wal_segment_number);
+  wal_segment_number = ASSERT_RESULT(
+                    log_->GetLogReader()->LookupOpWalSegmentNumber(/*op_index=*/num_entries));
+  ASSERT_EQ(segments.size(), wal_segment_number);
+  options_.durable_wal_write = temp;
+}
+
+TEST_F(LogTest, TestReuseLastSegment) {
+  DoReuseLastSegmentTest(/*durable_wal_write=*/false);
+}
+
+TEST_F(LogTest, TestReuseLastSegmentWithDirectIO) {
+  DoReuseLastSegmentTest(/*durable_wal_write=*/true);
+}
 
 // If we write more than one entry in a batch, we should be able to
 // read all of those entries back.
@@ -295,8 +388,8 @@ TEST_F(LogTest, TestFsyncInterval) {
 TEST_F(LogTest, TestFsyncIntervalPhysical) {
   int interval = 1;
   options_.interval_durable_wal_write = MonoDelta::FromMilliseconds(interval);
-  FLAGS_never_fsync = false;
-  FLAGS_durable_wal_write = false;
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_never_fsync) = false;
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_durable_wal_write) = false;
   options_.preallocate_segments = false;
   BuildLog();
 
@@ -522,6 +615,41 @@ TEST_F(LogTest, TestLogMetrics) {
   ASSERT_EQ(wal_size_old, wal_size_new);
 }
 
+// Verify presence of min_start_time_running_txns in footer of closed segments.
+void VerifyClosedSegmentsHaveMinStartTimeRunningTxns(const SegmentSequence& segments) {
+  VLOG(1) << "Found " << segments.size() << " log segments";
+  for (const auto& segment : segments) {
+    if (!segment->HasFooter()) {
+      VLOG(1) << "Footer for segment " << segment->header().sequence_number() << " not found";
+      continue;
+    }
+    ASSERT_TRUE(segment->footer().has_min_start_time_running_txns());
+    auto curr_seg_min_start_time_running_txns = segment->footer().min_start_time_running_txns();
+    // All closed segments will have Hybrid::kInitial as min_start_time_running_txns in the footer
+    // as the callback is empty.
+    VLOG(1) << "Footer for segment " << segment->header().sequence_number()
+            << " found with min_start_time_running_txns: "
+            << curr_seg_min_start_time_running_txns;
+    ASSERT_EQ(curr_seg_min_start_time_running_txns, HybridTime::kInitial.ToUint64());
+  }
+}
+
+// Verify min_start_time_running_txns in the copied segment is same as the original segment.
+void VerifyMinStartTimeRunningTxnsAfterCopy(
+    const scoped_refptr<ReadableLogSegment>& original_segment,
+    const scoped_refptr<ReadableLogSegment>& copied_segment) {
+  if (!original_segment->HasFooter() ||
+      !original_segment->footer().has_min_start_time_running_txns()) {
+    return;
+  }
+
+  ASSERT_TRUE(copied_segment->HasFooter());
+  ASSERT_TRUE(copied_segment->footer().has_min_start_time_running_txns());
+  ASSERT_EQ(
+      original_segment->footer().min_start_time_running_txns(),
+      copied_segment->footer().min_start_time_running_txns());
+}
+
 // Tests that segments roll over when max segment size is reached
 // and that the player plays all entries in the correct order.
 TEST_F(LogTest, TestSegmentRollover) {
@@ -545,6 +673,7 @@ TEST_F(LogTest, TestSegmentRollover) {
 
   ReadableLogSegmentPtr last_segment = ASSERT_RESULT(segments.back());
   ASSERT_FALSE(last_segment->HasFooter());
+  VerifyClosedSegmentsHaveMinStartTimeRunningTxns(segments);
   ASSERT_OK(log_->Close());
 
   std::unique_ptr<LogReader> reader;
@@ -554,6 +683,7 @@ TEST_F(LogTest, TestSegmentRollover) {
 
   last_segment = ASSERT_RESULT(segments.back());
   ASSERT_TRUE(last_segment->HasFooter());
+  VerifyClosedSegmentsHaveMinStartTimeRunningTxns(segments);
 
   size_t total_read = 0;
   for (const scoped_refptr<ReadableLogSegment>& entry : segments) {
@@ -689,7 +819,7 @@ TEST_F(LogTest, TestGCWithLogRunning) {
   // verify that we don't GC any.
   {
     google::FlagSaver saver;
-    FLAGS_log_min_segments_to_retain = 10;
+    ANNOTATE_UNPROTECTED_WRITE(FLAGS_log_min_segments_to_retain) = 10;
     ASSERT_OK(log_->GC(anchored_index, &num_gced_segments));
     ASSERT_EQ(0, num_gced_segments);
   }
@@ -713,11 +843,8 @@ TEST_F(LogTest, TestGCWithLogRunning) {
   {
     ReplicateMsgs repls;
     int64_t starting_op_segment_seq_num;
-    yb::SchemaPB schema;
-    uint32_t schema_version;
     Status s = log_->GetLogReader()->ReadReplicatesInRange(
-      1, 2, LogReader::kNoSizeLimit, &repls, &starting_op_segment_seq_num,
-        &schema, &schema_version);
+      1, 2, LogReader::kNoSizeLimit, &repls, &starting_op_segment_seq_num);
     ASSERT_TRUE(s.IsNotFound()) << s.ToString();
   }
 
@@ -734,7 +861,7 @@ TEST_F(LogTest, TestGCWithLogRunning) {
 // we also retain any relevant log index chunks, even if those operations
 // are not necessary for recovery.
 TEST_F(LogTest, TestGCOfIndexChunks) {
-  FLAGS_log_min_segments_to_retain = 4;
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_log_min_segments_to_retain) = 4;
   BuildLog();
 
   const auto entries_per_chunk = TEST_GetEntriesPerIndexChunk();
@@ -763,7 +890,7 @@ TEST_F(LogTest, TestGCOfIndexChunks) {
 
   // If we drop the retention count down to 1, we can now GC, and the log index
   // chunk should also be GCed.
-  FLAGS_log_min_segments_to_retain = 1;
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_log_min_segments_to_retain) = 1;
   ASSERT_OK(log_->GC(entries_per_chunk + 3, &num_gced_segments));
   ASSERT_EQ(1, num_gced_segments);
 
@@ -842,13 +969,13 @@ TEST_F(LogTest, TestLogReopenAndGC) {
 
   // If we set the min_seconds_to_retain high, then we'll retain the logs even
   // though we could GC them based on our anchoring.
-  FLAGS_log_min_seconds_to_retain = 500;
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_log_min_seconds_to_retain) = 500;
   ASSERT_OK(log_->GC(anchored_index, &num_gced_segments));
   ASSERT_EQ(0, num_gced_segments);
 
   // Turn off the time-based retention and try GCing again. This time
   // we should succeed.
-  FLAGS_log_min_seconds_to_retain = 0;
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_log_min_seconds_to_retain) = 0;
   log_->set_wal_retention_secs(0);
   ASSERT_OK(log_->GC(anchored_index, &num_gced_segments));
   ASSERT_EQ(2, num_gced_segments);
@@ -1111,15 +1238,12 @@ TEST_F(LogTest, TestReadLogWithReplacedReplicates) {
       auto start_index = RandomUniformInt<int64_t>(gc_index, max_repl_index - 1);
       auto end_index = RandomUniformInt<int64_t>(start_index, max_repl_index);
       int64_t starting_op_segment_seq_num;
-      yb::SchemaPB schema;
-      uint32_t schema_version;
       {
         SCOPED_TRACE(Substitute("Reading $0-$1", start_index, end_index));
         consensus::ReplicateMsgs repls;
         ASSERT_OK(reader->ReadReplicatesInRange(start_index, end_index,
                                                 LogReader::kNoSizeLimit, &repls,
-                                                &starting_op_segment_seq_num,
-                                                &schema, &schema_version));
+                                                &starting_op_segment_seq_num));
         ASSERT_EQ(end_index - start_index + 1, repls.size());
         auto expected_index = start_index;
         for (const auto& repl : repls) {
@@ -1143,8 +1267,7 @@ TEST_F(LogTest, TestReadLogWithReplacedReplicates) {
                                 start_index, end_index, size_limit));
         ReplicateMsgs repls;
         ASSERT_OK(reader->ReadReplicatesInRange(start_index, end_index, size_limit, &repls,
-                                                &starting_op_segment_seq_num,
-                                                &schema, &schema_version));
+                                                &starting_op_segment_seq_num));
         ASSERT_LE(repls.size(), end_index - start_index + 1);
         int total_size = 0;
         auto expected_index = start_index;
@@ -1152,7 +1275,7 @@ TEST_F(LogTest, TestReadLogWithReplacedReplicates) {
           ASSERT_EQ(expected_index, repl->id().index());
           ASSERT_EQ(terms_by_index[expected_index], repl->id().term());
           expected_index++;
-          total_size += repl->SpaceUsed();
+          total_size += repl->SerializedSize();
         }
         if (total_size > size_limit) {
           ASSERT_EQ(1, repls.size());
@@ -1187,12 +1310,9 @@ TEST_F(LogTest, TestReadReplicatesHighIndex) {
   auto* reader = log_->GetLogReader();
   ReplicateMsgs repls;
   int64_t starting_op_segment_seq_num;
-  yb::SchemaPB schema;
-  uint32_t schema_version;
   ASSERT_OK(reader->ReadReplicatesInRange(first_log_index, first_log_index + kSequenceLength - 1,
                                           LogReader::kNoSizeLimit, &repls,
-                                          &starting_op_segment_seq_num,
-                                          &schema, &schema_version));
+                                          &starting_op_segment_seq_num));
   ASSERT_EQ(kSequenceLength, repls.size());
 }
 
@@ -1254,7 +1374,7 @@ namespace {
 
 Status CheckEntryEq(const LogEntries& lhs, const LogEntries& rhs, const size_t entry_idx) {
   SCHECK_EQ(
-      lhs[entry_idx]->DebugString(), rhs[entry_idx]->DebugString(), InternalError,
+      lhs[entry_idx]->ShortDebugString(), rhs[entry_idx]->ShortDebugString(), InternalError,
       Format("entries[$0]", entry_idx));
   return Status::OK();
 }
@@ -1332,6 +1452,8 @@ TEST_F(LogTest, CopyTo) {
       auto& segment = *segment_it;
       auto& segment_copy = *segment_copy_it;
 
+      VerifyMinStartTimeRunningTxnsAfterCopy(segment, segment_copy);
+
       auto entries_result = segment->ReadEntries();
       ASSERT_OK(entries_result.status);
       auto entries_copy_result = segment_copy->ReadEntries();
@@ -1406,7 +1528,7 @@ Result<std::vector<LogTest::Op>> LogTest::GenerateOpsAndAppendToLog(
     for (auto batch_idx = 0; batch_idx < num_batches_per_segment; ++batch_idx) {
       ReplicateMsgs replicates;
       for (int i = 0; i < num_entries_per_batch; i++) {
-        replicates.emplace_back(std::make_shared<ReplicateMsg>());
+        replicates.emplace_back(rpc::MakeSharedMessage<consensus::LWReplicateMsg>());
         auto& replicate = replicates.back();
         current_op_id.ToPB(replicate->mutable_id());
         replicate->set_op_type(NO_OP);
@@ -1551,6 +1673,7 @@ TEST_F(LogTest, CopyUpTo) {
     size_t num_ops_copied = 0;
     std::map<int64_t, std::pair<OpId, LogEntryMetadata>> op_id_with_entry_meta_by_idx;
 
+    const ReadableLogSegmentPtr& last_copied_segment = ASSERT_RESULT(copied_segments.back());
     for (auto segment_it = segments.begin(), segment_copy_it = copied_segments.begin();
          segment_it != segments.end() && segment_copy_it != copied_segments.end();
          ++segment_it, ++segment_copy_it) {
@@ -1576,15 +1699,25 @@ TEST_F(LogTest, CopyUpTo) {
         ASSERT_OK(CheckReadEntriesResultEq(entries_copy_result, entries_result));
       }
 
+      bool has_replicated_entries = false;
       for (size_t entry_idx = 0; entry_idx < num_copied_segment_entries; ++entry_idx) {
         const auto& copied_entry = entries_copy_result.entries[entry_idx];
         if (copied_entry->has_replicate()) {
+          has_replicated_entries = true;
           const auto& op_id = OpId::FromPB(copied_entry->replicate().id());
           op_id_with_entry_meta_by_idx[op_id.index] =
               std::make_pair(op_id, entries_copy_result.entry_metadata[entry_idx]);
         }
       }
       num_ops_copied += num_copied_segment_entries;
+      ASSERT_EQ(has_replicated_entries, segment_copy->footer().has_close_timestamp_micros());
+
+      // Verify min_start_time_running_txns in footer of all segments except the last one as it
+      // could be truncated.
+      if (&segment_copy == &last_copied_segment) {
+        continue;
+      }
+      VerifyMinStartTimeRunningTxnsAfterCopy(segment, segment_copy);
     }
 
     if (num_ops_copied > copy_num_ops) {
@@ -1600,6 +1733,103 @@ TEST_F(LogTest, CopyUpTo) {
   }
 
   ASSERT_OK(log_->Close());
+}
+
+// This test generate segments with random commits, term changes and some empty segments. We should
+// be able to read older ops that are not in the log cache after a log restart.
+TEST_F(LogTest, TestLogIndex) {
+  google::SetVLOGLevel("log*", 10);
+
+  constexpr auto kNumSegments = 5;
+  constexpr auto kNumBatchesPerSegment = 5;
+  constexpr auto kNumEntriesPerBatch = 5;
+  constexpr auto kNumApproxTermChanges = 10;
+  constexpr auto kNumApproxTermChangesWithIndexRollback = 3;
+  constexpr auto kCommitProbability = 0.1;
+
+  // We will rollover segments manually.
+  options_.segment_size_bytes = std::numeric_limits<size_t>::max();
+
+  auto read_all_indexes = [this](int64_t last_index) -> Status {
+    SCHECK_GT(last_index, 0, IllegalState, "last_index should be > 0");
+    for (auto index = last_index; index > 0; --index) {
+      auto log_index_entry = VERIFY_RESULT(log_->GetLogReader()->TEST_GetIndexEntry(index));
+      SCHECK_EQ(log_index_entry.op_id.index, index, IllegalState, "index mismatch");
+    }
+    return Status::OK();
+  };
+
+  BuildLog();
+
+  auto ops = ASSERT_RESULT(GenerateOpsAndAppendToLog(
+      kNumSegments, kNumBatchesPerSegment, kNumEntriesPerBatch, kCommitProbability,
+      kNumApproxTermChanges, kNumApproxTermChangesWithIndexRollback));
+  ASSERT_GT(ops.size(), 0);
+
+  SegmentSequence segments;
+  ASSERT_OK(log_->GetLogReader()->GetSegmentsSnapshot(&segments));
+  ASSERT_EQ(segments.size(), kNumSegments + 1);
+  ASSERT_OK(read_all_indexes(ops.rbegin()->id.index));
+
+  // Restart the log to generate an empty segment.
+  // Closing the log will leave the last segment empty with no replicates and a footer that does not
+  // have max_replicate_index.
+  ASSERT_OK(log_->Close());
+  BuildLog();
+  ASSERT_OK(log_->GetLogReader()->GetSegmentsSnapshot(&segments));
+  ASSERT_EQ(segments.size(), kNumSegments + 2);
+  auto read_entries = segments.rbegin()->get()->ReadEntries();
+  ASSERT_EQ(read_entries.entries.size(), 0);
+
+  ASSERT_OK(read_all_indexes(ops.rbegin()->id.index));
+
+  // Write more data so that the empty segment is somewhere in the middle.
+  ops = ASSERT_RESULT(GenerateOpsAndAppendToLog(
+      kNumSegments, kNumBatchesPerSegment, kNumEntriesPerBatch, kCommitProbability,
+      kNumApproxTermChanges, kNumApproxTermChangesWithIndexRollback));
+  ASSERT_GT(ops.size(), 0);
+
+  ASSERT_OK(log_->GetLogReader()->GetSegmentsSnapshot(&segments));
+  ASSERT_EQ(segments.size(), 2 * kNumSegments + 2);
+  ASSERT_OK(read_all_indexes(ops.rbegin()->id.index));
+
+  // Restart the log again to generate empty segments at the end.
+  ASSERT_OK(log_->Close());
+  BuildLog();
+
+  ASSERT_OK(log_->GetLogReader()->GetSegmentsSnapshot(&segments));
+  ASSERT_EQ(segments.size(), 2 * kNumSegments + 3);
+  read_entries = segments.rbegin()->get()->ReadEntries();
+  ASSERT_EQ(read_entries.entries.size(), 0);
+
+  ASSERT_OK(read_all_indexes(ops.rbegin()->id.index));
+
+  ASSERT_OK(log_->Close());
+}
+
+TEST_F(LogTest, AsyncRolloverMarker) {
+  options_.segment_size_bytes = std::numeric_limits<size_t>::max();
+  options_.async_preallocate_segments = true;
+  // Always rotate the wal.
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_min_segment_size_bytes_to_rollover_at_flush) = 0;
+  BuildLog();
+  const auto kNumBatches = 2;
+  const auto kNumEntriesPerBatch = 10;
+  for (size_t i = 0; i < kNumBatches; ++i) {
+    AppendReplicateBatchToLog(kNumEntriesPerBatch, AppendSync::kTrue);
+  }
+  const auto seq_no = log_->active_segment_sequence_number();
+  ASSERT_OK(log_->AsyncAllocateSegmentAndRollover());
+  ASSERT_OK(WaitFor([&] {
+    return log_->allocation_state() == SegmentAllocationState::kAllocationFinished;
+  }, 10s, "allocation finished"));
+  ASSERT_EQ(log_->active_segment_sequence_number(), seq_no);
+  SegmentSequence segments;
+  ASSERT_OK(log_->GetLogReader()->GetSegmentsSnapshot(&segments));
+  VerifyClosedSegmentsHaveMinStartTimeRunningTxns(segments);
+
+  AppendReplicateBatchToLog(kNumEntriesPerBatch, AppendSync::kTrue);
+  ASSERT_EQ(log_->active_segment_sequence_number(), seq_no + 1);
 }
 
 } // namespace log

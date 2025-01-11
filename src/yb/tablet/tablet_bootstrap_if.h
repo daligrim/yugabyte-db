@@ -29,8 +29,7 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_TABLET_TABLET_BOOTSTRAP_IF_H
-#define YB_TABLET_TABLET_BOOTSTRAP_IF_H
+#pragma once
 
 #include <memory>
 #include <shared_mutex>
@@ -41,6 +40,8 @@
 
 #include "yb/client/client_fwd.h"
 
+#include "yb/common/opid.h"
+
 #include "yb/consensus/log_fwd.h"
 #include "yb/consensus/consensus_fwd.h"
 
@@ -50,14 +51,11 @@
 #include "yb/tablet/tablet_options.h"
 
 #include "yb/util/status_fwd.h"
-#include "yb/util/opid.h"
 #include "yb/util/shared_lock.h"
 
 namespace yb {
 
 class MetricRegistry;
-class Partition;
-class PartitionSchema;
 class ThreadPool;
 
 namespace consensus {
@@ -69,8 +67,9 @@ class Clock;
 }
 
 namespace tablet {
-class Tablet;
 class RaftGroupMetadata;
+class Tablet;
+class TabletBootstrapStateManager;
 class TransactionCoordinatorContext;
 class TransactionParticipantContext;
 struct TabletOptions;
@@ -85,6 +84,8 @@ class TabletStatusListener {
 
   void StatusMessage(const std::string& status);
 
+  void SetStatusPrefix(const std::string& prefix);
+
   const std::string tablet_id() const;
 
   const std::string namespace_name() const;
@@ -93,13 +94,13 @@ class TabletStatusListener {
 
   const std::string table_id() const;
 
-  std::shared_ptr<Partition> partition() const;
+  std::shared_ptr<dockv::Partition> partition() const;
 
   SchemaPtr schema() const;
 
   std::string last_status() const {
     SharedLock<std::shared_timed_mutex> l(lock_);
-    return last_status_;
+    return status_prefix_ + last_status_;
   }
 
  private:
@@ -107,6 +108,7 @@ class TabletStatusListener {
 
   RaftGroupMetadataPtr meta_;
   std::string last_status_;
+  std::string status_prefix_;
 
   DISALLOW_COPY_AND_ASSIGN(TabletStatusListener);
 };
@@ -114,6 +116,7 @@ class TabletStatusListener {
 struct DocDbOpIds {
   OpId regular;
   OpId intents;
+  boost::container::small_vector<OpId, 1> vector_indexes;
 
   std::string ToString() const;
 };
@@ -127,12 +130,14 @@ class TabletBootstrapTestHooksIf {
   // OpIds have been flushed in to regular and intents RocksDBs.
   virtual boost::optional<DocDbOpIds> GetFlushedOpIdsOverride() const = 0;
 
+  // This is called during TabletBootstrap initialization so that the test can pretent certain
+  // OpId has been flushed in retryable requests;
+  virtual boost::optional<OpId> GetFlushedRetryableRequestsOpIdOverride() const = 0;
+
   // TabletBootstrap calls this when an operation is replayed.
   // replay_decision is true for transaction update operations that have already been applied to the
   // regular RocksDB but not to the intents RocksDB.
-  virtual void Replayed(
-      OpId op_id,
-      AlreadyAppliedToRegularDB already_applied_to_regular_db) = 0;
+  virtual void Replayed(OpId op_id, const docdb::StorageSet& apply_to_storages) = 0;
 
   // TabletBootstrap calls this when an operation is overwritten after a leader change.
   virtual void Overwritten(OpId op_id) = 0;
@@ -154,6 +159,10 @@ class TabletBootstrapTestHooksIf {
   // it discovers the first OpId of a log segment. OpId will be invalid if we could not read the
   // first OpId. This is called in the order from newer to older segments;
   virtual void FirstOpIdOfSegment(const std::string& path, OpId first_op_id) = 0;
+
+  // Tablet bootstrap calls this before replaying each segment to track the first entry read from
+  // the segment. OpId will be invalid if nothing read from the segment.
+  virtual void FirstOpIdReadFromReplayedSegment(const std::string& path, OpId first_op_id) = 0;
 };
 
 struct BootstrapTabletData {
@@ -163,12 +172,19 @@ struct BootstrapTabletData {
   ThreadPool* allocation_pool = nullptr;
   ThreadPool* log_sync_pool = nullptr;
   consensus::RetryableRequests* retryable_requests = nullptr;
+  TabletBootstrapStateManager* bootstrap_state_manager = nullptr;
   std::shared_ptr<TabletBootstrapTestHooksIf> test_hooks = nullptr;
+  bool bootstrap_retryable_requests = true;
+  consensus::ConsensusMetadata* consensus_meta = nullptr;
+  log::PreLogRolloverCallback pre_log_rollover_callback = {};
+  log::MinStartHTRunningTxnsCallback min_start_ht_running_txns_callback = {};
 };
 
 // Bootstraps a tablet, initializing it with the provided metadata. If the tablet
 // has blocks and log segments, this method rebuilds the soft state by replaying
 // the Log.
+// It might update ConsensusMetadata file and will also update data.consensus_meta
+// if it's set.
 //
 // This is a synchronous method, but is typically called within a thread pool by
 // TSTabletManager.
@@ -180,5 +196,3 @@ Status BootstrapTablet(
 
 }  // namespace tablet
 }  // namespace yb
-
-#endif // YB_TABLET_TABLET_BOOTSTRAP_IF_H

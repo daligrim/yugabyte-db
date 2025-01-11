@@ -11,8 +11,7 @@
 // under the License.
 //
 
-#ifndef YB_INTEGRATION_TESTS_CQL_TEST_BASE_H
-#define YB_INTEGRATION_TESTS_CQL_TEST_BASE_H
+#pragma once
 
 #include "yb/integration-tests/cql_test_util.h"
 #include "yb/integration-tests/mini_cluster.h"
@@ -45,11 +44,15 @@ class CqlTestBase : public MiniClusterTestWithClient<MiniClusterType> {
   void ShutdownCluster();
   Status StartCluster();
 
-  string GetTempDir(const string& subdir) {
+  std::string GetTempDir(const std::string& subdir) {
     return tmp_dir_ / subdir;
   }
 
-  Status RunBackupCommand(const vector<string>& args);
+  Status RunBackupCommand(const std::vector<std::string>& args);
+
+  static std::unique_ptr<cqlserver::CQLServer> MakeCQLServerForTServer(
+      MiniClusterType* cluster, int ts_idx, client::YBClient* client, std::string* cql_host,
+      uint16_t* cql_port);
 
  protected:
   void DoTearDown() override;
@@ -70,5 +73,3 @@ class CqlTestBase : public MiniClusterTestWithClient<MiniClusterType> {
 };
 
 } // namespace yb
-
-#endif // YB_INTEGRATION_TESTS_CQL_TEST_BASE_H

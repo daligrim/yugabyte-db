@@ -1,6 +1,7 @@
-import React from 'react';
-import moment from 'moment';
 import { YBModal } from '../../common/forms/fields';
+import { PROTECTION_LEVELS } from './KeyManagementConfiguration';
+import { GCP_KMS_REGIONS_FLATTENED } from '../PublicCloud/views/providerRegionsData';
+import { ybFormatDate } from '../../../redesign/helpers/DateUtils';
 
 export const ConfigDetails = ({ data, visible, onHide }) => {
   const {
@@ -59,8 +60,12 @@ export const ConfigDetails = ({ data, visible, onHide }) => {
 
   const getForHashicorp = () => {
     const {
+      HC_VAULT_KEY_NAME,
       HC_VAULT_ADDRESS,
       HC_VAULT_TOKEN,
+      HC_VAULT_AUTH_NAMESPACE,
+      HC_VAULT_ROLE_ID,
+      HC_VAULT_SECRET_ID,
       HC_VAULT_ENGINE,
       HC_VAULT_MOUNT_PATH,
       HC_VAULT_TTL,
@@ -68,12 +73,28 @@ export const ConfigDetails = ({ data, visible, onHide }) => {
     } = credentials;
     const data = [
       {
+        label: 'Key Name',
+        value: HC_VAULT_KEY_NAME
+      },
+      {
         label: 'Vault Address',
         value: HC_VAULT_ADDRESS
       },
       {
         label: 'Secret Token',
         value: HC_VAULT_TOKEN
+      },
+      {
+        label: 'Role ID',
+        value: HC_VAULT_ROLE_ID
+      },
+      {
+        label: 'Secret ID',
+        value: HC_VAULT_SECRET_ID
+      },
+      {
+        label: 'Auth Namespace',
+        value: HC_VAULT_AUTH_NAMESPACE
       },
       {
         label: 'Secret Engine',
@@ -86,9 +107,7 @@ export const ConfigDetails = ({ data, visible, onHide }) => {
       {
         label: 'Expiry',
         value:
-          HC_VAULT_TTL && HC_VAULT_TTL_EXPIRY
-            ? moment(HC_VAULT_TTL_EXPIRY).format('DD MMMM YYYY')
-            : 'Wont Expire'
+          HC_VAULT_TTL && HC_VAULT_TTL_EXPIRY ? ybFormatDate(HC_VAULT_TTL_EXPIRY) : 'Wont Expire'
       }
     ];
     return data;
@@ -99,7 +118,8 @@ export const ConfigDetails = ({ data, visible, onHide }) => {
       CRYPTO_KEY_ID,
       KEY_RING_ID,
       LOCATION_ID,
-      GCP_CONFIG: { client_email }
+      GCP_CONFIG: { client_email },
+      PROTECTION_LEVEL
     } = credentials;
     const data = [
       {
@@ -108,7 +128,7 @@ export const ConfigDetails = ({ data, visible, onHide }) => {
       },
       {
         label: 'Location',
-        value: LOCATION_ID
+        value: GCP_KMS_REGIONS_FLATTENED.find((region) => region.value === LOCATION_ID)?.label
       },
       {
         label: 'Key Ring Name',
@@ -117,6 +137,10 @@ export const ConfigDetails = ({ data, visible, onHide }) => {
       {
         label: 'Crypto Key Name',
         value: CRYPTO_KEY_ID
+      },
+      {
+        label: 'Protection Level',
+        value: PROTECTION_LEVELS.find((protection) => protection.value === PROTECTION_LEVEL)?.label
       }
     ];
     return data;

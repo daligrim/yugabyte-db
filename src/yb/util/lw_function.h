@@ -1,4 +1,4 @@
-// Copyright (c) YugaByte, Inc.
+// Copyright (c) YugabyteDB, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
 // in compliance with the License.  You may obtain a copy of the License at
@@ -11,8 +11,9 @@
 // under the License.
 //
 
-#ifndef YB_UTIL_LW_FUNCTION_H
-#define YB_UTIL_LW_FUNCTION_H
+#pragma once
+
+#include "yb/gutil/macros.h"
 
 namespace yb {
 
@@ -21,19 +22,13 @@ class LightweightFunction;
 
 // std::function like interface which helps to avoid dynamic memory allocations
 // in case of using short lived callbacks created from lambda.
-// LightweightFunction objects is not indended to be stored for a long time.
+// LightweightFunction objects is not intended to be stored for a long time.
 template<class Ret, class... Args>
 class LightweightFunction<Ret(Args...)> {
  public:
   Ret operator()(Args... args) const {
-    return Call(std::forward<Args>(args)...);
+    return Call(std::forward<decltype(args)>(args)...);
   }
-
-  LightweightFunction(LightweightFunction&&) = default;
-
-  LightweightFunction(LightweightFunction&) = delete;
-  LightweightFunction& operator=(LightweightFunction&) = delete;
-  LightweightFunction& operator=(LightweightFunction&&) = delete;
 
  protected:
   LightweightFunction() = default;
@@ -41,6 +36,8 @@ class LightweightFunction<Ret(Args...)> {
 
  private:
   virtual Ret Call(Args... args) const = 0;
+
+  DISALLOW_COPY_AND_ASSIGN(LightweightFunction);
 };
 
 template<class T>
@@ -74,7 +71,7 @@ class LightweightFunctionImpl : public LWFunction<Ret(Args...)> {
 
  private:
   Ret Call(Args... args) const override {
-    return Trans::Transform(functor_)(std::forward<Args>(args)...);
+    return Trans::Transform(functor_)(std::forward<decltype(args)>(args)...);
   }
 
   const Func& functor_;
@@ -103,5 +100,3 @@ auto make_lw_function(const Func& functor) {
 }
 
 } // namespace yb
-
-#endif // YB_UTIL_LW_FUNCTION_H

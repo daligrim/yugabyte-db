@@ -4,7 +4,7 @@
  *	  Support routines for various kinds of object creation.
  *
  *
- * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -42,6 +42,9 @@
 #include "parser/scansup.h"
 #include "utils/builtins.h"
 
+/* YB Includes */
+#include "pg_yb_utils.h"
+
 /*
  * Extract a string value (otherwise uninterpreted) from a DefElem.
  */
@@ -58,12 +61,9 @@ defGetString(DefElem *def)
 		case T_Integer:
 			return psprintf("%ld", (long) intVal(def->arg));
 		case T_Float:
-
-			/*
-			 * T_Float values are kept in string form, so this type cheat
-			 * works (and doesn't risk losing precision)
-			 */
-			return strVal(def->arg);
+			return castNode(Float, def->arg)->fval;
+		case T_Boolean:
+			return boolVal(def->arg) ? "true" : "false";
 		case T_String:
 			return strVal(def->arg);
 		case T_TypeName:
@@ -139,7 +139,7 @@ defGetBoolean(DefElem *def)
 
 				/*
 				 * The set of strings accepted here should match up with the
-				 * grammar's opt_boolean production.
+				 * grammar's opt_boolean_or_string production.
 				 */
 				if (pg_strcasecmp(sval, "true") == 0)
 					return true;
@@ -149,6 +149,30 @@ defGetBoolean(DefElem *def)
 					return true;
 				if (pg_strcasecmp(sval, "off") == 0)
 					return false;
+				/*
+				 * YB: PG function untransformRelOptions untransform text-array
+				 * format of reloptions stored in pg_class to a list of DefElem
+				 * whose arg has T_String type.
+				 * For example, reloption colocation=0 is parsed to a DefElem
+				 * whose arg 0 has T_Integer by parser.
+				 * However, text format colocation=0 stored in pg_class is
+				 * converted to a DefElem whose arg 0 has T_String type by
+				 * untransformRelOptions.
+				 * We use untransformRelOptions to support table rewrite
+				 * operations like ALTER TABLE, REFRESH MATERIALIZED VIEW, so
+				 * for YB's table boolean reloptions, we allow T_String type
+				 * "0" and "1" to be extracted as boolean false and true,
+				 * respectively.
+				 */
+				if (IsYugaByteEnabled() &&
+					(strcmp(def->defname, "colocated") == 0 ||
+					 strcmp(def->defname, "colocation") == 0))
+				{
+					if (pg_strcasecmp(sval, "1") == 0)
+						return true;
+					if (pg_strcasecmp(sval, "0") == 0)
+						return false;
+				}
 			}
 			break;
 	}
@@ -206,7 +230,40 @@ defGetInt64(DefElem *def)
 			 * strings.
 			 */
 			return DatumGetInt64(DirectFunctionCall1(int8in,
-													 CStringGetDatum(strVal(def->arg))));
+													 CStringGetDatum(castNode(Float, def->arg)->fval)));
+		default:
+			ereport(ERROR,
+					(errcode(ERRCODE_SYNTAX_ERROR),
+					 errmsg("%s requires a numeric value",
+							def->defname)));
+	}
+	return 0;					/* keep compiler quiet */
+}
+
+/*
+ * Extract an OID value from a DefElem.
+ */
+Oid
+defGetObjectId(DefElem *def)
+{
+	if (def->arg == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_SYNTAX_ERROR),
+				 errmsg("%s requires a numeric value",
+						def->defname)));
+	switch (nodeTag(def->arg))
+	{
+		case T_Integer:
+			return (Oid) intVal(def->arg);
+		case T_Float:
+
+			/*
+			 * Values too large for int4 will be represented as Float
+			 * constants by the lexer.  Accept these if they are valid OID
+			 * strings.
+			 */
+			return DatumGetObjectId(DirectFunctionCall1(oidin,
+														CStringGetDatum(castNode(Float, def->arg)->fval)));
 		default:
 			ereport(ERROR,
 					(errcode(ERRCODE_SYNTAX_ERROR),
@@ -346,4 +403,16 @@ defGetStringList(DefElem *def)
 	}
 
 	return (List *) def->arg;
+}
+
+/*
+ * Raise an error about a conflicting DefElem.
+ */
+void
+errorConflictingDefElem(DefElem *defel, ParseState *pstate)
+{
+	ereport(ERROR,
+			errcode(ERRCODE_SYNTAX_ERROR),
+			errmsg("conflicting or redundant options"),
+			parser_errposition(pstate, defel->location));
 }

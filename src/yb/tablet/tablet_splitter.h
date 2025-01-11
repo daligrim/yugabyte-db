@@ -12,8 +12,7 @@
 // under the License.
 //
 
-#ifndef YB_TABLET_TABLET_SPLITTER_H
-#define YB_TABLET_TABLET_SPLITTER_H
+#pragma once
 
 #include <type_traits>
 
@@ -48,9 +47,12 @@ class TabletSplitter {
   virtual Status ApplyTabletSplit(
       SplitOperation* operation, log::Log* raft_log,
       boost::optional<consensus::RaftConfigPB> raft_config) = 0;
+
+  // See the comment for ApplyTabletSplit.
+  virtual Status ApplyCloneTablet(
+      CloneOperation* operation, log::Log* raft_log,
+      std::optional<consensus::RaftConfigPB> raft_config) = 0;
 };
 
 }  // namespace tablet
 }  // namespace yb
-
-#endif /* YB_TABLET_TABLET_SPLITTER_H */

@@ -2,23 +2,28 @@
 
 package com.yugabyte.yw.commissioner.tasks.upgrade;
 
-import javax.inject.Inject;
-
 import com.yugabyte.yw.commissioner.BaseTaskDependencies;
+import com.yugabyte.yw.commissioner.ITask.Abortable;
+import com.yugabyte.yw.commissioner.ITask.Retryable;
 import com.yugabyte.yw.commissioner.KubernetesUpgradeTaskBase;
 import com.yugabyte.yw.commissioner.UserTaskDetails.SubTaskGroupType;
 import com.yugabyte.yw.commissioner.tasks.subtasks.KubernetesCommandExecutor.CommandType;
+import com.yugabyte.yw.common.operator.OperatorStatusUpdaterFactory;
 import com.yugabyte.yw.forms.RestartTaskParams;
 import com.yugabyte.yw.forms.UniverseDefinitionTaskParams.UserIntent;
-
+import javax.inject.Inject;
 import lombok.extern.slf4j.Slf4j;
 
 @Slf4j
+@Abortable
+@Retryable
 public class RestartUniverseKubernetesUpgrade extends KubernetesUpgradeTaskBase {
 
   @Inject
-  protected RestartUniverseKubernetesUpgrade(BaseTaskDependencies baseTaskDependencies) {
-    super(baseTaskDependencies);
+  protected RestartUniverseKubernetesUpgrade(
+      BaseTaskDependencies baseTaskDependencies,
+      OperatorStatusUpdaterFactory operatorStatusUpdaterFactory) {
+    super(baseTaskDependencies, operatorStatusUpdaterFactory);
   }
 
   @Override
@@ -32,16 +37,26 @@ public class RestartUniverseKubernetesUpgrade extends KubernetesUpgradeTaskBase 
   }
 
   @Override
+  public void validateParams(boolean isFirstTry) {
+    super.validateParams(isFirstTry);
+    taskParams().verifyParams(getUniverse(), isFirstTry);
+    log.info("Verified all params and good to restart all pods now...");
+  }
+
+  @Override
   public void run() {
     runUpgrade(
         () -> {
-          // Verify the request params and fail if invalid
-          taskParams().verifyParams(getUniverse());
-          log.info("Verified all params and good to restart all pods now...");
           // Restart Universe tasks
           UserIntent userIntent = getUniverse().getUniverseDetails().getPrimaryCluster().userIntent;
           createUpgradeTask(
-              getUniverse(), userIntent.ybSoftwareVersion, true, true, CommandType.POD_DELETE);
+              getUniverse(),
+              userIntent.ybSoftwareVersion,
+              true,
+              true,
+              CommandType.POD_DELETE,
+              false,
+              null);
         });
   }
 }

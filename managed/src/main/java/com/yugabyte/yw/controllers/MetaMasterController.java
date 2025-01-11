@@ -2,29 +2,31 @@
 
 package com.yugabyte.yw.controllers;
 
-import static com.yugabyte.yw.forms.UniverseDefinitionTaskParams.ExposingServiceState;
-
 import com.google.inject.Inject;
-import com.yugabyte.yw.commissioner.Common;
-import com.yugabyte.yw.commissioner.tasks.UniverseDefinitionTaskBase.ServerType;
+import com.yugabyte.yw.commissioner.tasks.UniverseTaskBase.ServerType;
 import com.yugabyte.yw.common.KubernetesManagerFactory;
-import com.yugabyte.yw.common.PlacementInfoUtil;
-import com.yugabyte.yw.forms.UniverseDefinitionTaskParams;
+import com.yugabyte.yw.common.Util;
+import com.yugabyte.yw.common.rbac.PermissionInfo.Action;
+import com.yugabyte.yw.common.rbac.PermissionInfo.ResourceType;
+import com.yugabyte.yw.common.services.YBClientService;
+import com.yugabyte.yw.controllers.apiModels.MasterLBStateResponse;
+import com.yugabyte.yw.controllers.handlers.MetaMasterHandler;
 import com.yugabyte.yw.forms.PlatformResults;
-import com.yugabyte.yw.models.AvailabilityZone;
 import com.yugabyte.yw.models.Customer;
-import com.yugabyte.yw.models.Provider;
 import com.yugabyte.yw.models.Universe;
+import com.yugabyte.yw.models.common.YbaApi;
 import com.yugabyte.yw.models.helpers.CloudSpecificInfo;
 import com.yugabyte.yw.models.helpers.NodeDetails;
-import com.yugabyte.yw.models.helpers.PlacementInfo;
+import com.yugabyte.yw.rbac.annotations.AuthzPath;
+import com.yugabyte.yw.rbac.annotations.PermissionAttribute;
+import com.yugabyte.yw.rbac.annotations.RequiredPermissionOnResource;
+import com.yugabyte.yw.rbac.annotations.Resource;
+import com.yugabyte.yw.rbac.enums.SourceType;
 import io.swagger.annotations.Api;
 import io.swagger.annotations.ApiOperation;
 import io.swagger.annotations.Authorization;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
-import java.util.Map.Entry;
 import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -38,12 +40,22 @@ public class MetaMasterController extends Controller {
 
   public static final Logger LOG = LoggerFactory.getLogger(MetaMasterController.class);
 
+  @Inject private YBClientService ybService;
+
   @Inject KubernetesManagerFactory kubernetesManagerFactory;
+
+  @Inject MetaMasterHandler metaMasterHandler;
 
   @ApiOperation(
       value = "List a universe's master nodes",
       response = MastersList.class,
       nickname = "getUniverseMasterNodes")
+  @AuthzPath({
+    @RequiredPermissionOnResource(
+        requiredPermission =
+            @PermissionAttribute(resourceType = ResourceType.UNIVERSE, action = Action.READ),
+        resourceLocation = @Resource(path = Util.UNIVERSES, sourceType = SourceType.ENDPOINT))
+  })
   public Result get(UUID universeUUID) {
     // Lookup the entry for the instanceUUID.
     Universe universe = Universe.getOrBadRequest(universeUUID);
@@ -55,35 +67,92 @@ public class MetaMasterController extends Controller {
     return PlatformResults.withData(masters);
   }
 
-  @ApiOperation(value = "List a master node's addresses", response = String.class)
+  @ApiOperation(
+      notes = "Available since YBA version 2.2.0.0.",
+      value = "List a master node's addresses",
+      response = String.class)
+  @YbaApi(visibility = YbaApi.YbaApiVisibility.PUBLIC, sinceYBAVersion = "2.2.0.0")
+  @AuthzPath({
+    @RequiredPermissionOnResource(
+        requiredPermission =
+            @PermissionAttribute(resourceType = ResourceType.UNIVERSE, action = Action.READ),
+        resourceLocation = @Resource(path = Util.UNIVERSES, sourceType = SourceType.ENDPOINT))
+  })
   public Result getMasterAddresses(UUID customerUUID, UUID universeUUID) {
     return getServerAddresses(customerUUID, universeUUID, ServerType.MASTER);
   }
 
-  @ApiOperation(value = "List a YQL server's addresses", response = String.class)
+  @ApiOperation(
+      notes = "YbaApi Internal. Available since YBA version 2024.2.0",
+      value = "Get the state of master load balancing ops",
+      response = MasterLBStateResponse.class)
+  @YbaApi(visibility = YbaApi.YbaApiVisibility.INTERNAL, sinceYBAVersion = "2024.2.0")
+  @AuthzPath({
+    @RequiredPermissionOnResource(
+        requiredPermission =
+            @PermissionAttribute(resourceType = ResourceType.UNIVERSE, action = Action.READ),
+        resourceLocation = @Resource(path = Util.UNIVERSES, sourceType = SourceType.ENDPOINT))
+  })
+  public Result getMasterLBState(UUID customerUUID, UUID universeUUID) {
+    MasterLBStateResponse resp = metaMasterHandler.getMasterLBState(customerUUID, universeUUID);
+    return PlatformResults.withData(resp);
+  }
+
+  @ApiOperation(
+      notes = "Available since YBA version 2.2.0.0.",
+      value = "List a YQL server's addresses",
+      response = String.class)
+  @YbaApi(visibility = YbaApi.YbaApiVisibility.PUBLIC, sinceYBAVersion = "2.2.0.0")
+  @AuthzPath({
+    @RequiredPermissionOnResource(
+        requiredPermission =
+            @PermissionAttribute(resourceType = ResourceType.UNIVERSE, action = Action.READ),
+        resourceLocation = @Resource(path = Util.UNIVERSES, sourceType = SourceType.ENDPOINT))
+  })
   public Result getYQLServerAddresses(UUID customerUUID, UUID universeUUID) {
     return getServerAddresses(customerUUID, universeUUID, ServerType.YQLSERVER);
   }
 
-  @ApiOperation(value = "List a YSQL server's addresses", response = String.class)
+  @ApiOperation(
+      notes = "Available since YBA version 2.2.0.0.",
+      value = "List a YSQL server's addresses",
+      response = String.class)
+  @YbaApi(visibility = YbaApi.YbaApiVisibility.PUBLIC, sinceYBAVersion = "2.2.0.0")
+  @AuthzPath({
+    @RequiredPermissionOnResource(
+        requiredPermission =
+            @PermissionAttribute(resourceType = ResourceType.UNIVERSE, action = Action.READ),
+        resourceLocation = @Resource(path = Util.UNIVERSES, sourceType = SourceType.ENDPOINT))
+  })
   public Result getYSQLServerAddresses(UUID customerUUID, UUID universeUUID) {
     return getServerAddresses(customerUUID, universeUUID, ServerType.YSQLSERVER);
   }
 
-  @ApiOperation(value = "List a REDIS server's addresses", response = String.class)
+  @ApiOperation(
+      notes = "Available since YBA version 2.2.0.0.",
+      value = "List a REDIS server's addresses",
+      response = String.class)
+  @YbaApi(visibility = YbaApi.YbaApiVisibility.PUBLIC, sinceYBAVersion = "2.2.0.0")
+  @AuthzPath({
+    @RequiredPermissionOnResource(
+        requiredPermission =
+            @PermissionAttribute(resourceType = ResourceType.UNIVERSE, action = Action.READ),
+        resourceLocation = @Resource(path = Util.UNIVERSES, sourceType = SourceType.ENDPOINT))
+  })
   public Result getRedisServerAddresses(UUID customerUUID, UUID universeUUID) {
     return getServerAddresses(customerUUID, universeUUID, ServerType.REDISSERVER);
   }
 
   private Result getServerAddresses(UUID customerUUID, UUID universeUUID, ServerType type) {
     // Verify the customer with this universe is present.
-    Customer.getOrBadRequest(customerUUID);
+    Customer customer = Customer.getOrBadRequest(customerUUID);
 
     // Lookup the entry for the instanceUUID.
-    Universe universe = Universe.getOrBadRequest(universeUUID);
+    Universe universe = Universe.getOrBadRequest(universeUUID, customer);
     // In case of Kubernetes universe we would fetch the service ip
     // instead of the POD ip.
-    String serviceIPPort = getKuberenetesServiceIPPort(type, universe);
+    String serviceIPPort =
+        kubernetesManagerFactory.getManager().getKubernetesServiceIPPort(type, universe);
     if (serviceIPPort != null) {
       return PlatformResults.withData(serviceIPPort);
     }
@@ -123,79 +192,6 @@ public class MetaMasterController extends Controller {
       mNode.masterRpcPort = uNode.masterRpcPort;
 
       return mNode;
-    }
-  }
-
-  private String getKuberenetesServiceIPPort(ServerType type, Universe universe) {
-    List<String> allIPs = new ArrayList<>();
-    UniverseDefinitionTaskParams universeDetails = universe.getUniverseDetails();
-    UniverseDefinitionTaskParams.Cluster primary = universeDetails.getPrimaryCluster();
-    // If no service is exposed, fail early.
-    if (primary.userIntent.enableExposingService == ExposingServiceState.UNEXPOSED) {
-      return null;
-    }
-    Provider provider = Provider.get(UUID.fromString(primary.userIntent.provider));
-
-    if (!primary.userIntent.providerType.equals(Common.CloudType.kubernetes)) {
-      return null;
-    } else {
-      PlacementInfo pi = universeDetails.getPrimaryCluster().placementInfo;
-
-      boolean isMultiAz = PlacementInfoUtil.isMultiAZ(provider);
-      Map<UUID, Map<String, String>> azToConfig = PlacementInfoUtil.getConfigPerAZ(pi);
-
-      for (Entry<UUID, Map<String, String>> entry : azToConfig.entrySet()) {
-        UUID azUUID = entry.getKey();
-        String azName = isMultiAz ? AvailabilityZone.get(azUUID).code : null;
-
-        Map<String, String> config = entry.getValue();
-
-        String namespace =
-            PlacementInfoUtil.getKubernetesNamespace(
-                isMultiAz,
-                universeDetails.nodePrefix,
-                azName,
-                config,
-                universeDetails.useNewHelmNamingStyle,
-                false);
-
-        String helmReleaseName =
-            PlacementInfoUtil.getHelmReleaseName(
-                isMultiAz, universeDetails.nodePrefix, azName, false);
-
-        String ip =
-            kubernetesManagerFactory
-                .getManager()
-                .getPreferredServiceIP(
-                    config,
-                    helmReleaseName,
-                    namespace,
-                    type == ServerType.MASTER,
-                    universeDetails.useNewHelmNamingStyle);
-        if (ip == null) {
-          return null;
-        }
-
-        int rpcPort;
-        switch (type) {
-          case MASTER:
-            rpcPort = universeDetails.communicationPorts.masterRpcPort;
-            break;
-          case YSQLSERVER:
-            rpcPort = universeDetails.communicationPorts.ysqlServerRpcPort;
-            break;
-          case YQLSERVER:
-            rpcPort = universeDetails.communicationPorts.yqlServerRpcPort;
-            break;
-          case REDISSERVER:
-            rpcPort = universeDetails.communicationPorts.redisServerRpcPort;
-            break;
-          default:
-            throw new IllegalArgumentException("Unexpected type " + type);
-        }
-        allIPs.add(String.format("%s:%d", ip, rpcPort));
-      }
-      return String.join(",", allIPs);
     }
   }
 }

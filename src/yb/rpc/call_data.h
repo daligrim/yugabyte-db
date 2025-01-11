@@ -11,9 +11,11 @@
 // under the License.
 //
 
-#ifndef YB_RPC_CALL_DATA_H
-#define YB_RPC_CALL_DATA_H
+#pragma once
 
+#include "yb/rpc/rpc_fwd.h"
+
+#include "yb/util/memory/memory_usage.h"
 #include "yb/util/ref_cnt_buffer.h"
 #include "yb/util/strongly_typed_bool.h"
 
@@ -24,7 +26,9 @@ struct CallData {
  public:
   CallData() : buffer_(EmptyBuffer()) {}
 
-  explicit CallData(size_t size) : buffer_(size) {}
+  explicit CallData(size_t size) : buffer_(RefCntBuffer(size)) {}
+  explicit CallData(RefCntSlice slice) : buffer_(std::move(slice)) {}
+
   class ShouldRejectTag {};
 
   CallData(size_t size, ShouldRejectTag) {}
@@ -40,7 +44,7 @@ struct CallData {
   }
 
   char* data() const {
-    return buffer_.data();
+    return const_cast<char*>(buffer_.data());
   }
 
   bool should_reject() const { return !buffer_; }
@@ -53,22 +57,49 @@ struct CallData {
     return buffer_.size();
   }
 
-  const RefCntBuffer& buffer() const {
-    return buffer_;
+  Slice AsSlice() const {
+    return buffer_.AsSlice();
+  }
+
+  const RefCntBuffer& holder() const {
+    return buffer_.holder();
   }
 
   size_t DynamicMemoryUsage() const { return buffer_.DynamicMemoryUsage(); }
 
  private:
-  static RefCntBuffer EmptyBuffer() {
+  static RefCntSlice EmptyBuffer() {
     static RefCntBuffer result(0);
-    return result;
+    return RefCntSlice(result);
   }
 
-  RefCntBuffer buffer_;
+  RefCntSlice buffer_;
+};
+
+class ReceivedSidecars {
+ public:
+  Result<RefCntSlice> Extract(const RefCntBuffer& buffer, size_t idx) const;
+
+  Result<SidecarHolder> GetHolder(const RefCntBuffer& buffer, size_t idx) const;
+
+  size_t Transfer(const RefCntBuffer& buffer, Sidecars* dest);
+
+  Status Parse(Slice message, const boost::iterator_range<const uint32_t*>& offsets);
+
+  size_t DynamicMemoryUsage() const {
+    return GetFlatDynamicMemoryUsageOf(sidecar_bounds_);
+  }
+
+  size_t GetCount() const {
+    return sidecar_bounds_.size() > 0 ? sidecar_bounds_.size() - 1 : 0;
+  }
+
+ private:
+  static constexpr size_t kMinBufferForSidecarSlices = 16;
+  // Slices of data for rpc sidecars. They point into memory owned by transfer_.
+  // Number of sidecars should be obtained from header_.
+  boost::container::small_vector<const uint8_t*, kMinBufferForSidecarSlices> sidecar_bounds_;
 };
 
 } // namespace rpc
 } // namespace yb
-
-#endif // YB_RPC_CALL_DATA_H

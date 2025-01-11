@@ -7,14 +7,18 @@
  * http://github.com/YugaByte/yugabyte-db/blob/master/licenses/POLYFORM-FREE-TRIAL-LICENSE-1.0.0.txt
  */
 
-import React, { FC } from 'react';
+import { FC } from 'react';
 import { toast } from 'react-toastify';
 import { useMutation, useQueryClient } from 'react-query';
 import { Col, Row } from 'react-bootstrap';
 import { YBModalForm } from '../../common/forms';
 import { YBButton } from '../../common/forms/fields';
-import { FormatUnixTimeStampTimeToTimezone } from './PointInTimeRecoveryList';
 import { deletePITRConfig } from '../common/PitrAPI';
+import { isActionFrozen } from '../../../redesign/helpers/utils';
+import { ybFormatDate } from '../../../redesign/helpers/DateUtils';
+import { AllowedTasks } from '../../../redesign/helpers/dtos';
+import { UNIVERSE_TASKS } from '../../../redesign/helpers/constants';
+
 import './PointInTimeRecoveryDisableModal.scss';
 
 interface PointInTimeRecoveryDisableModalProps {
@@ -22,13 +26,15 @@ interface PointInTimeRecoveryDisableModalProps {
   universeUUID: string;
   onHide: () => void;
   config: any;
+  allowedTasks: AllowedTasks;
 }
 
 export const PointInTimeRecoveryDisableModal: FC<PointInTimeRecoveryDisableModalProps> = ({
   visible,
   onHide,
   config,
-  universeUUID
+  universeUUID,
+  allowedTasks
 }) => {
   const queryClient = useQueryClient();
 
@@ -50,18 +56,21 @@ export const PointInTimeRecoveryDisableModal: FC<PointInTimeRecoveryDisableModal
 
   if (!config) return <></>;
 
-  const activeSnapShots = config.snapshots.filter((snapshot: any) => snapshot.state === 'COMPLETE');
-  const minTime = Math.min(...activeSnapShots.map((snapshot: any) => snapshot.recoveryTime));
+  const minTime = config.minRecoverTimeInMillis;
   const retentionDays = config.retentionPeriod / (24 * 60 * 60);
+  const isDeleteActionFrozen = isActionFrozen(allowedTasks, UNIVERSE_TASKS.DELETE_PITR);
 
   return (
     <YBModalForm
       title="Disable Point-In-Time Recovery"
       visible={visible}
+      isButtonDisabled={isDeleteActionFrozen}
       onHide={onHide}
       submitLabel="Disable Point-In-Time Recovery"
       onFormSubmit={handleSubmit}
       dialogClassName="pitr-disable-modal"
+      submitTestId="DisablePitrSubmitBtn"
+      cancelTestId="DisablePitrCancelBtn"
       footerAccessory={<YBButton btnClass="btn" btnText="Cancel" onClick={onHide} />}
       render={() => {
         return (
@@ -76,7 +85,9 @@ export const PointInTimeRecoveryDisableModal: FC<PointInTimeRecoveryDisableModal
                 <Col sm={6} className="config-row-label">
                   Database/keyspace Name
                 </Col>
-                <Col sm={6}>{config.dbName}</Col>
+                <Col className="config-row-val" sm={6}>
+                  {config.dbName}
+                </Col>
               </Row>
 
               <Row className="config-row">
@@ -92,9 +103,7 @@ export const PointInTimeRecoveryDisableModal: FC<PointInTimeRecoveryDisableModal
                 <Col sm={6} className="config-row-label">
                   Earliest Recoverable Time
                 </Col>
-                <Col sm={6}>
-                  <FormatUnixTimeStampTimeToTimezone timestamp={minTime} />
-                </Col>
+                <Col sm={6}>{ybFormatDate(minTime)}</Col>
               </Row>
             </div>
           </>

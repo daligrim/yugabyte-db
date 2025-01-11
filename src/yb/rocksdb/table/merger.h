@@ -23,7 +23,11 @@
 
 #pragma once
 
+#include <memory>
 
+#include "yb/rocksdb/rocksdb_fwd.h"
+#include "yb/rocksdb/table/internal_iterator.h"
+#include "yb/rocksdb/table/iterator_wrapper.h"
 
 namespace rocksdb {
 
@@ -40,19 +44,18 @@ class Arena;
 // key is present in K child iterators, it will be yielded K times.
 //
 // REQUIRES: n >= 0
-extern InternalIterator* NewMergingIterator(const Comparator* comparator,
-                                            InternalIterator** children, int n,
-                                            Arena* arena = nullptr);
-
-class MergingIterator;
+InternalIterator* NewMergingIterator(
+    const Comparator* comparator, InternalIterator** children, int n, Arena* arena = nullptr);
 
 // A builder class to build a merging iterator by adding iterators one by one.
-class MergeIteratorBuilder {
+template <typename IteratorWrapperType>
+class MergeIteratorBuilderBase {
  public:
+  using IteratorType = typename IteratorWrapperType::IteratorType;
   // comparator: the comparator used in merging comparator
   // arena: where the merging iterator needs to be allocated from.
-  explicit MergeIteratorBuilder(const Comparator* comparator, Arena* arena);
-  ~MergeIteratorBuilder() {}
+  explicit MergeIteratorBuilderBase(const Comparator* comparator, Arena* arena);
+  ~MergeIteratorBuilderBase() {}
 
   // Add iter to the merging iterator.
   void AddIterator(InternalIterator* iter);
@@ -65,10 +68,35 @@ class MergeIteratorBuilder {
   InternalIterator* Finish();
 
  private:
-  MergingIterator* merge_iter;
+  MergingIteratorBase<IteratorWrapperType>* merge_iter;
   InternalIterator* first_iter;
   bool use_merging_iter;
   Arena* arena;
+};
+
+template <typename IteratorType>
+class MergingIterator : public InternalIterator {
+ public:
+  virtual IteratorType* GetCurrentIterator() = 0;
+};
+
+// Same as MergeIteratorBuilder but uses heap instead of arena.
+// DO NOT USE for critical code paths.
+template <typename IteratorWrapperType>
+class MergeIteratorInHeapBuilder {
+ public:
+  using IteratorType = typename IteratorWrapperType::IteratorType;
+  explicit MergeIteratorInHeapBuilder(const Comparator* comparator);
+  ~MergeIteratorInHeapBuilder();
+
+  // Add iter to the merging iterator.
+  void AddIterator(IteratorType* iter);
+
+  // Return the result merging iterator.
+  std::unique_ptr<MergingIterator<IteratorType>> Finish();
+
+ private:
+  std::unique_ptr<MergingIteratorBase<IteratorWrapperType>> merge_iter;
 };
 
 }  // namespace rocksdb

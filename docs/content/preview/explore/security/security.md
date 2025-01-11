@@ -1,17 +1,16 @@
 ---
-title: Security
+title: Explore Security
 headerTitle: Security
 linkTitle: Security
 description: Overview of security in YugabyteDB.
-headcontent: Security in YugabyteDB.
-image: /images/section_icons/index/secure.png
+headcontent: Secure your YugabyteDB universes
 aliases:
   - /preview/explore/security/
 menu:
   preview:
     identifier: explore-security
     parent: explore
-    weight: 300
+    weight: 310
 type: docs
 ---
 
@@ -33,13 +32,13 @@ Using client authentication, you can define how the database server establishes 
 
 The methods include the following:
 
-* **Password** - authenticate using MD5 or SCRAM-SHA-256.<br/>
+* **Password** - authenticate using MD5 or SCRAM-SHA-256.
 
   MD5 is the default password encryption for YugabyteDB clusters. To set SCRAM-SHA-256 authentication, you must set the YB-TServer `--ysql_hba_conf_csv` flag to `scram-sha-256`.
 
 * **LDAP** - use external LDAP services to perform client authentication.
 
-* **Host-based** - authenticate local and remote clients based on IP address and using TLS certificates.<br/>
+* **Host-based** - authenticate local and remote clients based on IP address and using TLS certificates.
 
   The default YugabyteDB `listen_addresses` setting accepts connections only from localhost. To allow remote connections, you must add client authentication records to the YB-TServer `--ysql_hba_conf_csv` flag.
 
@@ -47,15 +46,19 @@ The methods include the following:
 
 You can choose the method to use to authenticate a particular client connection based on the client host address, the database they are connecting to, and user credentials.
 
-YugabyteDB stores authentication credentials internally in the YB-Master system tables. The authentication mechanisms available to clients depend on what is supported and exposed by the YSQL, YCQL, and YEDIS APIs.
+YugabyteDB stores authentication credentials internally in the YB-Master system tables. The authentication mechanisms available to clients depend on what is supported and exposed by the YSQL and YCQL APIs.
 
-Read more about [how to enable authentication in YugabyteDB](../../../secure/authentication/).
+{{<lead link="../../../secure/authentication/">}}
+To learn about authentication in YugabyteDB, see [Authentication methods](../../../secure/authentication/).
+{{</lead>}}
 
 ## Authorization
 
 YugabyteDB provides role-based access control (RBAC), consisting of a collection of privileges on resources given to roles.
 
-Read more about [authorization in YugabyteDB](../../../secure/authorization/).
+{{<lead link="../../../secure/authorization/">}}
+To learn about authorization in YugabyteDB, see [Role-based access control](../../../secure/authorization/).
+{{</lead>}}
 
 ### Roles
 
@@ -148,13 +151,17 @@ Server-to-server encryption is enabled using the `--use_node_to_node_encryption`
 
 Client-to-server encryption requires that server-to-server encryption be enabled, and is enabled using the `--use_client_to_server_encryption` flag.
 
-Read more about enabling [Encryption in transit](../../../secure/tls-encryption/) in YugabyteDB.
+{{<lead link="../../../secure/tls-encryption/">}}
+Learn more about [Encryption in transit](../../../secure/tls-encryption/) in YugabyteDB.
+{{</lead>}}
 
 ### Encryption at rest
 
 [Encryption at rest](https://en.wikipedia.org/wiki/Data_at_rest#Encryption) ensures that data at rest (that is, stored on disk), is protected. You can configure YugabyteDB with a user-generated symmetric key to perform cluster-wide encryption.
 
-Read more about enabling [Encryption at rest](../../../secure/encryption-at-rest) in YugabyteDB.
+{{<lead link="../../../secure/encryption-at-rest/">}}
+Learn about [Encryption at rest](../../../secure/encryption-at-rest) in YugabyteDB.
+{{</lead>}}
 
 ### Column-level encryption
 
@@ -162,19 +169,23 @@ YugabyteDB provides column-level encryption to restrict access to sensitive data
 
 To encrypt column data, you use the `PGP_SYM_ENCRYPT` function when inserting data into a table. For example:
 
-```sql
-yugabyte=# insert into employees values (1, 'joe', '56 grove st',  20000, PGP_SYM_ENCRYPT('AC-22001', 'AES_KEY'));
+```plpgsql
+yugabyte=# INSERT INTO employees VALUES (1, 'joe', '56 grove st',  20000, PGP_SYM_ENCRYPT('AC-22001', 'AES_KEY'));
 ```
 
-Read more about enabling [column-level encryption](../../../secure/column-level-encryption/) in YugabyteDB.
+{{<lead link="../../../secure/column-level-encryption/">}}
+Learn about [column-level encryption](../../../secure/column-level-encryption/) in YugabyteDB.
+{{</lead>}}
 
 ## Auditing
 
-Use audit logging to produce audit logs needed to comply with government, financial, or ISO certifications. YugabyteDB YSQL uses the PostgreSQL Audit Extension (`pgAudit`) to provide detailed session and object audit logging via YugabyteDB YB-TServer logging.
+Use audit logging to produce audit logs needed to comply with government, financial, or ISO certifications. YugabyteDB YSQL uses the PostgreSQL Audit Extension (pgaudit) to provide detailed session and object audit logging via YugabyteDB YB-TServer logging.
 
 You enable audit logging using the `--ysql_pg_conf_csv` YB-TServer flag.
 
-Read more about [audit logging](../../../secure/audit-logging/) in YugabyteDB.
+{{<lead link="../../../secure/audit-logging/">}}
+Learn about [audit logging](../../../secure/audit-logging/) in YugabyteDB.
+{{</lead>}}
 
 ### Session logging
 
@@ -183,31 +194,39 @@ Session logging is enabled on a per user session basis. You can enable session l
 For example, to enable session-level audit logging for all `DDL` statements for a YugabyteDB cluster:
 
 ```sql
-yugabyte=# set pgaudit.log = 'read, ddl';
+yugabyte=# SET pgaudit.log = 'read, ddl';
 ```
 
-Read more about [Session-Level Audit Logging in YSQL](../../../secure/audit-logging/session-audit-logging-ysql/).
+{{<lead link="../../../secure/audit-logging/session-audit-logging-ysql/">}}
+Learn about [Session-Level Audit Logging in YSQL](../../../secure/audit-logging/session-audit-logging-ysql/).
+{{</lead>}}
 
 ### Object logging
 
-Object logging logs statements that affect a particular relation, and is intended to be a finer-grained replacement for session-level logging. It may not make sense to use them in conjunction, but you could, for example, use session logging to capture each statement and then supplement that with object logging to get more detail about specific relations.
+Object logging logs statements that affect a particular relation, and is intended to be a finer-grained replacement for session-level logging. It may not make sense to use them in conjunction, but you could for example use session logging to capture each statement and then supplement that with object logging to get more detail about specific relations.
 
 YugabyteDB implements object-level audit logging by reusing the PostgreSQL role system. The `pgaudit.role` setting defines the role that will be used for audit logging. A relation (such as `TABLE` or `VIEW`) will be audit logged when the audit role has permissions for the command executed or inherits the permissions from another role. This allows you to effectively have multiple audit roles even though there is a single master role in any context.
 
 For example, to enable object logging for the `auditor` role:
 
 ```sql
-yugabyte=# set pgaudit.role = 'auditor';
+yugabyte=# SET pgaudit.role = 'auditor';
 ```
 
-Read more about [Object-Level Audit Logging in YSQL](../../../secure/audit-logging/object-audit-logging-ysql/).
+{{<lead link="../../../secure/audit-logging/object-audit-logging-ysql/">}}
+Learn about [Object-Level Audit Logging in YSQL](../../../secure/audit-logging/object-audit-logging-ysql/).
+{{</lead>}}
 
-## Restricting network access
+## Restrict network access
 
 Ensure that YugabyteDB runs in a trusted network environment, such that:
 
 * Servers running YugabyteDB services are directly accessible only by the servers running the application and database administrators.
 
-* Only servers running applications can connect to YugabyteDB services on the RPC ports. Access to the [YugabyteDB ports](../../../deploy/checklist/#default-ports-reference) should be denied to all others.
+* Only servers running applications can connect to YugabyteDB services on the RPC ports. Access to the [YugabyteDB ports](../../../reference/configuration/default-ports/) should be denied to all others.
 
-In addition, you can limit the interfaces on which YugabyteDB instances listen for incoming connections. To specify just the required interfaces when starting `yb-master` and `yb-tserver`, use the `--rpc_bind_addresses` YB-TServer flag. Do not bind to the loopback address. Refer to the [Admin Reference](../../../reference/configuration/yb-tserver/) for more information on using these flags.
+In addition, you can limit the interfaces on which YugabyteDB instances listen for incoming connections. To specify just the required interfaces when starting yb-master and yb-tserver, use the `--rpc_bind_addresses` YB-TServer flag. Do not bind to the loopback address.
+
+{{<lead link="../../../reference/configuration/yb-tserver/">}}
+[YB-TServer configuration reference](../../../reference/configuration/yb-tserver/)
+{{</lead>}}

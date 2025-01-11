@@ -21,8 +21,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
-#ifndef YB_ROCKSDB_DB_FLUSH_JOB_H
-#define YB_ROCKSDB_DB_FLUSH_JOB_H
 
 #pragma once
 
@@ -33,6 +31,8 @@
 #include <string>
 #include <utility>
 #include <vector>
+
+#include "yb/ash/wait_state_fwd.h"
 
 #include "yb/rocksdb/db.h"
 #include "yb/rocksdb/db/column_family.h"
@@ -115,9 +115,8 @@ class FlushJob {
   CompressionType output_compression_;
   Statistics* stats_;
   EventLogger* event_logger_;
+  yb::ash::WaitStateInfoPtr wait_state_;
   TableProperties table_properties_;
 };
 
 }  // namespace rocksdb
-
-#endif // YB_ROCKSDB_DB_FLUSH_JOB_H

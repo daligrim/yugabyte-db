@@ -2,9 +2,9 @@
 title: extended_timezone_names — unrestricted full projection [YSQL]
 headerTitle: extended_timezone_names — unrestricted full projection
 linkTitle: Unrestricted full projection
-description: Table. [YSQL]
+description: extended_timezone_names Table. [YSQL]
 menu:
-  preview:
+  preview_api:
     identifier: unrestricted-full-projection
     parent: extended-timezone-names
     weight: 10

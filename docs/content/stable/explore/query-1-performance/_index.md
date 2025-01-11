@@ -3,86 +3,71 @@ title: Query Tuning
 headerTitle: Query Tuning
 linkTitle: Query tuning
 description: Tuning and optimizing query performance
-headcontent: Tuning and optimizing query performance
-image: /images/section_icons/index/develop.png
+headcontent: Optimize query performance
 menu:
   stable:
     identifier: query-tuning
     parent: explore
-    weight: 280
+    weight: 300
 type: indexpage
+showRightNav: true
 ---
-<div class="row">
 
-  <div class="col-12 col-md-6 col-lg-12 col-xl-6">
-    <a class="section-link icon-offset" href="query-tuning-intro/">
-      <div class="head">
-        <img class="icon" src="/images/section_icons/develop/learn.png" aria-hidden="true" />
-        <div class="title">Introduction</div>
-      </div>
-      <div class="body">
-        Tune and optimize query performance in YugabyteDB.
-      </div>
-    </a>
-  </div>
+Query tuning is the art and science of improving the performance of SQL queries. It involves understanding the database's architecture, query execution plans, and performance metrics. By identifying and addressing performance bottlenecks, you can significantly enhance the responsiveness of your applications and reduce the load on your database infrastructure.
 
-  <div class="col-12 col-md-6 col-lg-12 col-xl-6">
-    <a class="section-link icon-offset" href="pg-stat-statements/">
-      <div class="head">
-        <img class="icon" src="/images/section_icons/develop/learn.png" aria-hidden="true" />
-        <div class="title">Get query statistics using pg_stat_statements</div>
-      </div>
-      <div class="body">
-        Track planning and execution statistics for all SQL statements executed by a server.
-      </div>
-    </a>
-  </div>
+This guide provides a comprehensive overview of query tuning techniques for distributed SQL databases. We will explore various strategies, best practices, and tools to help you optimize your queries and achieve optimal performance.
 
-  <div class="col-12 col-md-6 col-lg-12 col-xl-6">
-    <a class="section-link icon-offset" href="pg-stat-activity/">
-      <div class="head">
-        <img class="icon" src="/images/section_icons/develop/learn.png" aria-hidden="true" />
-        <div class="title">View live queries with pg_stat_activity</div>
-      </div>
-      <div class="body">
-        Troubleshoot problems and identify long-running queries with the activity view.
-      </div>
-    </a>
-  </div>
+## Identify slow queries
 
-  <div class="col-12 col-md-6 col-lg-12 col-xl-6">
-    <a class="section-link icon-offset" href="pg-stat-progress-copy/">
-      <div class="head">
-        <img class="icon" src="/images/section_icons/develop/learn.png" aria-hidden="true" />
-        <div class="title">View COPY status with pg_stat_progress_copy</div>
-      </div>
-      <div class="body">
-        Get the COPY command status, number of tuples processed, and other COPY progress reports with this view.
-      </div>
-    </a>
-  </div>
+The pg_stat_statements extension provides a comprehensive view of query performance, and is essential for database administrators and developers aiming to enhance database efficiency. You can use the pg_stat_statements extension to get statistics on past queries. It collects detailed statistics on query execution, including the number of executions, total execution time, and resource usage metrics like block hits and reads. This data can help ypu identify performance bottlenecks and optimize query performance.
 
-  <div class="col-12 col-md-6 col-lg-12 col-xl-6">
-    <a class="section-link icon-offset" href="explain-analyze/">
-      <div class="head">
-        <img class="icon" src="/images/section_icons/develop/learn.png" aria-hidden="true" />
-        <div class="title">Analyze queries with EXPLAIN</div>
-      </div>
-      <div class="body">
-        Tune your queries by creating and analyzing execution plans.
-      </div>
-    </a>
-  </div>
+{{<lead link="./pg-stat-statements/">}}
+Learn how to fetch query statistics and improve performance using [pg_stat_statements](./pg-stat-statements/).
+{{</lead>}}
 
-  <div class="col-12 col-md-6 col-lg-12 col-xl-6">
-    <a class="section-link icon-offset" href="pg-hint-plan/">
-      <div class="head">
-        <img class="icon" src="/images/section_icons/develop/learn.png" aria-hidden="true" />
-        <div class="title">Optimize YSQL queries using pg_hint_plan</div>
-      </div>
-      <div class="body">
-        Control query execution plans with hinting phrases.
-      </div>
-    </a>
-  </div>
-</div>
+## Column statistics
+
+The pg_stats view provides a user-friendly display of the column-level data distribution of tables. This view includes information about table columns, such as the fraction of null entries, average width, number of distinct values, and most common values. These statistics are crucial for the query planner to make informed decisions about the most efficient way to execute queries. By regularly analyzing the statistics in pg_stats, you can identify opportunities for optimization, such as creating or dropping indexes, and fine-tune your database configuration for optimal performance.
+
+{{<lead link="./pg-stats/">}}
+Learn how to understand column level statistics and improve query performance using [pg_stats](./pg-stats/).
+{{</lead>}}
+
+## View plans with EXPLAIN
+
+Use the EXPLAIN statement to show the query execution plan generated by YugabyteDB for a given SQL statement. Using EXPLAIN, you can discover where in the query plan the query is spending most of its time, and with this information, decide on the best approach for improving query performance. This could include strategies such as adding an index or changing index sort order.
+
+{{<lead link="./explain-analyze/">}}
+Learn about [analyzing queries with EXPLAIN](./explain-analyze/).
+{{</lead>}}
+
+## Use a hint plan
+
+Using the pg_hint_plan extension, you can influence the query planner's decisions by embedding hints directly in SQL comments. This can be particularly useful when the planner's default behavior doesn't align with the specific performance needs of a query. Using hints, such as specifying join methods or scan types, you can guide the planner to choose more efficient execution plans based on your knowledge of the data and workload.
+
+{{<lead link="./pg-hint-plan/">}}
+To learn more, see [Optimizing YSQL queries using pg_hint_plan](./pg-hint-plan/).
+{{</lead>}}
+
+## Log all slow queries
+
+You can set the `--ysql_log_min_duration_statement` flag to help track down slow queries. When configured, YugabyteDB logs the duration of each completed SQL statement that runs the specified duration (in milliseconds) or longer. (Setting the value to 0 prints all statement durations.)
+You can set the `--ysql_log_min_duration_statement` flag to help track down slow queries. When configured, YugabyteDB logs the duration of each completed SQL statement that runs the specified duration (in milliseconds) or longer. (Setting the value to 0 prints all statement durations.)
+
+```sh
+$ ./bin/yb-tserver --ysql_log_min_duration_statement 1000
+```
+
+Results are written to the current `postgres*log` file.
+
+{{< note title="Note" >}}
+
+Depending on the database and the work being performed, long-running queries don't necessarily need to be optimized.
+
+Ensure that the threshold is high enough so that you don't flood the `postgres*log` log files.
+
+{{< /note >}}
+
+{{<lead link="/preview/troubleshoot/nodes/check-logs/#yb-tserver-logs">}}
+Learn more about [YB-TServer logs](/preview/troubleshoot/nodes/check-logs/#yb-tserver-logs).
+{{</lead>}}

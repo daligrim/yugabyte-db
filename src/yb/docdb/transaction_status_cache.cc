@@ -16,16 +16,21 @@
 
 #include <boost/optional/optional.hpp>
 
+#include "yb/ash/wait_state.h"
+
 #include "yb/common/hybrid_time.h"
+
 #include "yb/docdb/transaction_dump.h"
+
 #include "yb/util/backoff_waiter.h"
 #include "yb/util/result.h"
 #include "yb/util/status_format.h"
 #include "yb/util/tsan_util.h"
+#include "yb/util/flags.h"
 
 using namespace std::literals;
 
-DEFINE_bool(TEST_transaction_allow_rerequest_status, true,
+DEFINE_UNKNOWN_bool(TEST_transaction_allow_rerequest_status, true,
             "Allow rerequest transaction status when TryAgain is received.");
 
 namespace yb {
@@ -119,6 +124,7 @@ Result<TransactionStatusCache::GetCommitDataResult> TransactionStatusCache::DoGe
               TransactionLoadFlags{TransactionLoadFlag::kCleanup},
               callback});
     auto wait_start = CoarseMonoClock::now();
+    SCOPED_WAIT_STATUS(TransactionStatusCache_DoGetCommitData);
     auto future_status = future.wait_until(
         TEST_retry_allowed ? wait_start + kRequestTimeout : deadline_);
     if (future_status == std::future_status::ready) {
@@ -128,8 +134,9 @@ Result<TransactionStatusCache::GetCommitDataResult> TransactionStatusCache::DoGe
         break;
       }
       if (txn_status_result.status().IsNotFound()) {
-        // We have intent w/o metadata, that means that transaction was already cleaned up.
-        LOG(WARNING) << "Intent for transaction w/o metadata: " << transaction_id;
+        // We have intent w/o metadata, that means that transaction was already cleaned up or
+        // is being retained for CDC.
+        VLOG(4) << "Intent for transaction w/o metadata: " << transaction_id;
         return GetCommitDataResult{
             .transaction_local_state =
                 TransactionLocalState{.commit_ht = HybridTime::kMin, .aborted_subtxn_set = {}},

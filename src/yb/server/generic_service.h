@@ -29,8 +29,7 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_SERVER_GENERIC_SERVICE_H
-#define YB_SERVER_GENERIC_SERVICE_H
+#pragma once
 
 #include "yb/gutil/macros.h"
 #include "yb/server/server_base.service.h"
@@ -56,6 +55,10 @@ class GenericServiceImpl : public GenericServiceIf {
   void GetFlag(const GetFlagRequestPB* req,
                GetFlagResponsePB* resp,
                rpc::RpcContext rpc) override;
+
+  void ValidateFlagValue(
+      const ValidateFlagValueRequestPB* req, ValidateFlagValueResponsePB* resp,
+      rpc::RpcContext rpc) override;
 
   void GetAutoFlagsConfigVersion(
       const GetAutoFlagsConfigVersionRequestPB* req,
@@ -89,4 +92,3 @@ class GenericServiceImpl : public GenericServiceIf {
 
 } // namespace server
 } // namespace yb
-#endif /* YB_SERVER_GENERIC_SERVICE_H */

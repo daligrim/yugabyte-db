@@ -7,15 +7,18 @@ subdir = src/bin/pgbench
 top_builddir = ../../..
 include $(top_builddir)/src/Makefile.global
 
-OBJS = pgbench.o exprparse.o $(WIN32RES)
+OBJS = \
+	$(WIN32RES) \
+	exprparse.o \
+	pgbench.o
 
 override CPPFLAGS := -I. -I$(srcdir) -I$(libpq_srcdir) $(CPPFLAGS)
-LDFLAGS_INTERNAL += -L$(top_builddir)/src/fe_utils -lpgfeutils $(libpq_pgport)
+LDFLAGS_INTERNAL += -L$(top_builddir)/src/fe_utils -lpgfeutils $(libpq_pgport) -L$(YB_BUILD_ROOT)/lib -lserver_process -lyb_pggate_util -lysql_bench_metrics_handler
 
 ifneq ($(PORTNAME), win32)
 override CFLAGS += $(PTHREAD_CFLAGS)
 endif
-LIBS += $(PTHREAD_LIBS)
+LIBS += $(PTHREAD_LIBS) -lyb_util $(YB_PG_EXE_LD_FLAGS_AFTER_YB_LIBS)
 
 
 all: ysql_bench

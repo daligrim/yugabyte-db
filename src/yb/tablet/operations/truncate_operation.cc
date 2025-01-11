@@ -13,26 +13,30 @@
 
 #include "yb/tablet/operations/truncate_operation.h"
 
-#include <glog/logging.h>
+#include "yb/util/logging.h"
 
 #include "yb/consensus/consensus_round.h"
-#include "yb/consensus/consensus.pb.h"
+#include "yb/consensus/consensus.messages.h"
 
 #include "yb/tablet/tablet.h"
 
 #include "yb/util/trace.h"
 
+DEFINE_test_flag(bool, skip_applying_truncate, false,
+                 "If true, the test will skip applying tablet truncate operation."
+                 "Note that other operations will still be applied.");
+
 namespace yb {
 namespace tablet {
 
 template <>
-void RequestTraits<TruncatePB>::SetAllocatedRequest(
-    consensus::ReplicateMsg* replicate, TruncatePB* request) {
-  replicate->set_allocated_truncate(request);
+void RequestTraits<LWTruncatePB>::SetAllocatedRequest(
+    consensus::LWReplicateMsg* replicate, LWTruncatePB* request) {
+  replicate->ref_truncate(request);
 }
 
 template <>
-TruncatePB* RequestTraits<TruncatePB>::MutableRequest(consensus::ReplicateMsg* replicate) {
+LWTruncatePB* RequestTraits<LWTruncatePB>::MutableRequest(consensus::LWReplicateMsg* replicate) {
   return replicate->mutable_truncate();
 }
 
@@ -43,7 +47,12 @@ Status TruncateOperation::DoAborted(const Status& status) {
 Status TruncateOperation::DoReplicated(int64_t leader_term, Status* complete_status) {
   TRACE("APPLY TRUNCATE: started");
 
-  RETURN_NOT_OK(tablet()->Truncate(this));
+  if (FLAGS_TEST_skip_applying_truncate) {
+    TRACE("APPLY TRUNCATE: skipped");
+    return Status::OK();
+  }
+
+  RETURN_NOT_OK(VERIFY_RESULT(tablet_safe())->Truncate(this));
 
   TRACE("APPLY TRUNCATE: finished");
 

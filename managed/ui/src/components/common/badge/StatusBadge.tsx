@@ -20,7 +20,10 @@ export enum Badge_Types {
   STOPPED = 'Stopped',
   FAILED_TO_DELETE = 'FailedToDelete',
   DELETE_IN_PROGRESS = 'DeleteInProgress',
-  QUEUED_FOR_DELETION = 'QueuedForDeletion'
+  QUEUED_FOR_DELETION = 'QueuedForDeletion',
+  SUCCESS = 'Success',
+  CREATED = 'Created',
+  EXPIRED = 'Expired'
 }
 
 interface StatusBadgeProps extends React.HTMLAttributes<HTMLDivElement> {
@@ -32,6 +35,7 @@ const getIcon = (statusType: Badge_Types) => {
   let icon = '';
   switch (statusType) {
     case Badge_Types.COMPLETED:
+    case Badge_Types.SUCCESS:
       icon = 'fa-check';
       break;
     case Badge_Types.FAILED:
@@ -46,15 +50,19 @@ const getIcon = (statusType: Badge_Types) => {
     case Badge_Types.QUEUED_FOR_DELETION:
       icon = 'fa-clock-o';
       break;
+
+    case Badge_Types.EXPIRED:
+      icon = 'fa-ban';
+      break;
   }
   return icon ? <i className={`fa ${icon} badge-icon ${statusType}`} /> : null;
 };
 
 export const StatusBadge: FC<StatusBadgeProps> = ({ statusType, customLabel, ...others }) => {
-  const label = customLabel || BACKUP_LABEL_MAP[statusType];
+  const label = customLabel ?? BACKUP_LABEL_MAP[statusType];
   return (
     <span {...others} className={`status-badge ${statusType}`}>
-      {label} 
+      {label}
       {getIcon(statusType)}
     </span>
   );

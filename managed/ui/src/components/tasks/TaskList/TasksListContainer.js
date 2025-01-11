@@ -26,7 +26,7 @@ const mapDispatchToProps = (dispatch) => {
     resetCustomerTasks: () => {
       dispatch(resetCustomerTasks());
     },
-    abortCurrentTask: (taskUUID) => {
+    abortTask: (taskUUID) => {
       return dispatch(abortTask(taskUUID)).then((response) => {
         return dispatch(abortTaskResponse(response.payload));
       });
@@ -45,7 +45,8 @@ function mapStateToProps(state) {
     universe: state.universe,
     customer: state.customer,
     tasks: state.tasks,
-    visibleModal: state.modal.visibleModal
+    visibleModal: state.modal.visibleModal,
+    featureFlags: state.featureFlags
   };
 }
 

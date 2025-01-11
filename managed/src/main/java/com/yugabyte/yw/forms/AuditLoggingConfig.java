@@ -2,12 +2,13 @@
 
 package com.yugabyte.yw.forms;
 
-import static play.mvc.Http.Status.BAD_REQUEST;
-import java.text.SimpleDateFormat;
-import javax.validation.constraints.Min;
-import com.yugabyte.yw.common.PlatformServiceException;
+import com.yugabyte.yw.common.BeanValidator;
+import com.yugabyte.yw.models.common.YbaApi;
+import com.yugabyte.yw.models.common.YbaApi.YbaApiVisibility;
 import io.swagger.annotations.ApiModel;
 import io.swagger.annotations.ApiModelProperty;
+import java.text.SimpleDateFormat;
+import javax.validation.constraints.Min;
 import lombok.Data;
 import play.data.validation.Constraints.Required;
 
@@ -26,6 +27,17 @@ public class AuditLoggingConfig {
   @ApiModelProperty(value = "Rollover Pattern", example = "yyyy-MM-dd", required = false)
   private String rolloverPattern = "yyyy-MM-dd";
 
+  @ApiModelProperty(
+      value =
+          "WARNING: This is a preview API that could change. "
+              + "Audit log file name prefix. Defaults to \"\". For example, setting this to"
+              + " \"yb-platform-\" will generate audit log files as \"yb-platform-audit.log\""
+              + " instead of \"audit.log\".",
+      example = "yb-platform-",
+      required = false)
+  @YbaApi(visibility = YbaApiVisibility.PREVIEW, sinceYBAVersion = "2.21.0.0")
+  private String fileNamePrefix;
+
   @Min(value = 0)
   @ApiModelProperty(
       value = "Max number of days up till which logs are kept",
@@ -33,12 +45,11 @@ public class AuditLoggingConfig {
       required = false)
   private int maxHistory = 30;
 
-  public void setRolloverPattern(String rolloverPattern) {
+  public void validate(BeanValidator validator) {
     try {
       new SimpleDateFormat(rolloverPattern);
     } catch (Exception e) {
-      throw new PlatformServiceException(BAD_REQUEST, "Incorrect pattern " + rolloverPattern);
+      validator.error().forField("rolloverPattern", "Incorrect pattern").throwError();
     }
-    this.rolloverPattern = rolloverPattern;
   }
 }

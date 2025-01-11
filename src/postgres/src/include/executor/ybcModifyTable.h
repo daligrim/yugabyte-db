@@ -20,8 +20,7 @@
  *--------------------------------------------------------------------------------------------------
  */
 
-#ifndef YBCMODIFYTABLE_H
-#define YBCMODIFYTABLE_H
+#pragma once
 
 #include "nodes/execnodes.h"
 #include "executor/tuptable.h"
@@ -52,6 +51,14 @@ typedef void (*yb_bind_for_write_function) (YBCPgStatement stmt,
 											Datum ybbasectid,
 											bool ybctid_as_value);
 
+typedef void (*yb_assign_for_write_function) (YBCPgStatement stmt,
+											  Relation index,
+											  Datum *values,
+											  bool *isnull,
+											  int natts,
+											  Datum old_ybbasectid,
+											  Datum new_ybbasectid);
+
 /*
  * Insert data into YugaByte table.
  * This function is equivalent to "heap_insert", but it sends data to DocDB (YugaByte storage).
@@ -60,14 +67,17 @@ typedef void (*yb_bind_for_write_function) (YBCPgStatement stmt,
  * If non-zero, it will be used instead of generation, otherwise it will be set
  * to the generated value.
  */
-extern Oid YBCHeapInsert(TupleTableSlot *slot,
-                         HeapTuple tuple,
-                         EState *estate);
-extern Oid YBCHeapInsertForDb(Oid dboid,
-                              TupleTableSlot *slot,
-                              HeapTuple tuple,
-                              EState *estate,
-                              Datum *ybctid);
+extern void YBCHeapInsert(ResultRelInfo *resultRelInfo,
+						  TupleTableSlot *slot,
+						  YBCPgStatement blockInsertStmt,
+						  EState *estate);
+
+/*
+ * Whether INSERT ON CONFLICT read batching is possible for the given
+ * resultRelInfo.  Should be called only when the inspected fields of
+ * resultRelInfo are populated.
+ */
+extern bool YbIsInsertOnConflictReadBatchingPossible(ResultRelInfo *resultRelInfo);
 
 /*
  * Insert a tuple into a YugaByte table. Will execute within a distributed
@@ -77,16 +87,26 @@ extern Oid YBCHeapInsertForDb(Oid dboid,
  * If non-zero, it will be used instead of generation, otherwise it will be set
  * to the generated value.
  */
-extern Oid YBCExecuteInsert(Relation rel,
-                            TupleDesc tupleDesc,
-                            HeapTuple tuple,
-                            OnConflictAction onConflictAction);
-extern Oid YBCExecuteInsertForDb(Oid dboid,
-                                 Relation rel,
-                                 TupleDesc tupleDesc,
-                                 HeapTuple tuple,
-                                 OnConflictAction onConflictAction,
-                                 Datum *ybctid);
+extern void YBCExecuteInsert(Relation rel,
+							 TupleTableSlot *slot,
+							 OnConflictAction onConflictAction);
+
+/* HeapTuple based wrapper on YBCExecuteInsertForDb. */
+extern void YBCExecuteInsertHeapTupleForDb(Oid dboid,
+										   Relation rel,
+										   HeapTuple tuple,
+										   OnConflictAction onConflictAction,
+										   Datum *ybctid,
+										   YBCPgTransactionSetting transaction_setting);
+
+extern void YBCExecuteInsertForDb(Oid dboid,
+								  Relation rel,
+								  TupleTableSlot *slot,
+								  OnConflictAction onConflictAction,
+								  Datum *ybctid,
+								  YBCPgTransactionSetting transaction_setting);
+
+extern void YBCApplyWriteStmt(YBCPgStatement handle, Relation relation);
 
 /*
  * Execute the insert outside of a transaction.
@@ -96,16 +116,14 @@ extern Oid YBCExecuteInsertForDb(Oid dboid,
  * If non-zero, it will be used instead of generation, otherwise it will be set
  * to the generated value.
  */
-extern Oid YBCExecuteNonTxnInsert(Relation rel,
-                                  TupleDesc tupleDesc,
-                                  HeapTuple tuple,
-                                  OnConflictAction onConflictAction);
-extern Oid YBCExecuteNonTxnInsertForDb(Oid dboid,
-                                       Relation rel,
-                                       TupleDesc tupleDesc,
-                                       HeapTuple tuple,
-                                       OnConflictAction onConflictAction,
-                                       Datum *ybctid);
+extern void YBCExecuteNonTxnInsert(Relation rel,
+								   TupleTableSlot *slot,
+								   OnConflictAction onConflictAction);
+extern void YBCExecuteNonTxnInsertForDb(Oid dboid,
+										Relation rel,
+										TupleTableSlot *slot,
+										OnConflictAction onConflictAction,
+										Datum *ybctid);
 
 /*
  * Insert a tuple into the an index's backing YugaByte index table.
@@ -114,15 +132,15 @@ extern void YBCExecuteInsertIndex(Relation rel,
 								  Datum *values,
 								  bool *isnull,
 								  Datum ybctid,
-								  const uint64_t* backfill_write_time,
+								  const uint64_t *backfill_write_time,
 								  yb_bind_for_write_function callback,
 								  void *indexstate);
 extern void YBCExecuteInsertIndexForDb(Oid dboid,
 									   Relation rel,
-									   Datum* values,
-									   bool* isnull,
+									   Datum *values,
+									   bool *isnull,
 									   Datum ybctid,
-									   const uint64_t* backfill_write_time,
+									   const uint64_t *backfill_write_time,
 									   yb_bind_for_write_function callback,
 									   void *indexstate);
 
@@ -135,10 +153,12 @@ extern void YBCExecuteInsertIndexForDb(Oid dboid,
  * to anoter.
  */
 extern bool YBCExecuteDelete(Relation rel,
-							 TupleTableSlot *slot,
-							 EState *estate,
-							 ModifyTableState *mtstate,
-							 bool changingPart);
+							 TupleTableSlot *planSlot,
+							 List *returning_columns,
+							 bool target_tuple_fetched,
+							 YBCPgTransactionSetting transaction_setting,
+							 bool changingPart,
+							 EState *estate);
 /*
  * Delete a tuple (identified by index columns and base table ybctid) from an
  * index's backing YugaByte index table.
@@ -150,20 +170,41 @@ extern void YBCExecuteDeleteIndex(Relation index,
 								  yb_bind_for_write_function callback,
 								  void *indexstate);
 
+extern void YBCExecuteUpdateIndex(Relation index,
+								  Datum *values,
+								  bool *isnull,
+								  Datum oldYbctid,
+								  Datum newYbctid,
+								  yb_assign_for_write_function callback);
+
 /*
  * Update a row (identified by ybctid) in a YugaByte table.
  * If this is a single row op we will return false in the case that there was
  * no row to update. This can occur because we do not first perform a scan if
  * it is a single row op.
  */
-extern bool YBCExecuteUpdate(Relation rel,
+extern bool YBCExecuteUpdate(ResultRelInfo *resultRelInfo,
+							 TupleTableSlot *planSlot,
 							 TupleTableSlot *slot,
-							 HeapTuple tuple,
+							 HeapTuple oldtuple,
 							 EState *estate,
-							 ModifyTableState *mtstate,
+							 ModifyTable *mt_plan,
+							 bool target_tuple_fetched,
+							 YBCPgTransactionSetting transaction_setting,
 							 Bitmapset *updatedCols,
 							 bool canSetTag);
 
+/*
+ * Update a row (identified by the roleid) in a pg_yb_role_profile. This is a
+ * stripped down and specific version of YBCExecuteUpdate. It is used by
+ * auth.c, since the typical method of writing does not work at that stage of
+ * the DB initialization.
+ *
+ * Returns true if a row was updated.
+ */
+extern bool YBCExecuteUpdateLoginAttempts(Oid roleid,
+										  int failed_attempts,
+										  char rolprfstatus);
 /*
  * Replace a row in a YugaByte table by first deleting an existing row
  * (identified by ybctid) and then inserting a tuple to replace it.
@@ -171,11 +212,10 @@ extern bool YBCExecuteUpdate(Relation rel,
  *
  * This will change ybctid of a row within a tuple.
  */
-extern Oid YBCExecuteUpdateReplace(Relation rel,
-								   TupleTableSlot *slot,
-								   HeapTuple tuple,
-								   EState *estate,
-								   ModifyTableState *mtstate);
+extern void YBCExecuteUpdateReplace(Relation rel,
+									TupleTableSlot *planSlot,
+									TupleTableSlot *slot,
+									EState *estate);
 
 //------------------------------------------------------------------------------
 // System tables modify-table API.
@@ -186,27 +226,39 @@ extern Oid YBCExecuteUpdateReplace(Relation rel,
 extern void YBCDeleteSysCatalogTuple(Relation rel, HeapTuple tuple);
 
 extern void YBCUpdateSysCatalogTuple(Relation rel,
-                                     HeapTuple oldtuple,
-                                     HeapTuple tuple);
+									 HeapTuple oldtuple,
+									 HeapTuple tuple);
 extern void YBCUpdateSysCatalogTupleForDb(Oid dboid,
-                                          Relation rel,
-                                          HeapTuple oldtuple,
-                                          HeapTuple tuple);
+										  Relation rel,
+										  HeapTuple oldtuple,
+										  HeapTuple tuple);
 
 //------------------------------------------------------------------------------
 // Utility methods.
 
 extern bool YBCIsSingleRowTxnCapableRel(ResultRelInfo *resultRelInfo);
 
+/*
+ * Checks if the given statement is planned to be executed as a single-row
+ * modify transaction.
+ */
+extern bool YbIsSingleRowModifyTxnPlanned(PlannedStmt *pstmt, EState *estate);
+
 extern Datum YBCGetYBTupleIdFromSlot(TupleTableSlot *slot);
 
-extern Datum YBCGetYBTupleIdFromTuple(Relation rel,
-									  HeapTuple tuple,
-									  TupleDesc tupleDesc);
+extern Datum YBCComputeYBTupleIdFromSlot(Relation rel, TupleTableSlot *slot);
+
+extern YBCPgYBTupleIdDescriptor *YBCBuildUniqueIndexYBTupleId(Relation unique_index,
+															  Datum *values,
+															  bool *nulls);
 
 /*
  * Returns if a table has secondary indices.
  */
 extern bool YBCRelInfoHasSecondaryIndices(ResultRelInfo *resultRelInfo);
 
-#endif							/* YBCMODIFYTABLE_H */
+/*
+ * Returns whether the current slot satisfies the partial index's predicate.
+ */
+extern bool YbIsPartialIndexPredicateSatisfied(IndexInfo *indexInfo,
+											   EState *estate);

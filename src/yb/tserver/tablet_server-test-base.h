@@ -30,13 +30,18 @@
 // under the License.
 //
 
-#ifndef YB_TSERVER_TABLET_SERVER_TEST_BASE_H_
-#define YB_TSERVER_TABLET_SERVER_TEST_BASE_H_
+#pragma once
+
+#include <optional>
 
 #include "yb/common/common_fwd.h"
 #include "yb/common/schema.h"
 
 #include "yb/rpc/rpc_fwd.h"
+
+#include "yb/tablet/tablet_fwd.h"
+
+#include "yb/tserver/backup.proxy.h"
 
 #include "yb/util/metrics.h"
 #include "yb/util/test_util.h"
@@ -70,7 +75,7 @@ class TabletServerServiceProxy;
 
 class TabletServerTestBase : public YBTest {
  public:
-  typedef pair<int32_t, int32_t> KeyValue;
+  typedef std::pair<int32_t, int32_t> KeyValue;
 
   explicit TabletServerTestBase(TableType table_type = YQL_TABLE_TYPE);
   ~TabletServerTestBase();
@@ -101,7 +106,7 @@ class TabletServerTestBase : public YBTest {
                             int32_t count,
                             int32_t num_batches = -1,
                             TabletServerServiceProxy* proxy = nullptr,
-                            string tablet_id = kTabletId,
+                            std::string tablet_id = kTabletId,
                             std::vector<uint64_t>* write_hybrid_times_collector = nullptr,
                             TimeSeries *ts = nullptr,
                             bool string_field_defined = true);
@@ -110,7 +115,7 @@ class TabletServerTestBase : public YBTest {
   void DeleteTestRowsRemote(int32_t first_row,
                             int32_t count,
                             TabletServerServiceProxy* proxy = nullptr,
-                            string tablet_id = kTabletId);
+                            std::string tablet_id = kTabletId);
 
   void BuildTestRow(int index, QLWriteRequestPB* req);
 
@@ -119,9 +124,17 @@ class TabletServerTestBase : public YBTest {
   Status ShutdownAndRebuildTablet();
 
   // Verifies that a set of expected rows (key, value) is present in the tablet.
-  void VerifyRows(const Schema& schema, const std::vector<KeyValue>& expected);
+  void VerifyRows(
+      const Schema& schema, const std::vector<KeyValue>& expected,
+      std::optional<tablet::TabletPeerPtr> tablet_peer = std::nullopt);
 
  protected:
+  Result<std::unique_ptr<MiniTabletServer>> CreateMiniTabletServer();
+
+  virtual int NumDrives() {
+    return 1;
+  }
+
   static const client::YBTableName kTableName;
   static const char* kTabletId;
 
@@ -138,7 +151,7 @@ class TabletServerTestBase : public YBTest {
   std::unique_ptr<TabletServerAdminServiceProxy> admin_proxy_;
   std::unique_ptr<consensus::ConsensusServiceProxy> consensus_proxy_;
   std::unique_ptr<server::GenericServiceProxy> generic_proxy_;
-
+  std::unique_ptr<TabletServerBackupServiceProxy> backup_proxy_;
 
   MetricRegistry ts_test_metric_registry_;
   scoped_refptr<MetricEntity> ts_test_metric_entity_;
@@ -148,5 +161,3 @@ class TabletServerTestBase : public YBTest {
 
 } // namespace tserver
 } // namespace yb
-
-#endif /* YB_TSERVER_TABLET_SERVER_TEST_BASE_H_ */

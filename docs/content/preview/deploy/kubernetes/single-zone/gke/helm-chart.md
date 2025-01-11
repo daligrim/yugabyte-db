@@ -10,7 +10,6 @@ menu:
     identifier: k8s-gke-1
     weight: 623
 aliases:
-  - /preview/deploy/kubernetes/gke/
   - /preview/deploy/kubernetes/gke/helm-chart/
   - /preview/deploy/kubernetes/single-zone/gke/
 type: docs
@@ -19,19 +18,19 @@ type: docs
 <ul class="nav nav-tabs-alt nav-tabs-yb">
   <li >
     <a href="../helm-chart/" class="nav-link active">
-      <i class="fas fa-cubes" aria-hidden="true"></i>
+      <i class="fa-regular fa-dharmachakra" aria-hidden="true"></i>
       Helm chart
     </a>
   </li>
   <li >
     <a href="../statefulset-yaml/" class="nav-link">
-      <i class="fas fa-cubes" aria-hidden="true"></i>
+      <i class="fa-solid fa-cubes" aria-hidden="true"></i>
       YAML (remote disk)
     </a>
   </li>
    <li >
     <a href="../statefulset-yaml-local-ssd/" class="nav-link">
-      <i class="fas fa-cubes" aria-hidden="true"></i>
+      <i class="fa-solid fa-cubes" aria-hidden="true"></i>
       YAML (local disk)
     </a>
   </li>
@@ -46,7 +45,7 @@ The YugabyteDB Helm chart has been tested with the following software versions:
 - GKE running Kubernetes 1.20 or later. The Helm chart you use to install YugabyteDB creates three YB-Master and three YB-TServers, each with 2 CPU cores, for a total of 12 CPU cores. This means you need a Kubernetes cluster with more than 12 CPU cores. If the cluster contains three nodes, then each node should have more than 4 cores.
 
 - Helm 3.4 or later.
-- For optimal performance, ensure you set the appropriate [system limits using `ulimit`](../../../../manual-deployment/system-config/#ulimits) on each node in your Kubernetes cluster.
+- For optimal performance, ensure you set the appropriate [system limits using `ulimit`](../../../../manual-deployment/system-config/#set-ulimits) on each node in your Kubernetes cluster.
 
 The following steps show how to meet these prerequisites:
 
@@ -54,13 +53,13 @@ The following steps show how to meet these prerequisites:
 
 - Configure defaults for Google Cloud.
 
-  Execute the followingn command to set the project ID to `yugabyte`. You can change this as needed.
+  Execute the following command to set the project ID to `yugabyte`. You can change this as needed.
 
   ```sh
   gcloud config set project yugabyte
   ```
 
-  Execute the followingn command to set  the default compute zone to `us-west1-b`. You can change this as needed.
+  Execute the following command to set  the default compute zone to `us-west1-b`. You can change this as needed.
 
   ```sh
   gcloud config set compute/zone us-west1-b
@@ -68,10 +67,9 @@ The following steps show how to meet these prerequisites:
 
 - Install `kubectl`. Refer to kubectl installation instructions for your [operating system](https://kubernetes.io/docs/tasks/tools/).
 
-
   Note that GKE is usually two or three major releases behind the upstream or OSS Kubernetes release. This means you have to make sure that you have the latest kubectl version that is compatible across different Kubernetes distributions.
 
-- Ensure that `helm` is installed. 
+- Ensure that `helm` is installed.
 
   First, check the Helm version, as follows:
 
@@ -79,7 +77,7 @@ The following steps show how to meet these prerequisites:
   helm version
   ```
 
-  Expect to see the ouput similar to the following. Note that the `tiller` server-side component has been removed in Helm 3.
+  Expect to see the output similar to the following. Note that the `tiller` server-side component has been removed in Helm 3.
 
   ```output
   version.BuildInfo{Version:"v3.0.3", GitCommit:"ac925eb7279f4a6955df663a0128044a8a6b7593", GitTreeState:"clean", GoVersion:"go1.13.6"}
@@ -87,11 +85,13 @@ The following steps show how to meet these prerequisites:
 
 ## Create a GKE cluster
 
-Create a Kubernetes cluster by running the following command:
+Create a private Kubernetes cluster by running the following command.
 
 ```sh
-gcloud container clusters create yugabyte --machine-type=n1-standard-8
+gcloud container clusters create cluster_name --enable-private-nodes --machine-type=n1-standard-8
 ```
+
+Note that you must set up Cloud NAT for a private Kubernetes cluster in Google Cloud to ensure that your cluster can access the internet while its nodes do not have public IP addresses. Refer to [Configuring Private Google Access and Cloud NAT in Google Cloud Platform (GCP)](https://kloudkraft.medium.com/configuring-private-google-access-and-cloud-nat-in-google-cloud-platform-gcp-3c4406b590b3).
 
 As stated in [Prerequisites](#prerequisites), the default configuration in the YugabyteDB Helm chart requires Kubernetes nodes to have a total of 12 CPU cores and 45 GB RAM allocated to YugabyteDB. This can be three nodes with 4 CPU cores and 15 GB RAM allocated to YugabyteDB. The smallest Google Cloud machine type that meets this requirement is `n1-standard-8` which has 8 CPU cores and 30GB RAM.
 
@@ -220,13 +220,13 @@ REVISION  UPDATED                   STATUS    CHART           APP VERSION   DESC
 
 ## Connect using YugabyteDB shells
 
-To connect and use the YSQL Shell `ysqlsh`, run the following command:
+To connect and use the YSQL Shell ysqlsh, run the following command:
 
 ```sh
 kubectl exec -n yb-demo -it yb-tserver-0 -- ysqlsh -h yb-tserver-0.yb-tservers.yb-demo
 ```
 
-To connect and use the YCQL Shell `ycqlsh`, run the following command:
+To connect and use the YCQL Shell ycqlsh, run the following command:
 
 ```sh
 kubectl exec -n yb-demo -it yb-tserver-0 -- ycqlsh yb-tserver-0.yb-tservers.yb-demo
@@ -234,14 +234,14 @@ kubectl exec -n yb-demo -it yb-tserver-0 -- ycqlsh yb-tserver-0.yb-tservers.yb-d
 
 ## Connect using external clients
 
-To connect an external program, get the load balancer `EXTERNAL-IP` IP address of the `yb-tserver-service` service and connect to the 5433 pr 9042 ports for YSQL or YCQL services respectively:
+To connect an external program, get the load balancer `EXTERNAL-IP` address of the `yb-tserver-service` service and connect using port 5433 for YSQL or port 9042 for YCQL, as follows:
 
 ```sh
 kubectl get services --namespace yb-demo
 ```
 
 ```output
-NAME                 TYPE           CLUSTER-IP      EXTERNAL-IP   PORT(S)                                        AGE
+NAME                 TYPE           CLUSTER-IP      EXTERNAL-IP        PORT(S)                                        AGE
 ...
 yb-tserver-service   LoadBalancer   10.98.36.163    35.225.153.214     6379:30929/TCP,9042:30975/TCP,5433:30048/TCP   10s
 ...

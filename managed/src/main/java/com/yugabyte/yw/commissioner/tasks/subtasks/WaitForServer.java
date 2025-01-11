@@ -10,10 +10,22 @@
 
 package com.yugabyte.yw.commissioner.tasks.subtasks;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.google.common.base.Stopwatch;
 import com.google.common.net.HostAndPort;
 import com.yugabyte.yw.commissioner.BaseTaskDependencies;
-import com.yugabyte.yw.commissioner.tasks.UniverseDefinitionTaskBase.ServerType;
+import com.yugabyte.yw.commissioner.tasks.UniverseTaskBase.ServerType;
 import com.yugabyte.yw.commissioner.tasks.params.ServerSubTaskParams;
+import com.yugabyte.yw.common.YsqlQueryExecutor;
+import com.yugabyte.yw.common.config.ProviderConfKeys;
+import com.yugabyte.yw.forms.RunQueryFormData;
+import com.yugabyte.yw.forms.UniverseDefinitionTaskParams;
+import com.yugabyte.yw.models.Provider;
+import com.yugabyte.yw.models.Universe;
+import com.yugabyte.yw.models.helpers.NodeDetails;
+import java.time.Duration;
+import java.util.UUID;
+import javax.annotation.Nullable;
 import javax.inject.Inject;
 import lombok.extern.slf4j.Slf4j;
 import org.yb.client.YBClient;
@@ -21,14 +33,21 @@ import org.yb.client.YBClient;
 @Slf4j
 public class WaitForServer extends ServerSubTaskBase {
 
+  private final YsqlQueryExecutor ysqlQueryExecutor;
+
   @Inject
-  protected WaitForServer(BaseTaskDependencies baseTaskDependencies) {
+  protected WaitForServer(
+      BaseTaskDependencies baseTaskDependencies, YsqlQueryExecutor ysqlQueryExecutor) {
     super(baseTaskDependencies);
+    this.ysqlQueryExecutor = ysqlQueryExecutor;
   }
 
   public static class Params extends ServerSubTaskParams {
     // Timeout for the RPC call.
     public long serverWaitTimeoutMs;
+    // During upgrades we update universe state only at the end of the task.
+    // So here we can pass updated universe state that is not yet persisted.
+    @Nullable public Universe currentUniverseState;
   }
 
   @Override
@@ -51,6 +70,31 @@ public class WaitForServer extends ServerSubTaskBase {
         // This first calls waitForServer followed by availability check of master UUID.
         // Check for master UUID retries until timeout.
         ret = client.waitForMaster(hp, taskParams().serverWaitTimeoutMs);
+      } else if (taskParams().serverType.equals(ServerType.YSQLSERVER)) {
+        Universe universe =
+            taskParams().currentUniverseState == null
+                ? Universe.getOrBadRequest(taskParams().getUniverseUUID())
+                : taskParams().currentUniverseState;
+        NodeDetails node = universe.getNode(taskParams().nodeName);
+        Provider provider =
+            Provider.getOrBadRequest(
+                UUID.fromString(
+                    universe
+                        .getUniverseDetails()
+                        .getClusterByUuid(node.placementUuid)
+                        .userIntent
+                        .provider));
+        Duration waitTimeout = Duration.ofMillis(taskParams().serverWaitTimeoutMs);
+        Stopwatch stopwatch = Stopwatch.createStarted();
+        Duration waitDuration =
+            confGetter.getConfForScope(provider, ProviderConfKeys.waitForYQLRetryDuration);
+        log.debug("Retry duration is {}", waitDuration);
+        while (true) {
+          log.info("Check if postgres server is healthy on node {}", node.nodeName);
+          ret = checkPostgresStatus(universe);
+          if (ret || stopwatch.elapsed().compareTo(waitTimeout) > 0) break;
+          waitFor(waitDuration);
+        }
       } else {
         ret = client.waitForServer(hp, taskParams().serverWaitTimeoutMs);
       }
@@ -67,5 +111,22 @@ public class WaitForServer extends ServerSubTaskBase {
         "Server {} responded to RPC calls in {} ms",
         (taskParams().nodeName != null) ? taskParams().nodeName : "unknown",
         (System.currentTimeMillis() - startMs));
+  }
+
+  private boolean checkPostgresStatus(Universe universe) {
+    RunQueryFormData runQueryFormData = new RunQueryFormData();
+    runQueryFormData.setQuery("SELECT version()");
+    runQueryFormData.setDbName("system_platform");
+    NodeDetails node = universe.getNode(taskParams().nodeName);
+    UniverseDefinitionTaskParams.UserIntent userIntent =
+        universe.getUniverseDetails().getPrimaryCluster().userIntent;
+    JsonNode ysqlResponse =
+        ysqlQueryExecutor.executeQueryInNodeShell(
+            universe,
+            runQueryFormData,
+            node,
+            userIntent.isYSQLAuthEnabled(),
+            userIntent.enableConnectionPooling);
+    return !ysqlResponse.has("error");
   }
 }

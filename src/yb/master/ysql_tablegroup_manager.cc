@@ -14,7 +14,9 @@
 
 #include "yb/master/ysql_tablegroup_manager.h"
 
-#include <glog/logging.h>
+#include "yb/util/logging.h"
+
+#include "yb/common/colocated_util.h"
 
 #include "yb/master/catalog_entity_info.h"
 #include "yb/master/master_defaults.h"
@@ -28,7 +30,7 @@
 namespace yb {
 namespace master {
 
-using TgInfo = YsqlTablegroupManager::TablegroupInfo;
+using TgInfo = TablegroupInfo;
 
 // ================================================================================================
 // TablegroupManager
@@ -96,10 +98,6 @@ Status YsqlTablegroupManager::Remove(const TablegroupId& tablegroup_id) {
                  NotFound,
                  Format("Tablegroup $0 does not exist", tablegroup_id));
   auto& tablegroup = tablegroup_map_[tablegroup_id];
-
-  RSTATUS_DCHECK(tablegroup->IsEmpty(),
-                 IllegalState,
-                 Format("Tablegroup $0 is not empty", *tablegroup));
 
   // Delete from DB map.
   RSTATUS_DCHECK(ContainsKey(database_tablegroup_ids_map_, tablegroup->database_id()),
@@ -171,6 +169,15 @@ bool TgInfo::IsEmpty() const {
 
 bool TgInfo::HasChildTable(ColocationId colocation_id) const {
   return ContainsKey(table_map_.right, colocation_id);
+}
+
+Result<TableId> TgInfo::GetChildTableId(ColocationId colocation_id) const {
+  SCHECK(
+      HasChildTable(colocation_id), NotFound,
+      Format(
+          "Tablegroup $0 does not contain a table with colocation_id $1", ToString(),
+          colocation_id));
+  return table_map_.right.at(colocation_id);
 }
 
 std::unordered_set<TableId> TgInfo::ChildTableIds() const {

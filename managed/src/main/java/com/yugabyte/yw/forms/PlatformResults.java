@@ -19,7 +19,8 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.google.common.annotations.VisibleForTesting;
 import com.yugabyte.yw.common.PlatformServiceException;
-import com.yugabyte.yw.common.password.RedactingService;
+import com.yugabyte.yw.common.RedactingService;
+import com.yugabyte.yw.common.RedactingService.RedactionTarget;
 import io.swagger.annotations.ApiModel;
 import io.swagger.annotations.ApiModelProperty;
 import java.util.List;
@@ -43,7 +44,7 @@ public class PlatformResults {
   }
 
   private static Result redactedResult(JsonNode dataObj) {
-    return Results.ok(RedactingService.filterSecretFields(dataObj));
+    return Results.ok(RedactingService.filterSecretFields(dataObj, RedactionTarget.APIS));
   }
 
   /**
@@ -92,6 +93,13 @@ public class PlatformResults {
         example = "{ \"foo\" : \"bar\", \"baz\" : [1, 2, 3] }")
     public JsonNode errorJson;
 
+    @ApiModelProperty(
+        value = "User request JSON object",
+        dataType = "Object",
+        example = "{ \"foo\" : \"bar\", \"baz\" : [1, 2, 3] }",
+        required = false)
+    public JsonNode requestJson;
+
     // for json deserialization
     public YBPError() {}
 
@@ -99,9 +107,14 @@ public class PlatformResults {
       this.error = error;
     }
 
-    public YBPError(JsonNode errorJson) {
+    public YBPError(JsonNode errorJson, JsonNode requestJson) {
       this.error = "See structured error message in errorJson field";
       this.errorJson = errorJson;
+      this.requestJson = requestJson;
+    }
+
+    public YBPError(JsonNode errorJson) {
+      this(errorJson, null);
     }
   }
 
@@ -117,11 +130,23 @@ public class PlatformResults {
         required = false)
     public JsonNode error;
 
+    @ApiModelProperty(
+        value = "User request JSON object",
+        dataType = "Object",
+        example = "{ \"foo\" : \"bar\", \"baz\" : [1, 2, 3] }",
+        required = false)
+    public JsonNode requestJson;
+
     // for json deserialization
     YBPStructuredError() {}
 
     public YBPStructuredError(JsonNode err) {
       error = err;
+    }
+
+    public YBPStructuredError(JsonNode err, JsonNode req) {
+      error = err;
+      requestJson = req;
     }
   }
 
@@ -201,6 +226,18 @@ public class PlatformResults {
       this.ybpTaskList = ybpTaskList;
       this.taskUUID =
           ybpTaskList.stream().map(ybTask -> ybTask.taskUUID).collect(Collectors.toList());
+    }
+  }
+
+  public static class YBPCreateSuccess extends OkResult {
+    @ApiModelProperty(
+        value = "UUID of the successfully created resource",
+        accessMode = ApiModelProperty.AccessMode.READ_ONLY)
+    @VisibleForTesting
+    public final UUID resourceUUID;
+
+    public YBPCreateSuccess(UUID resourceUUID) {
+      this.resourceUUID = resourceUUID;
     }
   }
 }

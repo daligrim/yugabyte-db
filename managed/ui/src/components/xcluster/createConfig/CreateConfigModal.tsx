@@ -1,227 +1,235 @@
-import React, { useRef, useState } from 'react';
-import { useMutation, useQuery, useQueryClient } from 'react-query';
+import { useState } from 'react';
+import { AxiosError } from 'axios';
+import { Box, Typography, useTheme } from '@material-ui/core';
 import { toast } from 'react-toastify';
-import _ from 'lodash';
-
-import { FormikActions, FormikProps } from 'formik';
+import { useMutation, useQuery, useQueryClient } from 'react-query';
+import { useTranslation } from 'react-i18next';
+import { FormProvider, useForm } from 'react-hook-form';
 
 import {
-  createXClusterReplication,
+  createXClusterConfig,
+  CreateXClusterConfigRequest,
   fetchTablesInUniverse,
   fetchTaskUntilItCompletes,
-  fetchUniverseDiskUsageMetric,
   isBootstrapRequired
 } from '../../../actions/xClusterReplication';
-import { PARALLEL_THREADS_RANGE } from '../../backupv2/common/BackupUtils';
-import { YBModalForm } from '../../common/forms';
 import { YBErrorIndicator, YBLoading } from '../../common/indicators';
-import { adaptTableUUID } from '../ReplicationUtils';
-import { ConfigureBootstrapStep } from './ConfigureBootstrapStep';
-import { SelectTablesStep } from './SelectTablesStep';
-import { SelectTargetUniverseStep } from './SelectTargetUniverseStep';
-import { YBButton, YBModal } from '../../common/forms/fields';
-import { api } from '../../../redesign/helpers/api';
-import { getPrimaryCluster, isYbcEnabledUniverse } from '../../../utils/UniverseUtils';
+import { getCategorizedNeedBootstrapPerTableResponse } from '../ReplicationUtils';
+import { assertUnreachableCase, handleServerError } from '../../../utils/errorHandlingUtils';
+import {
+  api,
+  drConfigQueryKey,
+  runtimeConfigQueryKey,
+  universeQueryKey
+} from '../../../redesign/helpers/api';
+import { YBButton, YBModal, YBModalProps } from '../../../redesign/components';
+import { StorageConfigOption } from '../sharedComponents/ReactSelectStorageConfig';
+import { CurrentFormStep } from './CurrentFormStep';
+import {
+  XClusterConfigAction,
+  XClusterConfigType,
+  XCLUSTER_UNIVERSE_TABLE_FILTERS
+} from '../constants';
 
-import { TableType, Universe } from '../../../redesign/helpers/dtos';
-import { XClusterTableType, YBTable } from '../XClusterTypes';
+import { CategorizedNeedBootstrapPerTableResponse, XClusterTableType } from '../XClusterTypes';
+import { TableType, TableTypeLabel, Universe, YBTable } from '../../../redesign/helpers/dtos';
+import { XClusterConfigNeedBootstrapPerTableResponse } from '../dtos';
 
-import styles from './CreateConfigModal.module.scss';
+import toastStyles from '../../../redesign/styles/toastStyles.module.scss';
+
+interface CreateConfigModalProps {
+  modalProps: YBModalProps;
+  sourceUniverseUuid: string;
+}
 
 export interface CreateXClusterConfigFormValues {
   configName: string;
-  targetUniverse: { label: string; value: Universe };
-  tableUUIDs: string[];
-  // Bootstrap fields
-  storageConfig: { label: string; name: string; regions: any[]; value: string };
-  parallelThreads: number;
+  targetUniverse: { label: string; value: Universe; isDisabled: boolean; disabledReason?: string };
+  tableType: { label: string; value: XClusterTableType };
+  isTransactionalConfig: boolean;
+  namespaceUuids: string[];
+  tableUuids: string[];
+  storageConfig: StorageConfigOption;
+  skipBootstrap: boolean;
 }
 
 export interface CreateXClusterConfigFormErrors {
   configName: string;
   targetUniverse: string;
-  tableUUIDs: { title: string; body: string };
-  // Bootstrap fields
+  namespaceUuids: { title: string; body: string };
   storageConfig: string;
-  parallelThreads: string;
 }
 
-interface ConfigureReplicationModalProps {
-  onHide: Function;
-  visible: boolean;
-  currentUniverseUUID: string;
+export interface CreateXClusterConfigFormWarnings {
+  configName?: string;
+  targetUniverse?: string;
+  namespaceUuids?: { title: string; body: string };
+  storageConfig?: string;
 }
-
-const MODAL_TITLE = 'Configure Replication';
 
 export const FormStep = {
-  SELECT_TARGET_UNIVERSE: {
-    submitLabel: 'Next: Select Tables'
-  } as const,
-  SELECT_TABLES: {
-    submitLabel: 'Validate Connectivity and Schema'
-  } as const,
-  ENABLE_REPLICATION: {
-    submitLabel: 'Enable Replication'
-  } as const,
-  CONFIGURE_BOOTSTRAP: {
-    submitLabel: 'Bootstrap and Enable Replication'
-  } as const
+  SELECT_TARGET_UNIVERSE: 'selectTargetUniverse',
+  SELECT_TABLES: 'selectDatabases',
+  BOOTSTRAP_SUMMARY: 'bootstrapSummary',
+  CONFIRM_ALERT: 'configureAlert'
 } as const;
-
 export type FormStep = typeof FormStep[keyof typeof FormStep];
 
+const MODAL_NAME = 'CreateConfigModal';
 const FIRST_FORM_STEP = FormStep.SELECT_TARGET_UNIVERSE;
-const DEFAULT_TABLE_TYPE = TableType.PGSQL_TABLE_TYPE;
+const TRANSLATION_KEY_PREFIX = 'clusterDetail.xCluster.createConfigModal';
+const TRANSLATION_KEY_PREFIX_SELECT_TABLE = 'clusterDetail.xCluster.selectTable';
 
-const INITIAL_VALUES: Partial<CreateXClusterConfigFormValues> = {
-  configName: '',
-  tableUUIDs: [],
-  // Bootstrap fields
-  parallelThreads: PARALLEL_THREADS_RANGE.MIN
-};
+export const CreateConfigModal = ({ modalProps, sourceUniverseUuid }: CreateConfigModalProps) => {
+  const [currentFormStep, setCurrentFormStep] = useState<FormStep>(FIRST_FORM_STEP);
+  const [tableSelectionError, setTableSelectionError] = useState<{
+    title: string;
+    body: string;
+  } | null>(null);
+  const [tableSelectionWarning, setTableSelectionWarning] = useState<{
+    title: string;
+    body: string;
+  } | null>(null);
+  const [
+    categorizedNeedBootstrapPerTableResponse,
+    setCategorizedNeedBootstrapPerTableResponse
+  ] = useState<CategorizedNeedBootstrapPerTableResponse | null>(null);
+  const [isTableSelectionValidated, setIsTableSelectionValidated] = useState<boolean>(false);
+  // The purpose of committedTargetUniverse is to store the targetUniverse field value prior
+  // to the user submitting their target universe step.
+  // This value updates whenever the user submits SelectTargetUniverseStep with a new
+  // target universe.
+  const [committedTargetUniverseUuid, setCommittedTargetUniverseUuid] = useState<string>();
+  const [committedTableType, setCommittedTableType] = useState<XClusterTableType>();
 
-// Validation Constants
-const MIN_FREE_DISK_SPACE_GB = 100;
-
-export const CreateConfigModal = ({
-  onHide,
-  visible,
-  currentUniverseUUID
-}: ConfigureReplicationModalProps) => {
-  const [currentStep, setCurrentStep] = useState<FormStep>(FIRST_FORM_STEP);
-  const [bootstrapRequiredTableUUIDs, setBootstrapRequiredTableUUIDs] = useState<string[]>([]);
-
-  // SelectTablesStep.tsx state
-  // Need to store this in CreateConfigModal.tsx to support navigating back to this step.
-  const [tableType, setTableType] = useState<XClusterTableType>(DEFAULT_TABLE_TYPE);
-  const [selectedKeyspaces, setSelectedKeyspaces] = useState<string[]>([]);
-
+  const { t } = useTranslation('translation', { keyPrefix: TRANSLATION_KEY_PREFIX });
   const queryClient = useQueryClient();
-  const formik = useRef({} as FormikProps<CreateXClusterConfigFormValues>);
+  const theme = useTheme();
 
   const xClusterConfigMutation = useMutation(
-    (values: CreateXClusterConfigFormValues) => {
-      if (bootstrapRequiredTableUUIDs.length > 0) {
-        const bootstrapParams = {
-          tables: bootstrapRequiredTableUUIDs,
-          backupRequestParams: {
-            storageConfigUUID: values.storageConfig.value,
-            parallelism: values.parallelThreads,
-            sse: values.storageConfig.name === 'S3',
-            universeUUID: null
-          }
-        };
-        return createXClusterReplication(
-          values.targetUniverse.value.universeUUID,
-          currentUniverseUUID,
-          values.configName,
-          values.tableUUIDs.map(adaptTableUUID),
-          bootstrapParams
-        );
-      }
-      return createXClusterReplication(
-        values.targetUniverse.value.universeUUID,
-        currentUniverseUUID,
-        values.configName,
-        values.tableUUIDs.map(adaptTableUUID)
-      );
+    (formValues: CreateXClusterConfigFormValues) => {
+      const bootstrapRequiredTableUuids =
+        categorizedNeedBootstrapPerTableResponse?.bootstrapTableUuids ?? [];
+      const createXClusterConfigRequest: CreateXClusterConfigRequest = {
+        name: formValues.configName,
+        sourceUniverseUUID: sourceUniverseUuid,
+        targetUniverseUUID: formValues.targetUniverse.value.universeUUID,
+        configType: formValues.isTransactionalConfig
+          ? XClusterConfigType.TXN
+          : XClusterConfigType.BASIC,
+        tables: formValues.tableUuids,
+
+        ...(!formValues.skipBootstrap &&
+          bootstrapRequiredTableUuids.length > 0 && {
+            bootstrapParams: {
+              tables: bootstrapRequiredTableUuids,
+              allowBootstrap: true,
+
+              backupRequestParams: {
+                storageConfigUUID: formValues.storageConfig.value.uuid
+              }
+            }
+          })
+      };
+      return createXClusterConfig(createXClusterConfigRequest);
     },
     {
-      onSuccess: (resp) => {
-        closeModal();
-        // This newly xCluster config will be added to sourceXClusterConfigs for the current universe.
-        // Invalidate current universe query to fetch fresh sourceXClusterConfigs.
-        queryClient.invalidateQueries(['universe', currentUniverseUUID], { exact: true });
+      onSuccess: async (response, values) => {
+        const invalidateQueries = () => {
+          queryClient.invalidateQueries(drConfigQueryKey.detail(response.resourceUUID));
+          // The new DR config will update the sourceXClusterConfigs for the source universe and
+          // to targetXClusterConfigs for the target universe.
+          // Invalidate queries for the participating universes.
+          queryClient.invalidateQueries(universeQueryKey.detail(sourceUniverseUuid), {
+            exact: true
+          });
+          queryClient.invalidateQueries(
+            universeQueryKey.detail(values.targetUniverse.value.universeUUID),
+            { exact: true }
+          );
 
-        fetchTaskUntilItCompletes(resp.data.taskUUID, (err: boolean) => {
-          if (err) {
+          queryClient.invalidateQueries(drConfigQueryKey.detail(response.resourceUUID));
+        };
+        const handleTaskCompletion = (error: boolean) => {
+          if (error) {
             toast.error(
-              <span className={styles.alertMsg}>
+              <span className={toastStyles.toastMessage}>
                 <i className="fa fa-exclamation-circle" />
-                <span>Replication creation failed.</span>
-                <a href={`/tasks/${resp.data.taskUUID}`} rel="noopener noreferrer" target="_blank">
-                  View Details
+                <Typography variant="body2" component="span">
+                  {t('error.taskFailure')}
+                </Typography>
+                <a href={`/tasks/${response.taskUUID}`} rel="noopener noreferrer" target="_blank">
+                  {t('viewDetails', { keyPrefix: 'task' })}
                 </a>
               </span>
             );
+          } else {
+            toast.success(
+              <Typography variant="body2" component="span">
+                {t('success.taskSuccess')}
+              </Typography>
+            );
           }
-          queryClient.invalidateQueries(['universe', currentUniverseUUID], { exact: true });
-        });
+        };
+
+        toast.success(
+          <Typography variant="body2" component="span">
+            {t('success.requestSuccess')}
+          </Typography>
+        );
+        modalProps.onClose();
+        fetchTaskUntilItCompletes(response.taskUUID, handleTaskCompletion, invalidateQueries);
       },
-      onError: (err: any) => {
-        toast.error(err.response.data.error);
-      }
+      onError: (error: Error | AxiosError) =>
+        handleServerError(error, { customErrorLabel: t('error.requestFailureLabel') })
     }
   );
 
-  const resetModalState = () => {
-    setCurrentStep(FormStep.SELECT_TARGET_UNIVERSE);
-    setBootstrapRequiredTableUUIDs([]);
-    setTableType(DEFAULT_TABLE_TYPE);
-    setSelectedKeyspaces([]);
-  };
-
-  const closeModal = () => {
-    resetModalState();
-    onHide();
-  };
-
-  const tablesQuery = useQuery<YBTable[]>(['universe', currentUniverseUUID, 'tables'], () =>
-    fetchTablesInUniverse(currentUniverseUUID).then((res) => res.data)
+  const sourceUniverseTablesQuery = useQuery<YBTable[]>(
+    universeQueryKey.tables(sourceUniverseUuid, XCLUSTER_UNIVERSE_TABLE_FILTERS),
+    () =>
+      fetchTablesInUniverse(sourceUniverseUuid, XCLUSTER_UNIVERSE_TABLE_FILTERS).then(
+        (response) => response.data
+      )
+  );
+  const sourceUniverseQuery = useQuery<Universe>(universeQueryKey.detail(sourceUniverseUuid), () =>
+    api.fetchUniverse(sourceUniverseUuid)
   );
 
-  const universeQuery = useQuery<Universe>(['universe', currentUniverseUUID], () =>
-    api.fetchUniverse(currentUniverseUUID)
+  const customerUuid = localStorage.getItem('customerId') ?? '';
+  const runtimeConfigQuery = useQuery(runtimeConfigQueryKey.customerScope(customerUuid), () =>
+    api.fetchRuntimeConfigs(sourceUniverseUuid, true)
   );
 
-  const handleFormSubmit = async (
-    values: CreateXClusterConfigFormValues,
-    actions: FormikActions<CreateXClusterConfigFormValues>
-  ) => {
-    if (
-      currentStep === FormStep.ENABLE_REPLICATION ||
-      currentStep === FormStep.CONFIGURE_BOOTSTRAP
-    ) {
-      if (values.tableUUIDs.length === 0) {
-        toast.error('Configuration must have at least one table');
-        actions.setSubmitting(false);
-        return;
-      }
-      xClusterConfigMutation.mutate(values);
-    } else if (currentStep === FormStep.SELECT_TARGET_UNIVERSE) {
-      setCurrentStep(FormStep.SELECT_TABLES);
-    } else if (currentStep === FormStep.SELECT_TABLES) {
-      if (bootstrapRequiredTableUUIDs.length > 0) {
-        setCurrentStep(FormStep.CONFIGURE_BOOTSTRAP);
-      } else {
-        setCurrentStep(FormStep.ENABLE_REPLICATION);
-      }
+  const formMethods = useForm<CreateXClusterConfigFormValues>({
+    defaultValues: {
+      namespaceUuids: [],
+      tableUuids: [],
+      tableType: {
+        label: TableTypeLabel[TableType.PGSQL_TABLE_TYPE],
+        value: TableType.PGSQL_TABLE_TYPE
+      },
+      isTransactionalConfig: true
     }
-    actions.setSubmitting(false);
-  };
+  });
 
-  const handleBackNavigation = () => {
-    switch (currentStep) {
-      case FormStep.SELECT_TABLES:
-        setCurrentStep(FormStep.SELECT_TARGET_UNIVERSE);
-        break;
-      case FormStep.ENABLE_REPLICATION:
-      case FormStep.CONFIGURE_BOOTSTRAP:
-        setCurrentStep(FormStep.SELECT_TABLES);
-    }
-  };
-
-  if (tablesQuery.isLoading || universeQuery.isLoading) {
+  const modalTitle = t('title');
+  if (
+    sourceUniverseTablesQuery.isLoading ||
+    sourceUniverseTablesQuery.isIdle ||
+    sourceUniverseQuery.isLoading ||
+    sourceUniverseQuery.isIdle ||
+    runtimeConfigQuery.isLoading ||
+    runtimeConfigQuery.isIdle
+  ) {
     return (
       <YBModal
-        size="large"
-        title={MODAL_TITLE}
-        visible={visible}
-        onHide={() => {
-          closeModal();
-        }}
-        submitLabel={currentStep.submitLabel}
+        title={modalTitle}
+        submitTestId={`${MODAL_NAME}-SubmitButton`}
+        maxWidth="xl"
+        size="md"
+        overrideWidth="960px"
+        {...modalProps}
       >
         <YBLoading />
       </YBModal>
@@ -229,226 +237,286 @@ export const CreateConfigModal = ({
   }
 
   if (
-    tablesQuery.isError ||
-    universeQuery.isError ||
-    tablesQuery.data === undefined ||
-    universeQuery.data === undefined
+    sourceUniverseTablesQuery.isError ||
+    sourceUniverseQuery.isError ||
+    runtimeConfigQuery.isError
   ) {
+    const errorMessage = runtimeConfigQuery.isError
+      ? t('failedToFetchCustomerRuntimeConfig', { keyPrefix: 'queryError' })
+      : t('failedToFetchSourceUniverse', {
+          keyPrefix: 'clusterDetail.xCluster.error',
+          universeUuid: sourceUniverseUuid
+        });
     return (
       <YBModal
-        size="large"
-        title={MODAL_TITLE}
-        visible={visible}
-        onHide={() => {
-          closeModal();
-        }}
+        title={modalTitle}
+        submitTestId={`${MODAL_NAME}-SubmitButton`}
+        maxWidth="xl"
+        size="md"
+        overrideWidth="960px"
+        {...modalProps}
       >
-        <YBErrorIndicator />
+        <YBErrorIndicator customErrorMessage={errorMessage} />
       </YBModal>
     );
   }
 
-  return (
-    <YBModalForm
-      size="large"
-      title={MODAL_TITLE}
-      visible={visible}
-      validate={(values: CreateXClusterConfigFormValues) =>
-        validateForm(values, currentStep, universeQuery.data, setBootstrapRequiredTableUUIDs)
-      }
-      // Perform validation for select table when user submits.
-      validateOnChange={currentStep !== FormStep.SELECT_TABLES}
-      validateOnBlur={currentStep !== FormStep.SELECT_TABLES}
-      onFormSubmit={handleFormSubmit}
-      initialValues={INITIAL_VALUES}
-      submitLabel={currentStep.submitLabel}
-      onHide={() => {
-        closeModal();
-      }}
-      footerAccessory={
-        currentStep === FIRST_FORM_STEP ? (
-          <YBButton btnClass="btn" btnText={'Cancel'} onClick={closeModal} />
-        ) : (
-          <YBButton btnClass="btn" btnText={'Back'} onClick={handleBackNavigation} />
-        )
-      }
-      render={(formikProps: FormikProps<CreateXClusterConfigFormValues>) => {
-        // workaround for outdated version of Formik to access form methods outside of <Formik>
-        formik.current = formikProps;
+  /**
+   * Clear any existing table selection errors/warnings
+   * The new table/namespace selection will need to be (re)validated.
+   */
+  const clearTableSelectionFeedback = () => {
+    setTableSelectionError(null);
+    setTableSelectionWarning(null);
+    setIsTableSelectionValidated(false);
+  };
+  const setSelectedNamespaceUuids = (namespaces: string[]) => {
+    clearTableSelectionFeedback();
+    formMethods.clearErrors('namespaceUuids');
 
-        if (tablesQuery.isLoading || universeQuery.isLoading) {
-          return <YBLoading />;
+    // We will run any required validation on selected namespaces & tables all at once when the
+    // user clicks on the 'Validate Selection' button.
+    formMethods.setValue('namespaceUuids', namespaces, { shouldValidate: false });
+  };
+  const setSelectedTableUuids = (tableUuids: string[]) => {
+    // Clear any existing errors.
+    // The new table/namespace selection will need to be (re)validated.
+    clearTableSelectionFeedback();
+    formMethods.clearErrors('tableUuids');
+
+    // We will run any required validation on selected namespaces & tables all at once when the
+    // user clicks on the 'Validate Selection' button.
+    formMethods.setValue('tableUuids', tableUuids, { shouldValidate: false });
+  };
+
+  /**
+   * Clear table/namespace selection.
+   */
+  const resetTableSelection = () => {
+    setSelectedTableUuids([]);
+    setSelectedNamespaceUuids([]);
+    setIsTableSelectionValidated(false);
+  };
+
+  const onSubmit = async (formValues: CreateXClusterConfigFormValues) => {
+    // When the user changes target universe or table type, the old table selection is no longer valid.
+    const isTableSelectionInvalidated =
+      formValues.targetUniverse.value.universeUUID !== committedTargetUniverseUuid ||
+      formValues.tableType.value !== committedTableType;
+    switch (currentFormStep) {
+      case FormStep.SELECT_TARGET_UNIVERSE:
+        if (isTableSelectionInvalidated) {
+          resetTableSelection();
+        }
+        if (formValues.targetUniverse.value.universeUUID !== committedTargetUniverseUuid) {
+          setCommittedTargetUniverseUuid(formValues.targetUniverse.value.universeUUID);
+        }
+        if (formValues.tableType.value !== committedTableType) {
+          setCommittedTableType(formValues.tableType.value);
+        }
+        setCurrentFormStep(FormStep.SELECT_TABLES);
+        return;
+      case FormStep.SELECT_TABLES:
+        setTableSelectionError(null);
+        if (formValues.tableUuids.length <= 0) {
+          formMethods.setError('tableUuids', {
+            type: 'min',
+            message: t('error.validationMinimumNamespaceUuids.title', {
+              keyPrefix: TRANSLATION_KEY_PREFIX_SELECT_TABLE
+            })
+          });
+          // The TableSelect component expects error objects with title and body fields.
+          // React-hook-form only allows string error messages.
+          // Thus, we need an store these error objects separately.
+          setTableSelectionError({
+            title: t('error.validationMinimumNamespaceUuids.title', {
+              keyPrefix: TRANSLATION_KEY_PREFIX_SELECT_TABLE
+            }),
+            body: t('error.validationMinimumNamespaceUuids.body', {
+              keyPrefix: TRANSLATION_KEY_PREFIX_SELECT_TABLE
+            })
+          });
+          return;
         }
 
-        if (
-          tablesQuery.isError ||
-          universeQuery.isError ||
-          tablesQuery.data === undefined ||
-          universeQuery.data === undefined
-        ) {
-          return <YBErrorIndicator />;
-        }
+        if (!isTableSelectionValidated) {
+          let xClusterConfigNeedBootstrapPerTableResponse: XClusterConfigNeedBootstrapPerTableResponse = {};
+          const hasSelectionError = false;
 
-        switch (currentStep) {
-          case FormStep.SELECT_TARGET_UNIVERSE:
-            return (
-              <SelectTargetUniverseStep
-                {...{
-                  formik,
-                  currentUniverseUUID
-                }}
-              />
-            );
-          case FormStep.SELECT_TABLES:
-          case FormStep.ENABLE_REPLICATION:
-            return (
-              <SelectTablesStep
-                {...{
-                  formik,
-                  sourceTables: tablesQuery.data,
-                  currentUniverseUUID,
-                  currentStep,
-                  setCurrentStep,
-                  tableType,
-                  setTableType,
-                  selectedKeyspaces,
-                  setSelectedKeyspaces
-                }}
-              />
-            );
-          case FormStep.CONFIGURE_BOOTSTRAP:
-            return (
-              <ConfigureBootstrapStep
-                {...{
-                  formik,
-                  bootstrapRequiredTableUUIDs,
-                  sourceTables: tablesQuery.data
-                }}
-              />
-            );
-        }
-
-        // Needed to resolve "not all code paths return a value" error.
-        // This return should not be reach as we are covering all possible values
-        // of FormStep in the switch.
-        return <YBErrorIndicator />;
-      }}
-    />
-  );
-};
-
-const validateForm = async (
-  values: CreateXClusterConfigFormValues,
-  formStep: FormStep,
-  currentUniverse: Universe,
-  setBootstrapRequiredTableUUIDs: (tableUUIDs: string[]) => void
-) => {
-  // Since our formik verision is < 2.0 , we need to throw errors instead of
-  // returning them in custom async validation:
-  // https://github.com/jaredpalmer/formik/issues/1392#issuecomment-606301031
-
-  switch (formStep) {
-    case FormStep.SELECT_TARGET_UNIVERSE: {
-      const errors: Partial<CreateXClusterConfigFormErrors> = {};
-
-      if (!values.configName) {
-        errors.configName = 'Replication name is required.';
-      }
-      if (!values.targetUniverse) {
-        errors.targetUniverse = 'Target universe is required.';
-      } else if (
-        getPrimaryCluster(values.targetUniverse.value.universeDetails.clusters)?.userIntent
-          ?.enableNodeToNodeEncrypt !==
-        getPrimaryCluster(currentUniverse?.universeDetails.clusters)?.userIntent
-          ?.enableNodeToNodeEncrypt
-      ) {
-        errors.targetUniverse =
-          'The target universe must have the same Encryption in-Transit (TLS) configuration as the source universe. Edit the TLS configuration to proceed.';
-      } else if (
-        !_.isEqual(
-          values.targetUniverse?.value?.universeDetails?.encryptionAtRestConfig,
-          currentUniverse?.universeDetails?.encryptionAtRestConfig
-        )
-      ) {
-        errors.targetUniverse =
-          'The target universe must have the same key management system (KMS) configuration as the source universe. Edit the KMS configuration to proceed.';
-      }
-
-      throw errors;
-    }
-    case FormStep.SELECT_TABLES: {
-      const errors: Partial<CreateXClusterConfigFormErrors> = {};
-
-      if (!values.tableUUIDs || values.tableUUIDs.length === 0) {
-        errors.tableUUIDs = {
-          title: 'No tables selected.',
-          body: 'Select at least 1 table to proceed'
-        };
-      }
-
-      // Check if bootstrap is required, for each selected table
-      const bootstrapTests = await isBootstrapRequired(
-        currentUniverse.universeUUID,
-        values.tableUUIDs.map(adaptTableUUID)
-      );
-
-      const bootstrapTableUUIDs = bootstrapTests.reduce(
-        (bootstrapTableUUIDs: string[], bootstrapTest) => {
-          // Each bootstrapTest response is of the form {<tableUUID>: boolean}.
-          // Until the backend supports multiple tableUUIDs per request, the response object
-          // will only contain one tableUUID.
-          // Note: Once backend does support multiple tableUUIDs per request, we will replace this
-          //       logic with one that simply filters on the keys (tableUUIDs) of the returned object.
-          const tableUUID = Object.keys(bootstrapTest)[0];
-
-          if (bootstrapTest[tableUUID]) {
-            bootstrapTableUUIDs.push(tableUUID);
+          if (formValues.tableUuids.length) {
+            try {
+              xClusterConfigNeedBootstrapPerTableResponse = await isBootstrapRequired(
+                sourceUniverseUuid,
+                targetUniverseUuid,
+                formValues.tableUuids,
+                formValues.isTransactionalConfig
+                  ? XClusterConfigType.TXN
+                  : XClusterConfigType.BASIC,
+                true /* includeDetails */
+              );
+              const categorizedNeedBootstrapPerTableResponse = getCategorizedNeedBootstrapPerTableResponse(
+                xClusterConfigNeedBootstrapPerTableResponse
+              );
+              setCategorizedNeedBootstrapPerTableResponse(categorizedNeedBootstrapPerTableResponse);
+            } catch (error: any) {
+              toast.error(
+                <Box display="flex" flexDirection="column" gridGap={theme.spacing(1)}>
+                  <div className={toastStyles.toastMessage}>
+                    <i className="fa fa-exclamation-circle" />
+                    <Typography variant="body2" component="span">
+                      {t('error.failedToFetchIsBootstrapRequired.title', {
+                        keyPrefix: TRANSLATION_KEY_PREFIX_SELECT_TABLE
+                      })}
+                    </Typography>
+                  </div>
+                  <Typography variant="body2" component="div">
+                    {t('error.failedToFetchIsBootstrapRequired.body', {
+                      keyPrefix: TRANSLATION_KEY_PREFIX_SELECT_TABLE
+                    })}
+                  </Typography>
+                  <Typography variant="body2" component="div">
+                    {error.message}
+                  </Typography>
+                </Box>
+              );
+              setTableSelectionWarning({
+                title: t('error.failedToFetchIsBootstrapRequired.title', {
+                  keyPrefix: TRANSLATION_KEY_PREFIX_SELECT_TABLE
+                }),
+                body: t('error.failedToFetchIsBootstrapRequired.body', {
+                  keyPrefix: TRANSLATION_KEY_PREFIX_SELECT_TABLE
+                })
+              });
+            }
           }
-          return bootstrapTableUUIDs;
-        },
-        []
-      );
-      setBootstrapRequiredTableUUIDs(bootstrapTableUUIDs);
 
-      // If some tables require bootstrapping, we need to validate the source universe has enough
-      // disk space.
-      if (bootstrapTableUUIDs.length > 0) {
-        // Disk space validation
-        const currentUniverseNodePrefix = currentUniverse.universeDetails.nodePrefix;
-        const diskUsageMetric = await fetchUniverseDiskUsageMetric(currentUniverseNodePrefix);
-        const freeSpaceTrace = diskUsageMetric.disk_usage.data.find(
-          (trace) => trace.name === 'free'
-        );
-        const freeDiskSpace = freeSpaceTrace?.y[freeSpaceTrace.y.length - 1];
+          if (hasSelectionError === false) {
+            setIsTableSelectionValidated(true);
+          }
 
-        if (freeDiskSpace !== undefined && freeDiskSpace < MIN_FREE_DISK_SPACE_GB) {
-          errors.tableUUIDs = {
-            title: 'Insufficient disk space.',
-            body: `Some selected tables require bootstrapping. Please ensure the source universe has at least ${MIN_FREE_DISK_SPACE_GB} GB of free disk space.`
-          };
+          setCurrentFormStep(FormStep.BOOTSTRAP_SUMMARY);
+          return;
         }
-      }
-
-      throw errors;
+        setCurrentFormStep(FormStep.BOOTSTRAP_SUMMARY);
+        return;
+      case FormStep.BOOTSTRAP_SUMMARY:
+        setCurrentFormStep(FormStep.CONFIRM_ALERT);
+        return;
+      case FormStep.CONFIRM_ALERT:
+        return xClusterConfigMutation.mutateAsync(formValues);
+      default:
+        return assertUnreachableCase(currentFormStep);
     }
-    case FormStep.CONFIGURE_BOOTSTRAP: {
-      const errors: Partial<CreateXClusterConfigFormErrors> = {};
-      if (!values.storageConfig) {
-        errors.storageConfig = 'Backup storage configuration is required.';
-      }
-      const shouldValidateParallelThread =
-        values.parallelThreads && isYbcEnabledUniverse(currentUniverse?.universeDetails);
-      if (shouldValidateParallelThread && values.parallelThreads > PARALLEL_THREADS_RANGE.MAX) {
-        errors.parallelThreads = `Parallel threads must be less than or equal to ${PARALLEL_THREADS_RANGE.MAX}`;
-      } else if (
-        shouldValidateParallelThread &&
-        values.parallelThreads > PARALLEL_THREADS_RANGE.MIN
-      ) {
-        errors.parallelThreads = `Parallel threads must be greater than or equal to ${PARALLEL_THREADS_RANGE.MIN}`;
-      }
+  };
+  const handleBackNavigation = () => {
+    // We can clear errors here because prior steps have already been validated
+    // and future steps will be revalidated when the user clicks the next page button.
+    formMethods.clearErrors();
 
-      throw errors;
+    switch (currentFormStep) {
+      case FIRST_FORM_STEP:
+        return;
+      case FormStep.SELECT_TABLES:
+        setCurrentFormStep(FormStep.SELECT_TARGET_UNIVERSE);
+        return;
+      case FormStep.BOOTSTRAP_SUMMARY:
+        setCurrentFormStep(FormStep.SELECT_TABLES);
+        return;
+      case FormStep.CONFIRM_ALERT:
+        setCurrentFormStep(FormStep.BOOTSTRAP_SUMMARY);
+        return;
+      default:
+        assertUnreachableCase(currentFormStep);
     }
-  }
-  return {};
+  };
+
+  const tableType = formMethods.watch('tableType')?.value;
+  const getFormSubmitLabel = (formStep: FormStep) => {
+    switch (formStep) {
+      case FormStep.SELECT_TARGET_UNIVERSE:
+        return t(
+          `step.selectTargetUniverse.submitButton.${
+            tableType === TableType.PGSQL_TABLE_TYPE ? 'selectDatabases' : 'selectTables'
+          }`
+        );
+      case FormStep.SELECT_TABLES:
+        return t('step.selectTables.submitButton.bootstrapSummary');
+      case FormStep.BOOTSTRAP_SUMMARY:
+        return t('step.bootstrapSummary.submitButton');
+      case FormStep.CONFIRM_ALERT:
+        return t('confirmAlert.submitButton', { keyPrefix: 'clusterDetail.xCluster.shared' });
+      default:
+        return assertUnreachableCase(formStep);
+    }
+  };
+
+  const selectedTableUuids = formMethods.watch('tableUuids');
+  const selectedNamespaceUuids = formMethods.watch('namespaceUuids');
+  const targetUniverseUuid = formMethods.watch('targetUniverse.value.universeUUID');
+  const isTransactionalConfig = formMethods.watch('isTransactionalConfig');
+  const sourceUniverse = sourceUniverseQuery.data;
+  const submitLabel = getFormSubmitLabel(currentFormStep);
+
+  const xClusterConfigType = isTransactionalConfig
+    ? XClusterConfigType.TXN
+    : XClusterConfigType.BASIC;
+  const isFormDisabled = formMethods.formState.isSubmitting;
+  return (
+    <YBModal
+      title={modalTitle}
+      submitLabel={submitLabel}
+      buttonProps={{ primary: { disabled: isFormDisabled } }}
+      onSubmit={formMethods.handleSubmit(onSubmit)}
+      submitTestId={`${MODAL_NAME}-SubmitButton`}
+      isSubmitting={formMethods.formState.isSubmitting}
+      showSubmitSpinner={
+        currentFormStep === FormStep.SELECT_TABLES || currentFormStep === FormStep.CONFIRM_ALERT
+      }
+      maxWidth="xl"
+      size={
+        ([
+          FormStep.SELECT_TARGET_UNIVERSE,
+          FormStep.SELECT_TABLES,
+          FormStep.BOOTSTRAP_SUMMARY
+        ] as FormStep[]).includes(currentFormStep)
+          ? 'fit'
+          : 'md'
+      }
+      overrideWidth="960px"
+      footerAccessory={
+        <>
+          {currentFormStep !== FIRST_FORM_STEP && (
+            <YBButton variant="secondary" onClick={handleBackNavigation}>
+              {t('back', { keyPrefix: 'common' })}
+            </YBButton>
+          )}
+        </>
+      }
+      {...modalProps}
+    >
+      <FormProvider {...formMethods}>
+        <CurrentFormStep
+          currentFormStep={currentFormStep}
+          isFormDisabled={isFormDisabled}
+          sourceUniverse={sourceUniverse}
+          tableSelectProps={{
+            configAction: XClusterConfigAction.CREATE,
+            isDrInterface: false,
+            initialNamespaceUuids: [],
+            selectedNamespaceUuids: selectedNamespaceUuids,
+            selectedTableUuids: selectedTableUuids,
+            selectionError: tableSelectionError,
+            selectionWarning: tableSelectionWarning,
+            setSelectedNamespaceUuids: setSelectedNamespaceUuids,
+            setSelectedTableUuids: setSelectedTableUuids,
+            sourceUniverseUuid: sourceUniverseUuid,
+            tableType: tableType,
+            xClusterConfigType: xClusterConfigType,
+            targetUniverseUuid: targetUniverseUuid
+          }}
+          categorizedNeedBootstrapPerTableResponse={categorizedNeedBootstrapPerTableResponse}
+        />
+      </FormProvider>
+    </YBModal>
+  );
 };

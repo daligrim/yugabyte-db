@@ -28,7 +28,7 @@
 #include "yb/rpc/messenger.h"
 #include "yb/rpc/rpc.h"
 
-#include "yb/server/secure.h"
+#include "yb/rpc/secure.h"
 
 #include "yb/util/atomic.h"
 #include "yb/util/locks.h"
@@ -37,6 +37,8 @@
 #include "yb/util/result.h"
 #include "yb/util/strongly_typed_uuid.h"
 #include "yb/util/threadpool.h"
+
+using std::string;
 
 DECLARE_bool(TEST_running_test);
 
@@ -63,7 +65,7 @@ Result<std::unique_ptr<rpc::Messenger>> CreateClientMessenger(
   builder.set_metric_entity(metric_entity);
   builder.UseDefaultConnectionContextFactory(parent_mem_tracker);
   if (secure_context) {
-    server::ApplySecureContext(secure_context, &builder);
+    rpc::ApplySecureContext(secure_context, &builder);
   }
   auto messenger = VERIFY_RESULT(builder.Build());
   if (PREDICT_FALSE(FLAGS_TEST_running_test)) {
@@ -72,24 +74,22 @@ Result<std::unique_ptr<rpc::Messenger>> CreateClientMessenger(
   return messenger;
 }
 
-Result<std::vector<internal::RemoteTabletPtr>> FilterTabletsByHashPartitionKeyRange(
+std::vector<internal::RemoteTabletPtr> FilterTabletsByKeyRange(
     const std::vector<internal::RemoteTabletPtr>& all_tablets,
     const std::string& partition_key_start,
     const std::string& partition_key_end) {
-  RETURN_NOT_OK(PartitionSchema::IsValidHashPartitionRange(partition_key_start,
-                                                           partition_key_end));
   std::vector<internal::RemoteTabletPtr> filtered_results;
   for (const auto& remote_tablet : all_tablets) {
-    if (PartitionSchema::GetOverlap(
+    if (dockv::PartitionSchema::HasOverlap(
             remote_tablet->partition().partition_key_start(),
-            remote_tablet->partition().partition_key_end(), partition_key_start,
+            remote_tablet->partition().partition_key_end(),
+            partition_key_start,
             partition_key_end)) {
       filtered_results.push_back(remote_tablet);
     }
   }
   return filtered_results;
 }
-
 
 } // namespace client
 } // namespace yb

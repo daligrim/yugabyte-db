@@ -29,8 +29,7 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_UTIL_VERSION_INFO_H
-#define YB_UTIL_VERSION_INFO_H
+#pragma once
 
 #include <mutex>
 #include <string>
@@ -65,6 +64,8 @@ class VersionInfo {
   // Init version data.
   static Status Init();
 
+  static uint32 YsqlMajorVersion();
+
  private:
   // Get the git hash for this build. If the working directory was dirty when
   // YB was built, also appends "-dirty".
@@ -85,4 +86,3 @@ class VersionInfo {
 };
 
 } // namespace yb
-#endif /* YB_UTIL_VERSION_INFO_H */

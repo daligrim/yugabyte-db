@@ -5,14 +5,18 @@ package com.yugabyte.yw.models;
 import com.yugabyte.yw.common.ExtraMigrationManager;
 import io.ebean.Finder;
 import io.ebean.Model;
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.Id;
 import java.util.List;
-import javax.persistence.Column;
-import javax.persistence.Entity;
-import javax.persistence.Id;
+import lombok.Getter;
+import lombok.Setter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 @Entity
+@Getter
+@Setter
 public class ExtraMigration extends Model {
   ExtraMigrationManager extraMigrationManager;
 
@@ -20,7 +24,7 @@ public class ExtraMigration extends Model {
 
   @Id
   @Column(nullable = false, unique = true)
-  public String migration;
+  private String migration;
 
   public static final Finder<String, ExtraMigration> find =
       new Finder<String, ExtraMigration>(ExtraMigration.class) {};
@@ -31,9 +35,9 @@ public class ExtraMigration extends Model {
 
   public void run(ExtraMigrationManager extraMigrationManager) throws ReflectiveOperationException {
     this.extraMigrationManager = extraMigrationManager;
-    LOG.info("Running migration '{}'.", this.migration);
-    ExtraMigrationManager.class.getMethod(this.migration).invoke(this.extraMigrationManager);
-    LOG.info("Completed migration '{}'.", this.migration);
+    LOG.info("Running migration '{}'.", this.getMigration());
+    ExtraMigrationManager.class.getMethod(this.getMigration()).invoke(this.extraMigrationManager);
+    LOG.info("Completed migration '{}'.", this.getMigration());
     this.delete();
   }
 }

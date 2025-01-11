@@ -4,7 +4,7 @@ headerTitle: EXPLAIN
 linkTitle: EXPLAIN
 description: Use the EXPLAIN statement to show the execution plan for an statement. If the ANALYZE option is used, the statement will be executed, rather than just planned.
 menu:
-  stable:
+  stable_api:
     identifier: perf_explain
     parent: statements
 type: docs
@@ -12,41 +12,50 @@ type: docs
 
 ## Synopsis
 
-Use the `EXPLAIN` statement to show the execution plan for an statement. If the `ANALYZE` option is used, the statement will be executed, rather than just planned. In that case, execution information (rather than just the planner's estimates) is added to the `EXPLAIN` result.
+Use the `EXPLAIN` statement to show the execution plan for a statement. If the `ANALYZE` option is used, the statement will be executed, rather than just planned. In that case, execution information (rather than just the planner's estimates) is added to the `EXPLAIN` result.
+
+{{< warning title="DML vs DDL" >}}
+The `EXPLAIN` statement is designed to work primarily for DML statements (for example, `SELECT`, `INSERT`, and so on). DDL statements are _not_ explainable and in cases where DDL and DML are combined, the EXPLAIN statement shows only an approximation. For example, `EXPLAIN` on `SELECT * FROM <TABLE-1> INTO <TABLE-2>` provides only an approximation as `INTO` is a DDL statement.
+{{</ warning >}}
 
 ## Syntax
 
-<ul class="nav nav-tabs nav-tabs-yb">
-  <li >
-    <a href="#grammar" class="nav-link active" id="grammar-tab" data-toggle="tab" role="tab" aria-controls="grammar" aria-selected="true">
-      <i class="fas fa-file-alt" aria-hidden="true"></i>
-      Grammar
-    </a>
-  </li>
-  <li>
-    <a href="#diagram" class="nav-link" id="diagram-tab" data-toggle="tab" role="tab" aria-controls="diagram" aria-selected="false">
-      <i class="fas fa-project-diagram" aria-hidden="true"></i>
-      Diagram
-    </a>
-  </li>
-</ul>
-
-<div class="tab-content">
-  <div id="grammar" class="tab-pane fade show active" role="tabpanel" aria-labelledby="grammar-tab">
-  {{% includeMarkdown "../../syntax_resources/the-sql-language/statements/explain,option.grammar.md" %}}
-  </div>
-  <div id="diagram" class="tab-pane fade" role="tabpanel" aria-labelledby="diagram-tab">
-  {{% includeMarkdown "../../syntax_resources/the-sql-language/statements/explain,option.diagram.md" %}}
-  </div>
-</div>
+{{%ebnf%}}
+  explain,
+  option
+{{%/ebnf%}}
 
 ## Semantics
 
-Where statement is the target statement (see more [here](../dml_select/)).
+Where statement is the target statement (see [SELECT](../dml_select/)).
 
 ### ANALYZE
 
-Execute the statement and show actual run times and other statistics.
+Execute the statement and show actual run times and other statistics (default: `FALSE`).
+
+### VERBOSE
+
+Present more details about the plan, such as the output column list for each node in the plan tree, schema-qualify table and function names, ensure labeling variables in expressions with their range table alias, and consistently indicate the name of each trigger for which statistics are shown (default: `FALSE`).
+
+### BUFFERS
+
+Include information on buffer usage. Specifically, include the number of shared blocks hit, read, dirtied, and written; the number of local blocks hit, read, dirtied, and written; and the number of temporary blocks read and written (default: `FALSE`).
+
+### COSTS
+
+Incorporate details about the anticipated startup and total expenses for each plan node, along with the estimated number of rows and the projected width of each row (default: `ON`).
+
+### DIST
+
+Display additional runtime statistics related to the distributed storage layer as seen at the query layer. The flag also provides more implementation-specific insights into the distributed nature of query execution (default: `FALSE`).
+
+### DEBUG
+
+Display low-level runtime statistics related to the distributed storage layer (default: `FALSE`).
+
+### FORMAT
+
+Define the desired output format, choosing from TEXT, XML, JSON, or YAML. Non-text output retains the same information as the text format, but is more programmatically accessible (default: `TEXT`).
 
 ## Examples
 

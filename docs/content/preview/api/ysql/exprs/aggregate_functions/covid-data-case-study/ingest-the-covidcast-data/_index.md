@@ -3,9 +3,9 @@ title: Ingest the COVIDcast data into YugabyteDB
 linkTitle: Ingest the COVIDcast data
 headerTitle: Ingesting, checking, and combining the COVIDcast data
 description: Ingest the COVIDcast data, check it for format compliance, and to combine it all into the single "covidcast_fb_survey_results" table
-image: /images/section_icons/api/ysql.png
+image: /images/section_icons/api/subsection.png
 menu:
-  preview:
+  preview_api:
     identifier: ingest-the-covidcast-data
     parent: covid-data-case-study
     weight: 20

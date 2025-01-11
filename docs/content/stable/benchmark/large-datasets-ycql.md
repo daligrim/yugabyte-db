@@ -3,8 +3,7 @@ title: Benchmark YCQL performance with large datasets
 headerTitle: Large datasets
 linkTitle: Large datasets
 description: Benchmark YCQL performance with large datasets
-image: /images/section_icons/architecture/concepts.png
-headcontent: Benchmark YugabyteDB with large data sets.
+headcontent: Benchmark YCQL performance with large datasets
 menu:
   stable:
     identifier: large-datasets-1-ycql
@@ -13,23 +12,7 @@ menu:
 type: docs
 ---
 
-<ul class="nav nav-tabs-alt nav-tabs-yb">
-
-  <li >
-    <a href="{{< relref "./large-datasets-ysql.md" >}}" class="nav-link">
-      <i class="icon-postgres" aria-hidden="true"></i>
-      YSQL
-    </a>
-  </li>
-
-  <li >
-    <a href="{{< relref "./large-datasets-ycql.md" >}}" class="nav-link active">
-      <i class="icon-cassandra" aria-hidden="true"></i>
-      YCQL
-    </a>
-  </li>
-
-</ul>
+{{<api-tabs list="ycql">}}
 
 Use this benchmark to understand the performance, failure, and scaling characteristics of YugabyteDB with a massive dataset (multiple TB per node). In order to accomplish that, you will do the following:
 
@@ -99,7 +82,7 @@ The graph below shows the steady growth in `SSTables` size at a node from `Sep 4
 
 ## Final data set size
 
-The figure below is from the `yb-master` Admin UI that shows the tablet servers, number of tablets on each, number of tablet leaders, and size of the on-disk `SSTable` files.
+The following illustration is from the yb-master Admin UI that shows the tablet servers, number of tablets on each, number of tablet leaders, and size of the on-disk `SSTable` files.
 
 {{< note title="Note" >}}
 

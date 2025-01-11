@@ -33,11 +33,14 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.inject.Inject;
 import com.google.inject.Singleton;
+import com.typesafe.config.Config;
 import com.yugabyte.yw.cloud.AbstractInitializer;
 import com.yugabyte.yw.cloud.PublicCloudConstants;
 import com.yugabyte.yw.cloud.PublicCloudConstants.Architecture;
-import com.yugabyte.yw.common.ConfigHelper;
 import com.yugabyte.yw.common.PlatformServiceException;
+import com.yugabyte.yw.common.config.GlobalConfKeys;
+import com.yugabyte.yw.common.config.ProviderConfKeys;
+import com.yugabyte.yw.common.config.RuntimeConfGetter;
 import com.yugabyte.yw.models.InstanceType;
 import com.yugabyte.yw.models.InstanceType.InstanceTypeDetails;
 import com.yugabyte.yw.models.InstanceType.VolumeType;
@@ -50,12 +53,14 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.UUID;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
 import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream;
 import play.Environment;
 import play.libs.Json;
 
+@Slf4j
 // TODO: move pricing data fetch to ybcloud.
 @Singleton
 public class AWSInitializer extends AbstractInitializer {
@@ -64,7 +69,9 @@ public class AWSInitializer extends AbstractInitializer {
 
   @Inject Environment environment;
 
-  @Inject ConfigHelper configHelper;
+  @Inject Config config;
+
+  @Inject RuntimeConfGetter runtimeConfGetter;
 
   /**
    * Entry point to initialize AWS. This will create the various InstanceTypes and their
@@ -78,20 +85,23 @@ public class AWSInitializer extends AbstractInitializer {
     Provider provider = Provider.get(customerUUID, providerUUID);
     InitializationContext context = new InitializationContext(provider);
 
-    LOG.info("Initializing AWS instance type and pricing info.");
+    LOG.info(
+        "Initializing AWS instance type and pricing info for regions {}",
+        Json.toJson(provider.getRegions()));
     LOG.info("This operation may take a few minutes...");
     // Get the price Json object stored locally at conf/aws_pricing.
-    for (Region region : provider.regions) {
+    for (Region region : provider.getRegions()) {
       JsonNode regionJson = null;
 
-      String pricingFileName = "aws_pricing/" + region.code + ".tar.gz";
+      String pricingFileName = "aws_pricing/" + region.getCode() + ".tar.gz";
+
       try (InputStream pricingStream = environment.resourceAsStream(pricingFileName);
           GzipCompressorInputStream gzipStream = new GzipCompressorInputStream(pricingStream);
           TarArchiveInputStream regionStream = new TarArchiveInputStream(gzipStream)) {
         TarArchiveEntry currentEntry;
         boolean pricingFileFound = false;
         while ((currentEntry = regionStream.getNextTarEntry()) != null) {
-          if (currentEntry.getName().equals(region.code)) {
+          if (currentEntry.getName().equals(region.getCode())) {
             pricingFileFound = true;
             break;
           } else {
@@ -106,10 +116,13 @@ public class AWSInitializer extends AbstractInitializer {
         ObjectMapper mapper = new ObjectMapper();
         regionJson = mapper.readTree(regionStream);
       } catch (IOException e) {
-        LOG.error("Failed to parse region metadata from region {}", region.code);
+        LOG.error("Failed to parse region metadata from region {}", region.getCode());
         throw new PlatformServiceException(
             INTERNAL_SERVER_ERROR,
-            "Failed to parse region metadata from region " + region.code + ". " + e.getMessage());
+            "Failed to parse region metadata from region "
+                + region.getCode()
+                + ". "
+                + e.getMessage());
       }
 
       // The products sub-document has the list of EC2 products along with the SKU, its format is:
@@ -135,7 +148,7 @@ public class AWSInitializer extends AbstractInitializer {
 
       // Create the instance types.
       storeInstanceTypeInfoToDB(context);
-      LOG.info("Successfully stored pricing info for region {}", region.code);
+      LOG.info("Successfully stored pricing info for region {}", region.getCode());
     }
     LOG.info("Successfully finished parsing pricing info.");
   }
@@ -174,7 +187,7 @@ public class AWSInitializer extends AbstractInitializer {
           Region.find
               .query()
               .where()
-              .eq("provider_uuid", context.getProvider().uuid)
+              .eq("provider_uuid", context.getProvider().getUuid())
               .eq("name", regionJson.textValue())
               .findOne();
       if (region == null) {
@@ -262,7 +275,8 @@ public class AWSInitializer extends AbstractInitializer {
     priceDetails.effectiveDate = product.get("effectiveDate").textValue();
 
     // Save to db
-    PriceComponent.upsert(context.getProvider().uuid, region.code, componentCode, priceDetails);
+    PriceComponent.upsert(
+        context.getProvider().getUuid(), region.getCode(), componentCode, priceDetails);
   }
 
   /**
@@ -276,14 +290,12 @@ public class AWSInitializer extends AbstractInitializer {
    *
    * @param productDetailsListJson Products sub-document with list of EC2 products along with SKU.
    * @param onDemandJson Price details json object.
-   * @param region The region instance type is in.
    */
   private void storeInstancePriceComponents(
       InitializationContext context,
       JsonNode productDetailsListJson,
       JsonNode onDemandJson,
       Region region) {
-
     Architecture regionArch = region.getArchitecture();
     // Get SKUs associated with Instances
     LOG.info("Parsing product details list to store pricing info");
@@ -314,14 +326,17 @@ public class AWSInitializer extends AbstractInitializer {
       // Make sure it is the base instance type.
       include &= matches(productAttrs, "preInstalledSw", FilterOp.Equals, "NA");
       // Make sure instance type is supported.
-      include &= isInstanceTypeSupported(productAttrs);
+      include &= isInstanceTypeSupported(region.getProvider(), productAttrs);
 
-      // Make sure architecture matches.
-      if (regionArch == Architecture.x86_64) {
-        include &= matches(productAttrs, "physicalProcessor", FilterOp.Contains, "Intel");
-      } else if (regionArch == Architecture.arm64) {
-        include &= matches(productAttrs, "physicalProcessor", FilterOp.Contains, "Graviton");
+      if (!runtimeConfGetter.getGlobalConf(GlobalConfKeys.enableVMOSPatching)) {
+        // Make sure architecture matches.
+        if (regionArch == Architecture.x86_64) {
+          include &= matches(productAttrs, "physicalProcessor", FilterOp.Contains, "Intel");
+        } else if (regionArch == Architecture.aarch64) {
+          include &= matches(productAttrs, "physicalProcessor", FilterOp.Contains, "Graviton");
+        }
       }
+
       if (include) {
         JsonNode attributesJson = productDetailsJson.get("attributes");
         storeInstancePriceComponent(
@@ -354,7 +369,7 @@ public class AWSInitializer extends AbstractInitializer {
         Region.find
             .query()
             .where()
-            .eq("provider_uuid", context.getProvider().uuid)
+            .eq("provider_uuid", context.getProvider().getUuid())
             .eq("name", regionName)
             .findOne();
     if (region == null) {
@@ -388,7 +403,8 @@ public class AWSInitializer extends AbstractInitializer {
 
     // Save to db
     if (Double.parseDouble(pricePerUnit) != 0.0) {
-      PriceComponent.upsert(context.getProvider().uuid, region.code, instanceCode, priceDetails);
+      PriceComponent.upsert(
+          context.getProvider().getUuid(), region.getCode(), instanceCode, priceDetails);
     }
   }
 
@@ -442,13 +458,15 @@ public class AWSInitializer extends AbstractInitializer {
       // Make sure it is the base instance type.
       include &= matches(productAttrs, "preInstalledSw", FilterOp.Equals, "NA");
       // Make sure instance type is supported.
-      include &= isInstanceTypeSupported(productAttrs);
+      include &= isInstanceTypeSupported(region.getProvider(), productAttrs);
 
-      // Make sure architecture matches.
-      if (regionArch == Architecture.x86_64) {
-        include &= matches(productAttrs, "physicalProcessor", FilterOp.Contains, "Intel");
-      } else if (regionArch == Architecture.arm64) {
-        include &= matches(productAttrs, "physicalProcessor", FilterOp.Contains, "Graviton");
+      if (!runtimeConfGetter.getGlobalConf(GlobalConfKeys.enableVMOSPatching)) {
+        // Make sure architecture matches.
+        if (regionArch == Architecture.x86_64) {
+          include &= matches(productAttrs, "physicalProcessor", FilterOp.Contains, "Intel");
+        } else if (regionArch == Architecture.aarch64) {
+          include &= matches(productAttrs, "physicalProcessor", FilterOp.Contains, "Graviton");
+        }
       }
 
       if (!include) {
@@ -508,8 +526,9 @@ public class AWSInitializer extends AbstractInitializer {
   private void storeInstanceTypeInfoToDB(InitializationContext context) {
     LOG.info("Storing AWS instance type and pricing info in Yugaware DB");
     Provider provider = context.getProvider();
-    // First reset all the JSON details of all entries in the table, as we are about to refresh it.
-    InstanceType.resetInstanceTypeDetailsForProvider(provider.uuid);
+    // First reset all the JSON details of all supported instance entries in the table, as we are
+    // about to refresh it.
+    InstanceType.resetInstanceTypeDetailsForProvider(provider, runtimeConfGetter, false);
     String instanceTypeCode;
 
     for (Map<String, String> productAttrs : context.getAvailableInstances()) {
@@ -540,6 +559,7 @@ public class AWSInitializer extends AbstractInitializer {
       // 12 x 2000 HDD
       // 2 x 900 GB NVMe SSD
       String[] parts = productAttrs.get("storage").replaceAll(",", "").split(" ");
+      log.trace("Storage details for instance type {} are {}", instanceTypeCode, parts);
       if (parts.length < 4) {
         if (!productAttrs.get("storage").equals("EBS only")) {
           String msg =
@@ -557,26 +577,45 @@ public class AWSInitializer extends AbstractInitializer {
           volumeType = VolumeType.EBS;
         }
       } else {
-        if (parts[1].equals("x")) {
+
+        if (parts[1].toLowerCase().equals("x")) {
           volumeCount = Integer.parseInt(parts[0]);
           volumeSizeGB = Integer.parseInt(parts[2]);
-          if (parts[3].equals("GB")) {
-            volumeType = VolumeType.valueOf(parts[4].toUpperCase());
-          } else {
-            volumeType = VolumeType.valueOf(parts[3].toUpperCase());
+          try {
+            if (parts[3].equals("GB")) {
+              volumeType = VolumeType.valueOf(parts[4].toUpperCase());
+            } else {
+              volumeType = VolumeType.valueOf(parts[3].toUpperCase());
+            }
+          } catch (IllegalArgumentException ilex) {
+            LOG.warn(
+                "Unexpected error parsing instance type {} and volume types {}, skipping",
+                instanceTypeCode,
+                parts,
+                ilex);
+            continue;
           }
 
         } else {
           volumeCount = 1;
           volumeSizeGB = Integer.parseInt(parts[0]);
-          volumeType = VolumeType.valueOf(parts[2].toUpperCase());
+          try {
+            volumeType = VolumeType.valueOf(parts[2].toUpperCase());
+          } catch (IllegalArgumentException ilex) {
+            LOG.warn(
+                "Unexpected error parsing instance type {} and volume types {}, skipping",
+                instanceTypeCode,
+                parts,
+                ilex);
+            continue;
+          }
         }
       }
 
       if (enableVerboseLogging) {
         LOG.info(
             "Instance type entry ({}, {}): {} cores, {} GB RAM, {} x {} GB {}",
-            provider.code,
+            provider.getCode(),
             instanceTypeCode,
             numCores,
             memSizeGB,
@@ -586,11 +625,11 @@ public class AWSInitializer extends AbstractInitializer {
       }
 
       // Create the instance type model. If one already exists, overwrite it.
-      InstanceType instanceType = InstanceType.get(provider.uuid, instanceTypeCode);
+      InstanceType instanceType = InstanceType.get(provider.getUuid(), instanceTypeCode);
       if (instanceType == null) {
         instanceType = new InstanceType();
       }
-      InstanceTypeDetails details = instanceType.instanceTypeDetails;
+      InstanceTypeDetails details = instanceType.getInstanceTypeDetails();
       if (details == null) {
         details = new InstanceTypeDetails();
       }
@@ -600,16 +639,26 @@ public class AWSInitializer extends AbstractInitializer {
       if (details.tenancy == null) {
         details.tenancy = PublicCloudConstants.Tenancy.Shared;
       }
+
+      if (runtimeConfGetter.getGlobalConf(GlobalConfKeys.enableVMOSPatching)) {
+        // Persist the architecture in instance details.
+        String physicalProcessor = productAttrs.get("physicalProcessor");
+        if (physicalProcessor.contains("Intel") || physicalProcessor.contains("AMD")) {
+          details.arch = Architecture.x86_64;
+        } else if (physicalProcessor.contains("Graviton")) {
+          details.arch = Architecture.aarch64;
+        }
+      }
       // Update the object.
-      InstanceType.upsert(provider.uuid, instanceTypeCode, numCores, memSizeGB, details);
+      InstanceType.upsert(provider.getUuid(), instanceTypeCode, numCores, memSizeGB, details);
       if (enableVerboseLogging) {
-        instanceType = InstanceType.get(provider.uuid, instanceTypeCode);
+        instanceType = InstanceType.get(provider.getUuid(), instanceTypeCode);
         LOG.debug(
             "Saved {}:{} ({} cores, {}GB) with details {}",
-            provider.uuid,
+            provider.getUuid(),
             instanceTypeCode,
-            instanceType.numCores,
-            instanceType.memSizeGB,
+            instanceType.getNumCores(),
+            instanceType.getMemSizeGB(),
             Json.stringify(Json.toJson(details)));
       }
     }
@@ -631,10 +680,14 @@ public class AWSInitializer extends AbstractInitializer {
     }
   }
 
-  private boolean isInstanceTypeSupported(Map<String, String> productAttributes) {
-    return configHelper
-        .getAWSInstancePrefixesSupported()
-        .stream()
+  private boolean isInstanceTypeSupported(
+      Provider provider, Map<String, String> productAttributes) {
+
+    if (runtimeConfGetter.getConfForScope(provider, ProviderConfKeys.allowUnsupportedInstances)) {
+      return true;
+    }
+
+    return InstanceType.getAWSInstancePrefixesSupported(provider, runtimeConfGetter).stream()
         .anyMatch(productAttributes.getOrDefault("instanceType", "")::startsWith);
   }
 }

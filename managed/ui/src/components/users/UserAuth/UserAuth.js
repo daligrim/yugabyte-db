@@ -1,20 +1,21 @@
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import clsx from 'clsx';
 import { YBLoading } from '../../common/indicators';
 import { getPromiseState } from '../../../utils/PromiseUtils';
+import { isRbacEnabled } from '../../../redesign/features/rbac/common/RbacUtils';
 import { LDAPAuth } from './LDAPAuth';
 import { OIDCAuth } from './OIDCAuth';
 
 const TABS = [
   {
-    label: 'LDAP Configuration',
-    id: 'LDAP',
-    Component: LDAPAuth
-  },
-  {
     label: 'OIDC Configuration',
     id: 'OIDC',
     Component: OIDCAuth
+  },
+  {
+    label: 'LDAP Configuration',
+    id: 'LDAP',
+    Component: LDAPAuth
   }
 ];
 
@@ -37,7 +38,7 @@ export const UserAuth = (props) => {
   const Component = currentTab.Component;
 
   useEffect(() => {
-    if (!isAdmin) window.location.href = '/';
+    if (!isAdmin && !isRbacEnabled()) window.location.href = '/';
     else fetchRunTimeConfigs();
   }, [fetchRunTimeConfigs, isAdmin]);
 
@@ -46,15 +47,17 @@ export const UserAuth = (props) => {
       {isTabsVisible && (
         <>
           <div className="ua-tab-container">
-            {TABS.map(({ label, id }) => (
-              <div
-                key={id}
-                className={clsx('ua-tab-item', id === activeTab && 'ua-active-tab')}
-                onClick={(e) => handleTabSelect(e, id)}
-              >
-                {label}
-              </div>
-            ))}
+            {TABS.map(({ label, id }) => {
+              return (
+                <div
+                  key={id}
+                  className={clsx('ua-tab-item', id === activeTab && 'ua-active-tab')}
+                  onClick={(e) => handleTabSelect(e, id)}
+                >
+                  {label}
+                </div>
+              );
+            })}
           </div>
           <div className="ua-sec-divider" />
         </>

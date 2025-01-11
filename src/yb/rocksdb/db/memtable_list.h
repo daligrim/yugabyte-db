@@ -17,8 +17,6 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_ROCKSDB_DB_MEMTABLE_LIST_H
-#define YB_ROCKSDB_DB_MEMTABLE_LIST_H
 
 #pragma once
 
@@ -27,6 +25,8 @@
 #include <set>
 #include <string>
 #include <vector>
+
+#include "yb/rocksdb/rocksdb_fwd.h"
 
 #include "yb/rocksdb/db.h"
 #include "yb/rocksdb/db/dbformat.h"
@@ -43,7 +43,6 @@ namespace rocksdb {
 class ColumnFamilyData;
 class InternalKeyComparator;
 class InstrumentedMutex;
-class MergeIteratorBuilder;
 
 // keeps a list of immutable memtables in a vector. the list is immutable
 // if refcount is bigger than one. It is used as a state for Get() and
@@ -125,10 +124,14 @@ class MemTableListVersion {
 
   void UnrefMemTable(autovector<MemTable*>* to_delete, MemTable* m);
 
+  void VerifyNumFlushginBytes() const;
+
   friend class MemTableList;
 
   // Immutable MemTables that have not yet been flushed.
   std::list<MemTable*> memlist_;
+
+  size_t total_data_size_ = 0;
 
   // MemTables that have already been flushed
   // (used during Transaction validation)
@@ -199,7 +202,8 @@ class MemTableList {
   // Returns the earliest memtables that needs to be flushed. The returned
   // memtables are guaranteed to be in the ascending order of created time.
   void PickMemtablesToFlush(autovector<MemTable*>* mems,
-                            const MemTableFilter& filter = MemTableFilter());
+                            const MemTableFilter& filter = MemTableFilter(),
+                            const MutableCFOptions* mutable_cf_options = nullptr);
 
   // Reset status of the given memtable list back to pending state so that
   // they can get picked up again on the next round of flush.
@@ -231,6 +235,8 @@ class MemTableList {
   // PickMemtablesToFlush() is called.
   void FlushRequested() { flush_requested_ = true; }
 
+  size_t TotalDataSize() const;
+
   // Copying allowed
   // MemTableList(const MemTableList&);
   // void operator=(const MemTableList&);
@@ -261,5 +267,3 @@ class MemTableList {
 };
 
 }  // namespace rocksdb
-
-#endif // YB_ROCKSDB_DB_MEMTABLE_LIST_H

@@ -24,6 +24,8 @@
 #include "yb/util/status_log.h"
 #include "yb/util/tsan_util.h"
 
+using std::string;
+
 using namespace std::literals;
 
 namespace yb {
@@ -205,6 +207,10 @@ CassandraIterator CassandraResult::CreateIterator() const {
   return CassandraIterator(cass_iterator_from_result(cass_result_.get()));
 }
 
+bool CassandraResult::HasMorePages() const {
+  return cass_result_has_more_pages(cass_result_.get());
+}
+
 std::string CassandraResult::RenderToString(
     const std::string& line_separator, const std::string& value_separator) const {
   std::string result;
@@ -357,7 +363,12 @@ Result<CassandraSession> CassandraSession::Create(CassCluster* cluster) {
   return result;
 }
 
-Status CassandraSession::Execute(const CassandraStatement& statement) {
+Status CassandraSession::Execute(const CassandraStatement& statement, uint32_t timeout_ms) {
+  if (timeout_ms > 0) {
+    LOG(INFO) << "Set custom request timeout (ms): " << timeout_ms;
+    cass_statement_set_request_timeout(statement.cass_statement_.get(), timeout_ms);
+  }
+
   CassandraFuture future(cass_session_execute(
       cass_session_.get(), statement.cass_statement_.get()));
   return future.Wait();
@@ -384,9 +395,9 @@ CassandraFuture CassandraSession::ExecuteGetFuture(const string& query) {
   return ExecuteGetFuture(CassandraStatement(query));
 }
 
-Status CassandraSession::ExecuteQuery(const string& query) {
+Status CassandraSession::ExecuteQuery(const string& query, uint32_t timeout_ms) {
   LOG(INFO) << "Execute query: " << query;
-  return Execute(CassandraStatement(query));
+  return Execute(CassandraStatement(query), timeout_ms);
 }
 
 Result<CassandraResult> CassandraSession::ExecuteWithResult(const string& query) {
@@ -492,6 +503,11 @@ void CppCassandraDriver::EnableTLS(const std::vector<std::string>& ca_certs) {
 
   cass_cluster_set_ssl(cass_cluster_, ssl);
   cass_ssl_free(ssl);
+}
+
+void CppCassandraDriver::SetCredentials(const std::string& username, const std::string& password) {
+  LOG(INFO) << "Setting YCQL credentials: " << username << " / " << password;
+  cass_cluster_set_credentials(cass_cluster_, username.c_str(), password.c_str());
 }
 
 Result<CassandraSession> CppCassandraDriver::CreateSession() {

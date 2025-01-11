@@ -17,20 +17,22 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.yb.util.YBTestRunnerNonTsanOnly;
+import org.yb.YBTestRunner;
 
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.OptionalInt;
 
 import static org.yb.AssertionWrappers.*;
 
-@RunWith(value=YBTestRunnerNonTsanOnly.class)
+@RunWith(value=YBTestRunner.class)
 public class TestPgSavepoints extends BasePgSQLTest {
   private static final Logger LOG = LoggerFactory.getLogger(TestPgSavepoints.class);
   private static final int LARGE_BATCH_ROW_THRESHOLD = 100;
@@ -244,6 +246,7 @@ public class TestPgSavepoints extends BasePgSQLTest {
         assertEquals(OptionalInt.empty(), getSingleValue(conn, 3));
         assertEquals(OptionalInt.empty(), getSingleValue(conn, 5));
         assertEquals(OptionalInt.empty(), getSingleValue(conn, 7));
+        conn.commit();
         statement.execute("truncate t");
         conn.commit();
       }
@@ -270,6 +273,7 @@ public class TestPgSavepoints extends BasePgSQLTest {
         assertEquals(getSingleValue(conn, 1), OptionalInt.of(2));
         assertEquals(getSingleValue(conn, 3), OptionalInt.empty());
         assertEquals(getSingleValue(conn, 5), OptionalInt.of(6));
+        conn.commit();
         statement.execute("truncate t");
         conn.commit();
       }
@@ -312,6 +316,7 @@ public class TestPgSavepoints extends BasePgSQLTest {
             }
           }
         }
+        conn.commit();
         statement.execute("truncate t");
         conn.commit();
       }

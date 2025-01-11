@@ -1,4 +1,12 @@
-import { differenceInDays, Interval, intervalToDuration, intlFormat, subDays, subHours } from 'date-fns';
+import {
+    differenceInDays,
+    Interval,
+    intervalToDuration,
+    intlFormat,
+    subDays,
+    subHours,
+    subMinutes
+} from 'date-fns';
 import { PASSWORD_MIN_LENGTH } from '@app/helpers/const';
 import {
   ClusterFaultTolerance
@@ -11,6 +19,8 @@ export const convertMBtoGB = (value: string | number, round = true): number => {
   const result = Number(value) / 1024;
   return round ? Math.round(result) : result;
 };
+
+export const convertBytesToGB = (bytes: number) => (bytes / 1024 / 1024 / 1024).toFixed(2);
 
 // generate a random password that meets password strength regex
 export const generatePassword = (length: number): string => {
@@ -68,6 +78,7 @@ export const areIdArraysEqual = (a: number[], b: number[]): boolean => {
 // };
 
 export enum RelativeInterval {
+  Last5Minutes = 'last5minutes',
   LastHour = 'lasthour',
   Last6Hours = 'last6hours',
   Last12hours = 'last12hours',
@@ -75,11 +86,16 @@ export enum RelativeInterval {
   Last7days = 'last7days'
 }
 
+export type ClusterType = 'PRIMARY' | 'READ_REPLICA';
+
 // convert relative interval like "last 6 hours" to exact pair of start/end date objects
 export const getInterval = (relativeInterval: RelativeInterval): Interval => {
   let start: Date;
   const end = new Date();
   switch (relativeInterval) {
+    case RelativeInterval.Last5Minutes:
+      start = subMinutes(end, 5);
+      break;
     case RelativeInterval.LastHour:
       start = subHours(end, 1);
       break;
@@ -125,6 +141,7 @@ export const getMemorySizeUnits = (bytes: number): string => {
   if (bytes === 0) return '0 B';
   if (bytes === null || isNaN(bytes)) return '-';
   const i = parseInt(String(Math.floor(Math.log(bytes) / Math.log(1024))));
+  if (isNaN(i)) return '-';
   return `${Math.round(bytes / Math.pow(1024, i))} ${sizes[i]}`;
 };
 
@@ -337,4 +354,51 @@ export const getTimeZoneAbbreviated = (date: Date): string => {
       .join('');
   }
   return tz;
+};
+
+const regionCountryCodes: { [k: string]: string } = {
+  'us-east-2':      'us',
+  'us-east-1':      'us',
+  'us-west-1':      'us',
+  'us-west-2':      'us',
+  'af-south-1':     'za',
+  'ap-south-1':     'in',
+  'ap-northeast-3': 'jp',
+  'ap-southeast-1': 'sg',
+  'ap-southeast-2': 'au',
+  'ap-northeast-1': 'jp',
+  'ca-central-1':   'ca',
+  'eu-central-1':   'de',
+  'eu-west-1':      'ie',
+  'eu-west-2':      'gb',
+  'eu-south-1':     'it',
+  'eu-west-3':      'fr',
+  'eu-north-1':     'se',
+  'me-south-1':     'bh',
+  'sa-east-1':      'br',
+  'us-gov-east-1':  'us',
+  'us-gov-west-1':  'us',
+}
+
+export const getRegionCode = ({ region, zone }: { region?: string, zone?: string }) =>
+  Object.entries(regionCountryCodes).find(([key]) => zone?.startsWith(key) || (region && key.startsWith(region)))?.[1]
+
+//Converts a snake_case string into a human readable, properly formatted string.
+export const formatSnakeCase = (inputText: string): string => {
+  if (!inputText.includes("_")) {
+    return inputText.length > 0
+      ? inputText[0].toUpperCase() + inputText.substring(1).toLowerCase()
+      : "";
+  }
+
+  return inputText
+    .toLowerCase()
+    .split("_")
+    .filter((word) => word.length > 0)
+    .map((singleWord) =>
+      singleWord.length > 0
+        ? singleWord[0].toUpperCase() + singleWord.substring(1).toLowerCase()
+        : ""
+    )
+    .join(" ");
 };

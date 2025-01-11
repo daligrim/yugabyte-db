@@ -10,8 +10,7 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 
-#ifndef YB_UTIL_UNIQUE_LOCK_H
-#define YB_UTIL_UNIQUE_LOCK_H
+#pragma once
 
 #include <condition_variable>
 #include <mutex>
@@ -26,12 +25,11 @@ namespace yb {
 // Thread annotations enabled, using a UniqueLock wrapper class around std::unique_lock.
 // ------------------------------------------------------------------------------------------------
 
-#define UNIQUE_LOCK(lock_name, mutex) ::yb::UniqueLock<decltype(mutex)> lock_name(mutex);
-
 // A wrapper unique_lock that supports thread annotations.
 template<typename Mutex>
 class SCOPED_CAPABILITY UniqueLock {
  public:
+  UniqueLock() = default;
   explicit UniqueLock(Mutex &mutex) ACQUIRE(mutex) : unique_lock_(mutex) {}
 
   explicit UniqueLock(Mutex &mutex, std::defer_lock_t defer) : unique_lock_(mutex, defer) {}
@@ -44,27 +42,17 @@ class SCOPED_CAPABILITY UniqueLock {
 
   std::unique_lock<Mutex>& internal_unique_lock() { return unique_lock_; }
 
+  bool owns_lock() const { return unique_lock_.owns_lock(); }
+
   Mutex* mutex() RETURN_CAPABILITY(unique_lock_.mutex()) { return unique_lock_.mutex(); }
 
  private:
   std::unique_lock<Mutex> unique_lock_;
 };
 
-template<typename Mutex>
-void WaitOnConditionVariable(std::condition_variable* cond_var, UniqueLock<Mutex>* lock)
-    REQUIRES(*lock) {
-  cond_var->wait(lock->internal_unique_lock());
-}
-
-template<typename Mutex, typename Functor>
-void WaitOnConditionVariable(
-    std::condition_variable* cond_var, UniqueLock<Mutex>* lock, Functor f) {
-  cond_var->wait(lock->internal_unique_lock(), f);
-}
-
 template <class Mutex>
-std::unique_lock<Mutex>& GetLockForCondition(UniqueLock<Mutex>* lock) {
-  return lock->internal_unique_lock();
+std::unique_lock<Mutex>& GetLockForCondition(UniqueLock<Mutex>& lock) {
+  return lock.internal_unique_lock();
 }
 
 #else
@@ -76,26 +64,23 @@ std::unique_lock<Mutex>& GetLockForCondition(UniqueLock<Mutex>* lock) {
 template<class Mutex>
 using UniqueLock = std::unique_lock<Mutex>;
 
-#define UNIQUE_LOCK(lock_name, mutex) std::unique_lock<decltype(mutex)> lock_name(mutex);
+template <class Mutex>
+std::unique_lock<Mutex>& GetLockForCondition(UniqueLock<Mutex>& lock) {
+  return lock;
+}
+
+#endif
 
 template<typename Mutex>
-void WaitOnConditionVariable(std::condition_variable* cond_var, UniqueLock<Mutex>* lock) {
-  cond_var->wait(*lock);
+void WaitOnConditionVariable(std::condition_variable* cond_var, UniqueLock<Mutex>* lock)
+    REQUIRES(*lock) {
+  cond_var->wait(GetLockForCondition(*lock));
 }
 
 template<typename Mutex, typename Functor>
 void WaitOnConditionVariable(
     std::condition_variable* cond_var, UniqueLock<Mutex>* lock, Functor f) {
-  cond_var->wait(*lock, f);
+  cond_var->wait(GetLockForCondition(*lock), std::move(f));
 }
-
-template <class Mutex>
-std::unique_lock<Mutex>& GetLockForCondition(UniqueLock<Mutex>* lock) {
-  return *lock;
-}
-
-#endif
 
 } // namespace yb
-
-#endif  // YB_UTIL_UNIQUE_LOCK_H

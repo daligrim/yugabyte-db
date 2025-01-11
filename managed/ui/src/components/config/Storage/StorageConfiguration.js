@@ -1,6 +1,6 @@
 // Copyright (c) YugaByte, Inc.
 
-import React, { Component } from 'react';
+import { Component } from 'react';
 import { Tab, Row, Col } from 'react-bootstrap';
 import { connect } from 'react-redux';
 import { withRouter } from 'react-router';
@@ -8,8 +8,9 @@ import { SubmissionError } from 'redux-form';
 import _ from 'lodash';
 import { YBTabsPanel } from '../../panels';
 import { getPromiseState } from '../../../utils/PromiseUtils';
-import { YBLoading } from '../../common/indicators';
+import { YBErrorIndicator, YBLoading } from '../../common/indicators';
 import AwsStorageConfiguration from './AwsStorageConfiguration';
+import GcsStorageConfiguration from './GcsStorageConfiguration';
 import { BackupList } from './BackupList';
 import { BackupConfigField } from './BackupConfigField';
 import { storageConfigTypes } from './ConfigType';
@@ -60,6 +61,7 @@ class StorageConfiguration extends Component {
         az: false
       },
       iamRoleEnabled: false,
+      useGcpIam: false,
       listView: {
         s3: true,
         nfs: true,
@@ -108,8 +110,7 @@ class StorageConfiguration extends Component {
    * @returns
    */
   addStorageConfig = (values, action, props) => {
-    const type =
-      (props.activeTab && props.activeTab.toUpperCase()) || Object.keys(storageConfigTypes)[0];
+    const type = props.activeTab?.toUpperCase() || Object.keys(storageConfigTypes)[0];
     Object.keys(values).forEach((key) => {
       if (typeof values[key] === 'string' || values[key] instanceof String)
         values[key] = values[key].trim();
@@ -119,46 +120,65 @@ class StorageConfiguration extends Component {
 
     // These conditions will pick only the required JSON keys from the respective tab.
     switch (props.activeTab) {
-      case 'nfs':
+      case 'nfs': {
         configName = dataPayload['NFS_CONFIGURATION_NAME'];
         dataPayload['BACKUP_LOCATION'] = dataPayload['NFS_BACKUP_LOCATION'];
         dataPayload = _.pick(dataPayload, ['BACKUP_LOCATION']);
         break;
+      }
 
-      case 'gcs':
-        configName = dataPayload['GCS_CONFIGURATION_NAME'];
-        dataPayload['BACKUP_LOCATION'] = dataPayload['GCS_BACKUP_LOCATION'];
-        dataPayload = _.pick(dataPayload, ['BACKUP_LOCATION', 'GCS_CREDENTIALS_JSON']);
+      case 'gcs': {
+        let FIELDS;
+        if (values['USE_GCP_IAM']) {
+          configName = dataPayload['GCS_CONFIGURATION_NAME'];
+          dataPayload['BACKUP_LOCATION'] = dataPayload['GCS_BACKUP_LOCATION'];
+          dataPayload['USE_GCP_IAM'] = dataPayload['USE_GCP_IAM'].toString();
+          FIELDS = ['BACKUP_LOCATION', 'USE_GCP_IAM'];
+        } else {
+          configName = dataPayload['GCS_CONFIGURATION_NAME'];
+          dataPayload['BACKUP_LOCATION'] = dataPayload['GCS_BACKUP_LOCATION'];
+          FIELDS = ['BACKUP_LOCATION', 'GCS_CREDENTIALS_JSON'];
+        }
+        dataPayload = _.pick(dataPayload, FIELDS);
         break;
+      }
 
-      case 'az':
+      case 'az': {
         configName = dataPayload['AZ_CONFIGURATION_NAME'];
         dataPayload['BACKUP_LOCATION'] = dataPayload['AZ_BACKUP_LOCATION'];
         dataPayload = _.pick(dataPayload, ['BACKUP_LOCATION', 'AZURE_STORAGE_SAS_TOKEN']);
         break;
+      }
 
-      default:
+      default: {
+        let FIELDS;
         if (values['IAM_INSTANCE_PROFILE']) {
           configName = dataPayload['S3_CONFIGURATION_NAME'];
           dataPayload['IAM_INSTANCE_PROFILE'] = dataPayload['IAM_INSTANCE_PROFILE'].toString();
           dataPayload['BACKUP_LOCATION'] = dataPayload['S3_BACKUP_LOCATION'];
-          dataPayload = _.pick(dataPayload, [
-            'BACKUP_LOCATION',
-            'AWS_HOST_BASE',
-            'IAM_INSTANCE_PROFILE'
-          ]);
+          FIELDS = ['BACKUP_LOCATION', 'AWS_HOST_BASE', 'IAM_INSTANCE_PROFILE'];
         } else {
           configName = dataPayload['S3_CONFIGURATION_NAME'];
           dataPayload['BACKUP_LOCATION'] = dataPayload['S3_BACKUP_LOCATION'];
-          dataPayload = _.pick(dataPayload, [
+          FIELDS = [
             'AWS_ACCESS_KEY_ID',
             'AWS_SECRET_ACCESS_KEY',
             'BACKUP_LOCATION',
             'AWS_HOST_BASE',
             'PATH_STYLE_ACCESS'
-          ]);
+          ];
         }
+        if (dataPayload?.PROXY_SETTINGS?.PROXY_HOST) FIELDS.push('PROXY_SETTINGS.PROXY_HOST');
+        if (dataPayload?.PROXY_SETTINGS?.PROXY_PORT) FIELDS.push('PROXY_SETTINGS.PROXY_PORT');
+        if (dataPayload?.PROXY_SETTINGS?.PROXY_USERNAME) {
+          FIELDS.push('PROXY_SETTINGS.PROXY_USERNAME');
+          if (dataPayload?.PROXY_SETTINGS?.PROXY_PASSWORD)
+            FIELDS.push('PROXY_SETTINGS.PROXY_PASSWORD');
+        }
+        dataPayload = _.pick(dataPayload, FIELDS);
+
         break;
+      }
     }
 
     if (values.type === 'update') {
@@ -224,6 +244,7 @@ class StorageConfiguration extends Component {
    */
   deleteStorageConfig = (configUUID) => {
     this.props.deleteCustomerConfig(configUUID).then(() => {
+      this.props.hideDeleteStorageConfig();
       this.props.reset(); // reset form to initial values
       this.props.fetchCustomerConfigs();
     });
@@ -256,6 +277,7 @@ class StorageConfiguration extends Component {
           configUUID: row?.configUUID,
           [`${tab}_BACKUP_LOCATION`]: row.data?.BACKUP_LOCATION,
           [`${tab}_CONFIGURATION_NAME`]: row?.configName,
+          USE_GCP_IAM: row.data?.USE_GCP_IAM,
           GCS_CREDENTIALS_JSON: row.data?.GCS_CREDENTIALS_JSON
         };
         break;
@@ -283,6 +305,8 @@ class StorageConfiguration extends Component {
         };
         if (row?.data?.PATH_STYLE_ACCESS)
           initialVal['PATH_STYLE_ACCESS'] = row?.data?.PATH_STYLE_ACCESS;
+        if (row?.data?.PROXY_SETTINGS?.PROXY_HOST)
+          initialVal['PROXY_SETTINGS'] = row?.data?.PROXY_SETTINGS;
         break;
     }
     this.props.setInitialValues(initialVal);
@@ -292,6 +316,7 @@ class StorageConfiguration extends Component {
         [activeTab]: true
       },
       iamRoleEnabled: row.data['IAM_INSTANCE_PROFILE'] || false,
+      useGcpIam: row.data['USE_GCP_IAM'] || false,
       listView: {
         ...this.state.listView,
         [activeTab]: false
@@ -328,6 +353,7 @@ class StorageConfiguration extends Component {
         [activeTab]: false
       },
       iamRoleEnabled: false,
+      useGcpIam: false,
       listView: {
         ...this.state.listView,
         [activeTab]: true
@@ -345,25 +371,40 @@ class StorageConfiguration extends Component {
     this.setState({ iamRoleEnabled: event.target.checked });
   };
 
+  gcpIamToggle = (event) => {
+    this.setState({ useGcpIam: event.target.checked });
+  };
+
   render() {
-    const { handleSubmit, customerConfigs, initialValues, enablePathStyleAccess } = this.props;
-    const { iamRoleEnabled, editView, listView } = this.state;
+    const {
+      handleSubmit,
+      customerConfigs,
+      initialValues,
+      enablePathStyleAccess,
+      enableS3BackupProxy
+    } = this.props;
+    const { iamRoleEnabled, useGcpIam, editView, listView } = this.state;
     const activeTab = this.props.activeTab || Object.keys(storageConfigTypes)[0].toLowerCase();
-    const backupListData = customerConfigs.data.filter((list) => {
-      if (activeTab === list.name.toLowerCase()) {
-        return list;
-      }
-      return null;
-    });
 
     if (getPromiseState(customerConfigs).isLoading()) {
       return <YBLoading />;
+    }
+
+    if (getPromiseState(customerConfigs).isError()) {
+      return <YBErrorIndicator customErrorMessage="Failed to fetch customer configs." />;
     }
 
     if (
       getPromiseState(customerConfigs).isSuccess() ||
       getPromiseState(customerConfigs).isEmpty()
     ) {
+      const backupListData = (customerConfigs?.data ?? []).filter((list) => {
+        if (activeTab === list.name.toLowerCase()) {
+          return list;
+        }
+        return null;
+      });
+
       const configs = [
         <Tab eventKey={'s3'} title={getTabTitle('S3')} key={'s3-tab'} unmountOnExit={true}>
           {!listView.s3 && (
@@ -372,6 +413,16 @@ class StorageConfiguration extends Component {
               iamInstanceToggle={this.iamInstanceToggle}
               isEdited={editView[activeTab]}
               enablePathStyleAccess={enablePathStyleAccess}
+              enableS3BackupProxy={enableS3BackupProxy}
+            />
+          )}
+        </Tab>,
+        <Tab eventKey={'gcs'} title={getTabTitle('GCS')} key={'gcs-tab'} unmountOnExit={true}>
+          {!listView.gcs && (
+            <GcsStorageConfiguration
+              useGcpIam={useGcpIam}
+              gcpIamToggle={this.gcpIamToggle}
+              isEdited={editView[activeTab]}
             />
           )}
         </Tab>
@@ -440,7 +491,8 @@ function mapStateToProps(state) {
   } = state;
 
   return {
-    enablePathStyleAccess: test.enablePathStyleAccess || released.enablePathStyleAccess
+    enablePathStyleAccess: test.enablePathStyleAccess || released.enablePathStyleAccess,
+    enableS3BackupProxy: test.enableS3BackupProxy || released.enableS3BackupProxy
   };
 }
 

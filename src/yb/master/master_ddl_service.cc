@@ -40,6 +40,7 @@ class MasterDdlServiceImpl : public MasterServiceBase, public MasterDdlIf {
     (DeleteTablegroup)
     (DeleteUDType)
     (GetBackfillJobs)
+    (GetBackfillStatus)
     (GetColocatedTabletSchema)
     (GetNamespaceInfo)
     (GetTableDiskSize)
@@ -52,13 +53,27 @@ class MasterDdlServiceImpl : public MasterServiceBase, public MasterDdlIf {
     (IsDeleteNamespaceDone)
     (IsDeleteTableDone)
     (IsTruncateTableDone)
+    (IsYsqlDdlVerificationDone)
     (LaunchBackfillIndexForTable)
     (ListNamespaces)
     (ListTablegroups)
     (ListTables)
     (ListUDTypes)
+    (ReportYsqlDdlTxnStatus)
     (TruncateTable)
   )
+
+  void AcquireObjectLocksGlobal(
+      const AcquireObjectLocksGlobalRequestPB* req, AcquireObjectLocksGlobalResponsePB* resp,
+      rpc::RpcContext rpc) override {
+    server_->catalog_manager_impl()->AcquireObjectLocksGlobal(req, resp, std::move(rpc));
+  }
+
+  void ReleaseObjectLocksGlobal(
+      const ReleaseObjectLocksGlobalRequestPB* req, ReleaseObjectLocksGlobalResponsePB* resp,
+      rpc::RpcContext rpc) override {
+    server_->catalog_manager_impl()->ReleaseObjectLocksGlobal(req, resp, std::move(rpc));
+  }
 };
 
 } // namespace

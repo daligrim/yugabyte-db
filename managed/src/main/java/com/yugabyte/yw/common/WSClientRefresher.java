@@ -11,34 +11,55 @@
 package com.yugabyte.yw.common;
 
 import com.google.inject.Inject;
+import com.typesafe.config.Config;
+import com.typesafe.config.ConfigFactory;
 import com.typesafe.config.ConfigRenderOptions;
 import com.typesafe.config.ConfigValue;
+import com.typesafe.config.ConfigValueFactory;
+import com.yugabyte.yw.common.certmgmt.castore.CustomCAStoreManager;
 import com.yugabyte.yw.common.config.RuntimeConfigFactory;
 import java.io.IOException;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import javax.inject.Singleton;
 import lombok.extern.slf4j.Slf4j;
 import play.libs.ws.WSClient;
 
 @Slf4j
-public class WSClientRefresher {
+@Singleton
+public class WSClientRefresher implements CustomTrustStoreListener {
 
   private final CustomWsClientFactory customWsClientFactory;
   private final RuntimeConfigFactory runtimeConfigFactory;
-  private WSClient customWsClient = null;
+  private final Map<String, WSClient> customWsClients = new ConcurrentHashMap<>();
+  private final CustomCAStoreManager customCAStoreManager;
 
   @Inject
   public WSClientRefresher(
-      CustomWsClientFactory customWsClientFactory, RuntimeConfigFactory runtimeConfigFactory) {
+      CustomWsClientFactory customWsClientFactory,
+      RuntimeConfigFactory runtimeConfigFactory,
+      CustomCAStoreManager customCAStoreManager) {
     this.customWsClientFactory = customWsClientFactory;
     this.runtimeConfigFactory = runtimeConfigFactory;
+    this.customCAStoreManager = customCAStoreManager;
+    customCAStoreManager.addListener(this);
   }
 
-  public synchronized void refreshWsClient(String ybWsConfigPath) {
-    ConfigValue ybWsOverrides = runtimeConfigFactory.globalRuntimeConf().getValue(ybWsConfigPath);
-    log.info(
-        "Creating ws client with config override: {}",
-        ybWsOverrides.render(ConfigRenderOptions.concise()));
-    closePreviousClient(customWsClient);
-    customWsClient = customWsClientFactory.forCustomConfig(ybWsOverrides);
+  @Inject Config config;
+
+  public void refreshWsClient(String ybWsConfigPath) {
+    log.debug("Refreshing ws-client for {}", ybWsConfigPath);
+    WSClient previousWsClient = customWsClients.put(ybWsConfigPath, newClient(ybWsConfigPath));
+    closePreviousClient(previousWsClient);
+  }
+
+  public WSClient getClient(String ybWsConfigPath) {
+    return customWsClients.computeIfAbsent(ybWsConfigPath, this::newClient);
+  }
+
+  public WSClient getClient(String ybWsConfigPath, Map<String, ConfigValue> wsOverrides) {
+    return newClient(ybWsConfigPath, wsOverrides);
   }
 
   private void closePreviousClient(WSClient previousWsClient) {
@@ -51,11 +72,60 @@ public class WSClientRefresher {
     }
   }
 
-  public synchronized WSClient getClient(String ybWsConfigPath) {
-    if (customWsClient == null) {
-      log.info("Creating customWsClient for first time");
-      refreshWsClient(ybWsConfigPath);
+  private WSClient newClient(String ybWsConfigPath, Map<String, ConfigValue> wsOverrides) {
+    Config customWsConfig = getWsConfig(ybWsConfigPath);
+    if (wsOverrides != null) {
+      for (Map.Entry<String, ConfigValue> entry : wsOverrides.entrySet()) {
+        customWsConfig = customWsConfig.withValue(entry.getKey(), entry.getValue());
+      }
     }
-    return customWsClient;
+    ConfigValue ybWsOverrides = customWsConfig.getValue("play.ws");
+    return customWsClientFactory.forCustomConfig(ybWsOverrides);
+  }
+
+  private WSClient newClient(String ybWsConfigPath) {
+    Config customWsConfig = getWsConfig(ybWsConfigPath);
+    ConfigValue ybWsOverrides = customWsConfig.getValue("play.ws");
+
+    if (ybWsOverrides != null) {
+      log.debug(
+          "Creating ws client with config override: {}",
+          ybWsOverrides.render(ConfigRenderOptions.concise()));
+    }
+
+    return customWsClientFactory.forCustomConfig(ybWsOverrides);
+  }
+
+  private Config getWsConfig(String ybWsConfigPath) {
+    ConfigValue ybWsOverrides = runtimeConfigFactory.globalRuntimeConf().getValue(ybWsConfigPath);
+    Config customWsConfig = ConfigFactory.empty().withValue("play.ws", ybWsOverrides);
+
+    // Add the custom CA truststore config if applicable.
+    List<Map<String, String>> ybaStoreConfig = customCAStoreManager.getPemStoreConfig();
+    if (!ybaStoreConfig.isEmpty() && !customCAStoreManager.isEnabled()) {
+      log.warn("Skipping to add YBA's custom trust-store config as the feature is disabled");
+    }
+
+    if (!ybaStoreConfig.isEmpty() && customCAStoreManager.isEnabled()) {
+      // Add JRE default cert paths as well in this case.
+      ybaStoreConfig.add(customCAStoreManager.getJavaDefaultConfig());
+      ybaStoreConfig.addAll(customCAStoreManager.getYBAJavaKeyStoreConfig());
+      customWsConfig =
+          customWsConfig.withValue(
+              "play.ws.ssl.trustManager.stores", ConfigValueFactory.fromIterable(ybaStoreConfig));
+    }
+
+    return customWsConfig;
+  }
+
+  public void truststoreUpdated() {
+    // Update all ws Client listeners like yb.alert.webhook.ws
+    List<String> refreshableClientKeys = AppConfigHelper.getRefreshableClients();
+    refreshableClientKeys.forEach(
+        clientKey -> {
+          if (customWsClients.containsKey(clientKey)) {
+            refreshWsClient(clientKey);
+          }
+        });
   }
 }

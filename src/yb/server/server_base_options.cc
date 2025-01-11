@@ -32,29 +32,21 @@
 
 #include "yb/server/server_base_options.h"
 
-#include <functional>
 #include <memory>
 #include <mutex>
+#include <regex>
 #include <string>
 #include <thread>
-#include <unordered_map>
 #include <vector>
-
-#include <glog/logging.h>
 
 #include "yb/common/common_net.pb.h"
 
-#include "yb/gutil/macros.h"
-#include "yb/gutil/ref_counted.h"
 #include "yb/gutil/strings/join.h"
 
 #include "yb/master/master_defaults.h"
 
 #include "yb/rpc/rpc_fwd.h"
 
-#include "yb/util/faststring.h"
-#include "yb/util/flag_tags.h"
-#include "yb/util/monotime.h"
 #include "yb/util/net/net_util.h"
 #include "yb/util/net/sockaddr.h"
 #include "yb/util/result.h"
@@ -62,29 +54,18 @@
 #include "yb/util/status.h"
 #include "yb/util/status_format.h"
 
-// The following flags related to the cloud, region and availability zone that an instance is
-// started in. These are passed in from whatever provisioning mechanics start the servers. They
-// are used for generic placement policies on table creation and tablet load balancing, to
-// either constrain data to a certain location (table A should only live in aws.us-west2.a), or to
-// define the required level of fault tolerance expected (table B should have N replicas, across
-// two regions of AWS and one of GCE).
-//
-// These are currently for use in a cloud-based deployment, but could be retrofitted to work for
-// an on-premise deployment as well, with datacenter, cluster and rack levels, for example.
-DEFINE_string(placement_cloud, "cloud1",
-              "The cloud in which this instance is started.");
-DEFINE_string(placement_region, "datacenter1",
-              "The cloud region in which this instance is started.");
-DEFINE_string(placement_zone, "rack1",
-              "The cloud availability zone in which this instance is started.");
-DEFINE_string(placement_uuid, "",
+DEFINE_UNKNOWN_string(placement_uuid, "",
               "The uuid of the tservers cluster/placement.");
 
-DEFINE_int32(master_discovery_timeout_ms, 3600000,
+DEFINE_UNKNOWN_int32(master_discovery_timeout_ms, 3600000,
              "Timeout for masters to discover each other during cluster creation/startup");
 TAG_FLAG(master_discovery_timeout_ms, hidden);
 
-DECLARE_bool(TEST_mini_cluster_mode);
+DECLARE_bool(TEST_use_custom_varz);
+
+DECLARE_string(placement_cloud);
+DECLARE_string(placement_region);
+DECLARE_string(placement_zone);
 
 namespace yb {
 namespace server {
@@ -92,25 +73,25 @@ namespace server {
 using std::vector;
 using namespace std::literals;
 
-DEFINE_string(server_dump_info_path, "",
+DEFINE_UNKNOWN_string(server_dump_info_path, "",
               "Path into which the server information will be "
               "dumped after startup. The dumped data is described by "
               "ServerStatusPB in server_base.proto. The dump format is "
               "determined by --server_dump_info_format");
-DEFINE_string(server_dump_info_format, "json",
+DEFINE_UNKNOWN_string(server_dump_info_format, "json",
               "Format for --server_dump_info_path. This may be either "
               "'pb' or 'json'.");
 TAG_FLAG(server_dump_info_path, hidden);
 TAG_FLAG(server_dump_info_format, hidden);
 
-DEFINE_int32(metrics_log_interval_ms, 0,
+DEFINE_UNKNOWN_int32(metrics_log_interval_ms, 0,
              "Interval (in milliseconds) at which the server will dump its "
              "metrics to a local log file. The log files are located in the same "
              "directory as specified by the -log_dir flag. If this is not a positive "
              "value, then metrics logging will be disabled.");
 TAG_FLAG(metrics_log_interval_ms, advanced);
 
-DEFINE_string(server_broadcast_addresses, "", "Broadcast addresses for this server.");
+DEFINE_UNKNOWN_string(server_broadcast_addresses, "", "Broadcast addresses for this server.");
 
 ServerBaseOptions::ServerBaseOptions(int default_port)
     : env(Env::Default()),
@@ -159,14 +140,23 @@ WebserverOptions& ServerBaseOptions::CompleteWebserverOptions() {
     }
   }
 
-  if (FLAGS_TEST_mini_cluster_mode &&  !fs_opts.data_paths.empty()) {
-    webserver_opts.TEST_custom_varz = "\nfs_data_dirs\n" + JoinStrings(fs_opts.data_paths, ",");
+  if (FLAGS_TEST_use_custom_varz) {
+    if (!fs_opts.data_paths.empty() &&
+        // Only add information about fs_data_dirs once even if called multiple times.
+        webserver_opts.TEST_custom_varz.find("fs_data_dirs") == std::string::npos) {
+      if (!webserver_opts.TEST_custom_varz.empty()) {
+        webserver_opts.TEST_custom_varz += "\n";
+      }
+      webserver_opts.TEST_custom_varz += "fs_data_dirs\n" + JoinStrings(fs_opts.data_paths, ",");
+    }
+    LOG(INFO) << "custom_varz is "
+              << std::regex_replace(webserver_opts.TEST_custom_varz, std::regex{"\n"}, " | ");
   }
 
   return webserver_opts;
 }
 
-std::string ServerBaseOptions::HostsString() {
+std::string ServerBaseOptions::HostsString() const {
   return !server_broadcast_addresses.empty() ? server_broadcast_addresses
                                              : rpc_opts.rpc_bind_addresses;
 }
@@ -176,12 +166,12 @@ void ServerBaseOptions::SetMasterAddressesNoValidation(MasterAddressesPtr master
     LOG(INFO) << "Updating master addrs to " << MasterAddressesToString(*master_addresses);
   }
 
-  std::lock_guard<std::mutex> l(master_addresses_mtx_);
+  std::lock_guard l(master_addresses_mtx_);
   master_addresses_ = master_addresses;
 }
 
 MasterAddressesPtr ServerBaseOptions::GetMasterAddresses() const {
-  std::lock_guard<std::mutex> l(master_addresses_mtx_);
+  std::lock_guard l(master_addresses_mtx_);
   return master_addresses_;
 }
 
@@ -333,14 +323,6 @@ std::string MasterAddressesToString(const MasterAddresses& addresses) {
     }
     result += '}';
   }
-  return result;
-}
-
-CloudInfoPB GetPlacementFromGFlags() {
-  CloudInfoPB result;
-  result.set_placement_cloud(FLAGS_placement_cloud);
-  result.set_placement_region(FLAGS_placement_region);
-  result.set_placement_zone(FLAGS_placement_zone);
   return result;
 }
 

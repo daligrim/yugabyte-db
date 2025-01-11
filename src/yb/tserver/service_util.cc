@@ -22,58 +22,58 @@
 #include "yb/tablet/tablet.h"
 #include "yb/tablet/tablet_metadata.h"
 #include "yb/tablet/tablet_metrics.h"
-
+#include "yb/tserver/tablet_server_interface.h"
 #include "yb/tserver/tserver_error.h"
+#include "yb/tserver/tserver_types.messages.h"
 
-#include "yb/util/flag_tags.h"
+#include "yb/util/flags.h"
 #include "yb/util/mem_tracker.h"
 #include "yb/util/metrics.h"
+
+using std::string;
 
 DEFINE_test_flag(bool, assert_reads_from_follower_rejected_because_of_staleness, false,
                  "If set, we verify that the consistency level is CONSISTENT_PREFIX, and that "
                  "a follower receives the request, but that it gets rejected because it's a stale "
                  "follower");
 
-DEFINE_uint64(
-    max_stale_read_bound_time_ms, 60000,
+DEFINE_RUNTIME_uint64(max_stale_read_bound_time_ms, 60000,
     "If we are allowed to read from followers, specify the maximum time a follower can be behind "
     "by using the last message received from the leader. If set to zero, a read can be served by a "
     "follower regardless of when was the last time it received a message from the leader or how "
     "far behind this follower is.");
 TAG_FLAG(max_stale_read_bound_time_ms, evolving);
-TAG_FLAG(max_stale_read_bound_time_ms, runtime);
 
-DEFINE_uint64(sst_files_soft_limit, 24,
-              "When majority SST files number is greater that this limit, we will start rejecting "
-              "part of write requests. The higher the number of SST files, the higher probability "
-              "of rejection.");
-TAG_FLAG(sst_files_soft_limit, runtime);
+DEFINE_RUNTIME_uint64(sst_files_soft_limit, 24,
+    "When majority SST files number is greater that this limit, we will start rejecting "
+    "part of write requests. The higher the number of SST files, the higher probability "
+    "of rejection.");
 
-DEFINE_uint64(sst_files_hard_limit, 48,
-              "When majority SST files number is greater that this limit, we will reject all write "
-              "requests.");
-TAG_FLAG(sst_files_hard_limit, runtime);
+DEFINE_RUNTIME_uint64(sst_files_hard_limit, 48,
+    "When majority SST files number is greater that this limit, we will reject all write "
+    "requests.");
 
 DEFINE_test_flag(int32, write_rejection_percentage, 0,
                  "Reject specified percentage of writes.");
 
-DEFINE_uint64(min_rejection_delay_ms, 100,
-              "Minimal delay for rejected write to be retried in milliseconds.");
-TAG_FLAG(min_rejection_delay_ms, runtime);
+DEFINE_RUNTIME_uint64(min_rejection_delay_ms, 100,
+    "Minimal delay for rejected write to be retried in milliseconds.");
 
-DEFINE_uint64(max_rejection_delay_ms, 5000, ""
-              "Maximal delay for rejected write to be retried in milliseconds.");
-TAG_FLAG(max_rejection_delay_ms, runtime);
+DEFINE_RUNTIME_uint64(max_rejection_delay_ms, 5000,
+    "Maximal delay for rejected write to be retried in milliseconds.");
 
 DECLARE_int32(memory_limit_warn_threshold_percentage);
 
 namespace yb {
 namespace tserver {
 
-void SetupErrorAndRespond(TabletServerErrorPB* error,
-                          const Status& s,
-                          TabletServerErrorPB::Code code,
-                          rpc::RpcContext* context) {
+namespace {
+
+template <class PB>
+void DoSetupErrorAndRespond(PB* error,
+                            const Status& s,
+                            TabletServerErrorPB::Code code,
+                            rpc::RpcContext* context) {
   // Generic "service unavailable" errors will cause the client to retry later.
   if (code == TabletServerErrorPB::UNKNOWN_ERROR) {
     if (s.IsServiceUnavailable()) {
@@ -94,38 +94,54 @@ void SetupErrorAndRespond(TabletServerErrorPB* error,
   context->RespondSuccess();
 }
 
-void SetupErrorAndRespond(TabletServerErrorPB* error,
-                          const Status& s,
-                          rpc::RpcContext* context) {
+template <class PB>
+void DoSetupErrorAndRespond(PB* error,
+                            const Status& s,
+                            rpc::RpcContext* context) {
   auto ts_error = TabletServerError::FromStatus(s);
-  SetupErrorAndRespond(
+  DoSetupErrorAndRespond(
       error, s, ts_error ? ts_error->value() : TabletServerErrorPB::UNKNOWN_ERROR, context);
 }
 
-void SetupError(TabletServerErrorPB* error, const Status& s) {
-  auto ts_error = TabletServerError::FromStatus(s);
-  auto code = ts_error ? ts_error->value() : TabletServerErrorPB::UNKNOWN_ERROR;
-  if (code == TabletServerErrorPB::UNKNOWN_ERROR) {
-    consensus::ConsensusError consensus_error(s);
-    if (consensus_error.value() == consensus::ConsensusErrorPB::TABLET_SPLIT) {
-      code = TabletServerErrorPB::TABLET_SPLIT;
-    }
-  }
-  StatusToPB(s, error->mutable_status());
-  error->set_code(code);
+} // namespace
+
+void SetupErrorAndRespond(TabletServerErrorPB* error,
+                          const Status& s,
+                          TabletServerErrorPB::Code code,
+                          rpc::RpcContext* context) {
+  DoSetupErrorAndRespond(error, s, code, context);
+}
+
+void SetupErrorAndRespond(TabletServerErrorPB* error,
+                          const Status& s,
+                          rpc::RpcContext* context) {
+  DoSetupErrorAndRespond(error, s, context);
+}
+
+void SetupErrorAndRespond(LWTabletServerErrorPB* error,
+                          const Status& s,
+                          TabletServerErrorPB::Code code,
+                          rpc::RpcContext* context) {
+  DoSetupErrorAndRespond(error, s, code, context);
+}
+
+void SetupErrorAndRespond(LWTabletServerErrorPB* error,
+                          const Status& s,
+                          rpc::RpcContext* context) {
+  DoSetupErrorAndRespond(error, s, context);
 }
 
 Result<int64_t> LeaderTerm(const tablet::TabletPeer& tablet_peer) {
-  std::shared_ptr<consensus::Consensus> consensus = tablet_peer.shared_consensus();
-  if (!consensus) {
+  auto consensus_result = tablet_peer.GetConsensus();
+  if (!consensus_result) {
     auto state = tablet_peer.state();
     if (state != tablet::RaftGroupStatePB::SHUTDOWN) {
       // Should not happen.
-      return STATUS(IllegalState, "Tablet peer does not have consensus, but in $0 state",
-                    tablet::RaftGroupStatePB_Name(state));
+      return consensus_result.status();
     }
     return STATUS(Aborted, "Tablet peer was closed");
   }
+  auto& consensus = consensus_result.get();
   auto leader_state = consensus->GetLeaderState();
 
   VLOG(1) << Format(
@@ -166,7 +182,7 @@ Status LeaderTabletPeer::FillTerm() {
     auto tablet = peer->shared_tablet();
     if (tablet) {
       // It could happen that tablet becomes nullptr due to shutdown.
-      tablet->metrics()->not_leader_rejections->Increment();
+      tablet->metrics()->Increment(tablet::TabletCounters::kNotLeaderRejections);
     }
     return leader_term_result.status();
   }
@@ -175,32 +191,12 @@ Status LeaderTabletPeer::FillTerm() {
   return Status::OK();
 }
 
-Result<LeaderTabletPeer> LookupLeaderTablet(
-    TabletPeerLookupIf* tablet_manager,
-    const std::string& tablet_id,
-    TabletPeerTablet peer) {
-  if (peer.tablet_peer) {
-    LOG_IF(DFATAL, peer.tablet_peer->tablet_id() != tablet_id)
-        << "Mismatching table ids: peer " << peer.tablet_peer->tablet_id()
-        << " vs " << tablet_id;
-    LOG_IF(DFATAL, !peer.tablet) << "Empty tablet pointer for tablet id : " << tablet_id;
-  } else {
-    peer = VERIFY_RESULT(LookupTabletPeer(tablet_manager, tablet_id));
-  }
-  LeaderTabletPeer result;
-  result.FillTabletPeer(std::move(peer));
-
-  RETURN_NOT_OK(result.FillTerm());
-  return result;
-}
-
 Status CheckPeerIsReady(
     const tablet::TabletPeer& tablet_peer, AllowSplitTablet allow_split_tablet) {
-  auto consensus = tablet_peer.shared_consensus();
-  if (!consensus) {
-    return STATUS(
-        IllegalState, Format("Consensus not available for tablet $0.", tablet_peer.tablet_id()),
-        Slice(), TabletServerError(TabletServerErrorPB::TABLET_NOT_RUNNING));
+  auto consensus_result = tablet_peer.GetConsensus();
+  if (!consensus_result) {
+    return consensus_result.status().CloneAndAddErrorCode(
+        TabletServerError(TabletServerErrorPB::TABLET_NOT_RUNNING));
   }
 
   Status s = tablet_peer.CheckRunning();
@@ -208,7 +204,7 @@ Status CheckPeerIsReady(
     return s.CloneAndAddErrorCode(TabletServerError(TabletServerErrorPB::TABLET_NOT_RUNNING));
   }
 
-  auto* tablet = tablet_peer.tablet();
+  auto tablet = VERIFY_RESULT(tablet_peer.shared_tablet_safe());
   SCHECK(tablet != nullptr, IllegalState, "Expected tablet peer to have a tablet");
   const auto tablet_data_state = tablet->metadata()->tablet_data_state();
   if (!allow_split_tablet &&
@@ -235,6 +231,24 @@ Status CheckPeerIsLeader(const tablet::TabletPeer& tablet_peer) {
   return ResultToStatus(LeaderTerm(tablet_peer));
 }
 
+bool IsErrorCodeNotTheLeader(const Status& status) {
+  auto code = TabletServerError::FromStatus(status);
+  return code && code.value() == TabletServerErrorPB::NOT_THE_LEADER;
+}
+
+std::shared_ptr<TabletConsensusInfoPB> GetTabletConsensusInfoFromTabletPeer(
+    const tablet::TabletPeerPtr& peer) {
+  if (auto consensus = peer->GetRaftConsensus()) {
+    std::shared_ptr<TabletConsensusInfoPB> tablet_consensus_info =
+        std::make_shared<TabletConsensusInfoPB>();
+    tablet_consensus_info->set_tablet_id(peer->tablet_id());
+    *(tablet_consensus_info->mutable_consensus_state()) =
+        consensus.get()->GetConsensusStateFromCache();
+    return tablet_consensus_info;
+  }
+  return nullptr;
+}
+
 namespace {
 
 template <class Key>
@@ -259,13 +273,12 @@ Result<TabletPeerTablet> DoLookupTabletPeer(
     return s;
   }
 
-  result.tablet = result.tablet_peer->shared_tablet();
-  if (!result.tablet) {
-    Status s = STATUS(IllegalState,
-                      "Tablet not running",
-                      TabletServerError(TabletServerErrorPB::TABLET_NOT_RUNNING));
-    return s;
+  auto tablet_result = result.tablet_peer->shared_tablet_safe();
+  if (!tablet_result.ok()) {
+    return tablet_result.status().CloneAndAddErrorCode(TabletServerError(
+        TabletServerErrorPB::TABLET_NOT_RUNNING));
   }
+  result.tablet = *tablet_result;
   return result;
 }
 
@@ -274,32 +287,35 @@ Result<TabletPeerTablet> DoLookupTabletPeer(
 Result<TabletPeerTablet> LookupTabletPeer(
     TabletPeerLookupIf* tablet_manager,
     const TabletId& tablet_id) {
+  if (const auto& wait_state = ash::WaitStateInfo::CurrentWaitState()) {
+    wait_state->UpdateAuxInfo(ash::AshAuxInfo{.tablet_id = tablet_id});
+  }
   return DoLookupTabletPeer(tablet_manager, tablet_id);
 }
 
 Result<TabletPeerTablet> LookupTabletPeer(
     TabletPeerLookupIf* tablet_manager,
     const Slice& tablet_id) {
+  if (const auto& wait_state = ash::WaitStateInfo::CurrentWaitState()) {
+    wait_state->UpdateAuxInfo(ash::AshAuxInfo{.tablet_id = tablet_id.ToBuffer()});
+  }
   return DoLookupTabletPeer(tablet_manager, tablet_id);
 }
 
 Result<std::shared_ptr<tablet::AbstractTablet>> GetTablet(
     TabletPeerLookupIf* tablet_manager, const TabletId& tablet_id,
     tablet::TabletPeerPtr tablet_peer, YBConsistencyLevel consistency_level,
-    AllowSplitTablet allow_split_tablet) {
+    AllowSplitTablet allow_split_tablet, ReadResponsePB* resp) {
   tablet::TabletPtr tablet_ptr = nullptr;
   if (tablet_peer) {
     DCHECK_EQ(tablet_peer->tablet_id(), tablet_id);
-    tablet_ptr = tablet_peer->shared_tablet();
-    LOG_IF(DFATAL, tablet_ptr == nullptr)
-        << "Empty tablet pointer for tablet id: " << tablet_id;
+    tablet_ptr = VERIFY_RESULT(tablet_peer->shared_tablet_safe());
   } else {
     auto tablet_peer_result = VERIFY_RESULT(LookupTabletPeer(tablet_manager, tablet_id));
 
     tablet_peer = std::move(tablet_peer_result.tablet_peer);
     tablet_ptr = std::move(tablet_peer_result.tablet);
   }
-
   RETURN_NOT_OK(CheckPeerIsReady(*tablet_peer, allow_split_tablet));
 
   // Check for leader only in strong consistency level.
@@ -308,28 +324,34 @@ Result<std::shared_ptr<tablet::AbstractTablet>> GetTablet(
       LOG(FATAL) << "--TEST_assert_reads_from_follower_rejected_because_of_staleness is true but "
                     "consistency level is invalid: YBConsistencyLevel::STRONG";
     }
-
-    RETURN_NOT_OK(CheckPeerIsLeader(*tablet_peer));
+    auto status = CheckPeerIsLeader(*tablet_peer);
+    if (!status.ok()) {
+      if (IsErrorCodeNotTheLeader(status)) {
+        FillTabletConsensusInfo(resp, tablet_id, tablet_peer);
+      }
+      return status;
+    }
   } else {
     auto s = CheckPeerIsLeader(*tablet_peer.get());
-
     // Peer is not the leader, so check that the time since it last heard from the leader is less
     // than FLAGS_max_stale_read_bound_time_ms.
     if (PREDICT_FALSE(!s.ok())) {
       if (FLAGS_max_stale_read_bound_time_ms > 0) {
-        auto consensus = tablet_peer->shared_consensus();
         // TODO(hector): This safe time could be reused by the read operation.
-        auto safe_time_micros = tablet_peer->tablet()->mvcc_manager()->SafeTimeForFollower(
+        auto tablet = VERIFY_RESULT(tablet_peer->shared_tablet_safe());
+        auto safe_time_micros = tablet->mvcc_manager()->SafeTimeForFollower(
             HybridTime::kMin, CoarseTimePoint::min()).GetPhysicalValueMicros();
         auto now_micros = tablet_peer->clock_ptr()->Now().GetPhysicalValueMicros();
         auto follower_staleness_us = now_micros - safe_time_micros;
         if (follower_staleness_us > FLAGS_max_stale_read_bound_time_ms * 1000) {
           VLOG(1) << "Rejecting stale read with staleness "
                      << follower_staleness_us << "us";
-          return STATUS(
-              IllegalState, "Stale follower",
-              TabletServerError(TabletServerErrorPB::STALE_FOLLOWER));
-        } else if (PREDICT_FALSE(
+          return STATUS_EC_FORMAT(
+              IllegalState, TabletServerError(TabletServerErrorPB::STALE_FOLLOWER),
+              "Stale follower $0 with staleness $1 us", tablet_peer->LogPrefix(),
+              follower_staleness_us);
+        }
+        if (PREDICT_FALSE(
             FLAGS_TEST_assert_reads_from_follower_rejected_because_of_staleness)) {
           LOG(FATAL) << "--TEST_assert_reads_from_follower_rejected_because_of_staleness is true,"
                      << " but peer " << tablet_peer->permanent_uuid()
@@ -349,14 +371,12 @@ Result<std::shared_ptr<tablet::AbstractTablet>> GetTablet(
       }
     }
   }
-
   auto tablet = tablet_peer->shared_tablet();
   if (PREDICT_FALSE(!tablet)) {
     return STATUS_EC_FORMAT(
         IllegalState, TabletServerError(TabletServerErrorPB::TABLET_NOT_RUNNING),
         "Tablet $0 is not running", tablet_id);
   }
-
   return tablet;
 }
 
@@ -380,10 +400,10 @@ Status RejectWrite(
 Status CheckWriteThrottling(double score, tablet::TabletPeer* tablet_peer) {
   // Check for memory pressure; don't bother doing any additional work if we've
   // exceeded the limit.
-  auto tablet = tablet_peer->tablet();
+  auto tablet = VERIFY_RESULT(tablet_peer->shared_tablet_safe());
   auto soft_limit_exceeded_result = tablet->mem_tracker()->AnySoftLimitExceeded(score);
   if (soft_limit_exceeded_result.exceeded) {
-    tablet->metrics()->leader_memory_pressure_rejections->Increment();
+    tablet->metrics()->Increment(tablet::TabletCounters::kLeaderMemoryPressureRejections);
     string msg = StringPrintf(
         "Soft memory limit exceeded for %s (at %.2f%% of capacity), score: %.2f",
         soft_limit_exceeded_result.tracker_path.c_str(),
@@ -397,14 +417,15 @@ Status CheckWriteThrottling(double score, tablet::TabletPeer* tablet_peer) {
     return STATUS(ServiceUnavailable, msg);
   }
 
-  const uint64_t num_sst_files = tablet_peer->raft_consensus()->MajorityNumSSTFiles();
+  const uint64_t num_sst_files =
+      VERIFY_RESULT(tablet_peer->GetRaftConsensus())->MajorityNumSSTFiles();
   const auto sst_files_soft_limit = FLAGS_sst_files_soft_limit;
   const int64_t sst_files_used_delta = num_sst_files - sst_files_soft_limit;
   if (sst_files_used_delta >= 0) {
     const auto sst_files_hard_limit = FLAGS_sst_files_hard_limit;
     const auto sst_files_full_delta = sst_files_hard_limit - sst_files_soft_limit;
     if (sst_files_used_delta >= sst_files_full_delta * (1 - score)) {
-      tablet->metrics()->majority_sst_files_rejections->Increment();
+      tablet->metrics()->Increment(tablet::TabletCounters::kMajoritySstFilesRejections);
       auto message = Format("SST files limit exceeded $0 against ($1, $2), score: $3",
                             num_sst_files, sst_files_soft_limit, sst_files_hard_limit, score);
       auto overlimit = sst_files_full_delta > 0
@@ -422,6 +443,18 @@ Status CheckWriteThrottling(double score, tablet::TabletPeer* tablet_peer) {
   }
 
   return Status::OK();
+}
+
+uint64_t CatalogVersionChecker::GetLastBreakingVersion(DbOid db_oid) const {
+  uint64_t last_breaking_catalog_version;
+  if (db_oid) {
+    tablet_server_.get_ysql_db_catalog_version(
+        *db_oid, nullptr /* current_version */, &last_breaking_catalog_version);
+  } else {
+    tablet_server_.get_ysql_catalog_version(
+        nullptr /* current_version */, &last_breaking_catalog_version);
+  }
+  return last_breaking_catalog_version;
 }
 
 } // namespace tserver

@@ -19,9 +19,17 @@ yb_home_dir="/home/yugabyte"
 result_kvs=""
 YB_SUDO_PASS=""
 ports_to_check=""
+tmp_dir="/tmp"
 PROMETHEUS_FREE_SPACE_MB=100
 HOME_FREE_SPACE_MB=2048
+VM_MAX_MAP_COUNT=262144
 PYTHON_EXECUTABLES=('python3.6' 'python3' 'python3.7' 'python3.8' 'python')
+LINUX_OS_NAME=""
+
+set_linux_os_name() {
+  LINUX_OS_NAME=$(awk -F= -v key="NAME" '$1==key {gsub(/"/, "", $2); print $2}'\
+  /etc/os-release 2>/dev/null)
+}
 
 preflight_provision_check() {
   # Check python is installed.
@@ -55,15 +63,20 @@ preflight_provision_check() {
     fi
     update_result_json "(Prometheus) No Pre-existing Node Exporter Running" "$no_node_exporter"
 
-    # Check prometheus files are writable.
     filepaths="/opt/prometheus /etc/prometheus /var/log/prometheus /var/run/prometheus \
-      /var/lib/prometheus /lib/systemd/system/node_exporter.service"
+      /var/lib/prometheus"
+    # Check prometheus files are writable.
+    if [[ $LINUX_OS_NAME = "SLES" ]]; then
+      filepaths="$filepaths /usr/lib/systemd/system/node_exporter.service"
+    else
+      filepaths="$filepaths /lib/systemd/system/node_exporter.service"
+    fi
     for path in $filepaths; do
       check_filepath "Prometheus" "$path" true
     done
 
     check_free_space "/opt/prometheus" $PROMETHEUS_FREE_SPACE_MB
-    check_free_space "/tmp" $PROMETHEUS_FREE_SPACE_MB # for downloading folder
+    check_free_space $tmp_dir $PROMETHEUS_FREE_SPACE_MB # for downloading folder
   fi
 
   # Check ulimit settings.
@@ -71,6 +84,153 @@ preflight_provision_check() {
   check_filepath "PAM Limits" $ulimit_filepath true
 
   # Check NTP synchronization
+  check_ntp_service
+
+  # Check mount points are writeable.
+  IFS="," read -ra mount_points_arr <<< "$mount_points"
+  for path in "${mount_points_arr[@]}"; do
+    check_filepath "Mount Point" "$path" false
+  done
+
+  # Check ports are available.
+  IFS="," read -ra ports_to_check_arr <<< "$ports_to_check"
+  for port in "${ports_to_check_arr[@]}"; do
+    check_passed=true
+    if echo $YB_SUDO_PASS | sudo -S netstat -tulpn | grep ":$port\s"; then
+      check_passed=false
+    fi
+    update_result_json "Port $port is available" "$check_passed"
+  done
+
+  # Check yugabyte user belongs to yugabyte group if it exists.
+  if id -u "yugabyte"; then
+    yb_group=$(id -gn "yugabyte")
+    user_status=false
+    if [[ $yb_group == "yugabyte" ]]; then
+      user_status=true
+    fi
+    update_result_json "Yugabyte User in Yugabyte Group" "$user_status"
+  fi
+
+  check_free_space "$yb_home_dir" $HOME_FREE_SPACE_MB
+
+  # Check Locale
+  result=$(locale -a | grep -q -E "en_US.utf8|en_US.UTF-8")
+  if [[ "$?" -eq 0 ]]; then
+    update_result_json "locale_present" true
+  else
+    update_result_json "locale_present" false
+  fi
+
+}
+
+preflight_configure_check() {
+  # Check yugabyte user exists.
+  id -u yugabyte
+  update_result_json_with_rc "Yugabyte User" "$?"
+
+  # Check yugabyte user belongs to group yugabyte.
+  yb_group=$(id -gn "yugabyte")
+  user_status=false
+  if [[ $yb_group == "yugabyte" ]]; then
+    user_status=true
+  fi
+  update_result_json "Yugabyte Group" "$user_status"
+
+  # Check home directory exists.
+  check_filepath "Home Directory" "$yb_home_dir" false
+
+  # Check virtual memory max map limit.
+  vm_max_map_count=$(cat /proc/sys/vm/max_map_count 2> /dev/null)
+  test ${vm_max_map_count:-0} -ge $VM_MAX_MAP_COUNT
+  update_result_json_with_rc "vm_max_map_count" "$?"
+
+  # Check NTP synchronization
+  check_ntp_service
+}
+
+preflight_all_checks() {
+
+  # Check whether files in home directory are cleaned up if exists.
+  # Finds all files including the .yugabytedb folder and ignores other dot files, node-agent files.
+  yb_home_dir_clean=true
+  if [[ -e "$yb_home_dir" ]]; then
+    if [[ "$check_type" == "provision" ]]; then
+      files=$(sudo find "$yb_home_dir" -maxdepth 1 -mindepth 1  -name "bin" -o -name ".yugabytedb" -o -name "controller" -o -name "master" -o -name "tserver")
+    else
+      files=$(find "$yb_home_dir" -maxdepth 1 -mindepth 1  -name "bin" -o -name ".yugabytedb" -o -name "controller" -o -name "master" -o -name "tserver")
+    fi
+    if [[ -n "$files" ]]; then
+      yb_home_dir_clean=false
+    fi
+  fi
+  update_result_json "yb_home_dir_clean" "$yb_home_dir_clean"
+
+
+  # Check whether files in data directory are cleaned up.
+  data_dir_clean=true
+  processes=("tserver" "master" "controller")
+  IFS="," read -ra mount_points_arr <<< "$mount_points"
+  for path in "${mount_points_arr[@]}"; do
+    if [ -e "$path/pg_data" ]; then
+      data_dir_clean=false
+      break
+    fi
+    if [ -e "$path/ybc-data" ]; then
+      data_dir_clean=false
+      break
+    fi
+    for daemon in "${processes[@]}"; do
+      if [ -e "$path/yb-data/$daemon" ]; then
+        data_dir_clean=false
+        break
+      fi
+    done
+  done
+  update_result_json "data_dir_clean" "$data_dir_clean"
+}
+
+# Checks for an available python executable
+check_python() {
+  python_status=false
+  for py_executable in "${PYTHON_EXECUTABLES[@]}"; do
+    if echo $YB_SUDO_PASS | sudo -S /bin/sh -c "/usr/bin/env $py_executable --version"; then
+      python_status=true
+    fi
+  done
+  update_result_json "Sudo Access to Python" "$python_status"
+}
+
+# Checks if given filepath is writable.
+check_filepath() {
+  test_type="$1"
+  path="$2"
+  check_parent="$3" # If true, will check parent directory is writable if given path doesn't exist.
+
+  if [[ "$check_type" == "provision" ]]; then
+    # Use sudo command for provision.
+    echo $YB_SUDO_PASS | sudo -S test -w "$path" || \
+    ($check_parent && echo $YB_SUDO_PASS | sudo -S test -w $(dirname "$path"))
+  else
+    test -w "$path" || ($check_parent && test -w $(dirname "$path"))
+  fi
+
+  update_result_json_with_rc "($test_type) $path is writable" "$?"
+}
+
+check_free_space() {
+  path="$1"
+  required_mb="$2"
+  # check parent if path does not exist
+  if [ ! -w "$path" ]; then
+    path=$(dirname "$path")
+  fi
+  test $(echo $YB_SUDO_PASS | sudo -S df -m $path | awk 'FNR == 2 {print $4}') -gt $required_mb
+
+  update_result_json_with_rc "$1 has free space of $required_mb MB $SPACE_STR" "$?"
+}
+
+check_ntp_service() {
   if [[ "$skip_ntp_check" = false ]]; then
     ntp_status=$(timedatectl status)
     ntp_check=true
@@ -115,91 +275,6 @@ preflight_provision_check() {
       update_result_json "NTP time synchronization set up" false
     fi
   fi
-
-  # Check mount points are writeable.
-  IFS="," read -ra mount_points_arr <<< "$mount_points"
-  for path in "${mount_points_arr[@]}"; do
-    check_filepath "Mount Point" "$path" false
-  done
-
-  # Check ports are available.
-  IFS="," read -ra ports_to_check_arr <<< "$ports_to_check"
-  for port in "${ports_to_check_arr[@]}"; do
-    check_passed=true
-    if echo $YB_SUDO_PASS | sudo -S netstat -tulpn | grep ":$port\s"; then
-      check_passed=false
-    fi
-    update_result_json "Port $port is available" "$check_passed"
-  done
-
-  # Check yugabyte user belongs to yugabyte group if it exists.
-  if id -u "yugabyte"; then
-    yb_group=$(id -gn "yugabyte")
-    user_status=false
-    if [[ $yb_group == "yugabyte" ]]; then
-      user_status=true
-    fi
-    update_result_json "Yugabyte User in Yugabyte Group" "$user_status"
-  fi
-
-  check_free_space "$yb_home_dir" $HOME_FREE_SPACE_MB
-}
-
-preflight_configure_check() {
-  # Check yugabyte user exists.
-  id -u yugabyte
-  update_result_json_with_rc "Yugabyte User" "$?"
-
-  # Check yugabyte user belongs to group yugabyte.
-  yb_group=$(id -gn "yugabyte")
-  user_status=false
-  if [[ $yb_group == "yugabyte" ]]; then
-    user_status=true
-  fi
-  update_result_json "Yugabyte Group" "$user_status"
-
-  # Check home directory exists.
-  check_filepath "Home Directory" "$yb_home_dir" false
-}
-
-# Checks for an available python executable
-check_python() {
-  python_status=false
-  for py_executable in "${PYTHON_EXECUTABLES[@]}"; do
-    if echo $YB_SUDO_PASS | sudo -S /bin/sh -c "/usr/bin/env $py_executable --version"; then
-      python_status=true
-    fi
-  done
-  update_result_json "Sudo Access to Python" "$python_status"
-}
-
-# Checks if given filepath is writable.
-check_filepath() {
-  test_type="$1"
-  path="$2"
-  check_parent="$3" # If true, will check parent directory is writable if given path doesn't exist.
-
-  if [[ "$check_type" == "provision" ]]; then
-    # Use sudo command for provision.
-    echo $YB_SUDO_PASS | sudo -S test -w "$path" || \
-    ($check_parent && echo $YB_SUDO_PASS | sudo -S test -w $(dirname "$path"))
-  else
-    test -w "$path" || ($check_parent && test -w $(dirname "$path"))
-  fi
-
-  update_result_json_with_rc "($test_type) $path is writable" "$?"
-}
-
-check_free_space() {
-  path="$1"
-  required_mb="$2"
-  # check parent if path does not exist
-  if [ ! -w "$path" ]; then
-    path=$(dirname "$path")
-  fi
-  test $(echo $YB_SUDO_PASS | sudo -S df -m $path | awk 'FNR == 2 {print $4}') -gt $required_mb
-
-  update_result_json_with_rc "$1 has free space of $required_mb MB $SPACE_STR" "$?"
 }
 
 update_result_json() {
@@ -241,6 +316,8 @@ Options:
     Bash file containing the sudo password variable.
   --ports_to_check PORTS_TO_CHECK
     Comma-separated list of ports to check availability
+  --tmp_dir TMP_DIRECTORY
+    Tmp Directory on the specified node.
   --cleanup
     Deletes this script after being run. Allows `scp` commands to port over new preflight scripts.
   -h, --help
@@ -290,6 +367,10 @@ while [[ $# -gt 0 ]]; do
       yb_home_dir="$2"
       shift
     ;;
+    --tmp_dir)
+      tmp_dir="$2"
+      shift
+    ;;
     --sudo_pass_file)
       if [ -f $2 ]; then
         . $2
@@ -314,6 +395,8 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
+set_linux_os_name
+preflight_all_checks > /dev/null 2>&1
 if [[ "$check_type" == "provision" ]]; then
   preflight_provision_check >/dev/null 2>&1
 else

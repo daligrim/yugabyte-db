@@ -15,18 +15,16 @@
 
 #include <boost/functional/hash.hpp>
 
-#include <glog/logging.h>
+#include "yb/util/logging.h"
 
 #include "yb/common/redis_constants_common.h"
 
 #include "yb/master/master_util.h"
-#include "yb/util/flag_tags.h"
+#include "yb/util/flags.h"
 
-namespace yb {
-namespace client {
+namespace yb::client {
 
-DEFINE_bool(yb_system_namespace_readonly, true, "Set system keyspace read-only.");
-TAG_FLAG(yb_system_namespace_readonly, runtime);
+DEFINE_RUNTIME_bool(yb_system_namespace_readonly, true, "Set system keyspace read-only.");
 
 using std::string;
 
@@ -128,8 +126,24 @@ void YBTableName::set_table_id(const std::string& table_id) {
 }
 
 void YBTableName::set_pgschema_name(const std::string& pgschema_name) {
+  DCHECK(!pgschema_name.empty());
   pgschema_name_ = pgschema_name;
 }
 
-} // namespace client
-} // namespace yb
+std::string YBTableName::ToString(bool include_id) const {
+  std::string result;
+  if (has_namespace()) {
+    result += namespace_name_;
+    result += ".";
+  }
+  result += table_name_;
+  if (!pgschema_name_.empty()) {
+    result += Format(" [ysql_schema=$0]", pgschema_name_);
+  }
+  if (include_id && !table_id_.empty()) {
+    result += Format(" [$0]", table_id_);
+  }
+  return result;
+}
+
+} // namespace yb::client

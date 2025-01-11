@@ -11,13 +11,13 @@
 // under the License.
 //
 
-#ifndef YB_CLIENT_YB_TABLE_NAME_H_
-#define YB_CLIENT_YB_TABLE_NAME_H_
+#pragma once
 
 #include <string>
 #include <boost/optional.hpp>
 
-#include <gflags/gflags_declare.h>
+#include "yb/util/flags.h"
+#include "yb/util/memory/memory_usage.h"
 
 #include "yb/common/common_types.pb.h"
 
@@ -38,8 +38,8 @@ DECLARE_bool(yb_system_namespace_readonly);
 // The class is used to store a table name, which can include namespace name as a suffix.
 class YBTableName {
  public:
-  // Empty (undefined) name.
-  YBTableName() : namespace_type_(YQL_DATABASE_UNKNOWN) {}
+  // Empty (undefined) name. Only the table type can be known.
+  explicit YBTableName(YQLDatabase db_type = YQL_DATABASE_UNKNOWN) : namespace_type_(db_type) {}
 
   // Complex table name: 'namespace_name.table_name'.
   // The namespace must not be empty.
@@ -72,8 +72,10 @@ class YBTableName {
     set_namespace_name(namespace_name);
     set_table_id(table_id);
     set_table_name(table_name);
-    set_pgschema_name(pgschema_name);
     set_relation_type(relation_type);
+    if (!pgschema_name.empty()) {
+      set_pgschema_name(pgschema_name);
+    }
   }
 
   // Simple table name (no namespace provided at the moment of construction).
@@ -138,15 +140,17 @@ class YBTableName {
     return namespace_type_ == YQL_DATABASE_CQL;
   }
 
+  bool is_pgsql_namespace() const {
+    return namespace_type_ == YQL_DATABASE_PGSQL;
+  }
+
   bool is_redis_namespace() const {
     return namespace_type_ == YQL_DATABASE_REDIS;
   }
 
   bool is_redis_table() const;
 
-  std::string ToString() const {
-    return has_namespace() ? (namespace_name_ + '.' + table_name_) : table_name_;
-  }
+  std::string ToString(bool include_id = true) const;
 
   void set_namespace_id(const std::string& namespace_id);
   void set_namespace_name(const std::string& namespace_name);
@@ -164,6 +168,12 @@ class YBTableName {
 
   void SetIntoNamespaceIdentifierPB(master::NamespaceIdentifierPB* id) const;
   void GetFromNamespaceIdentifierPB(const master::NamespaceIdentifierPB& id);
+
+  size_t DynamicMemoryUsage() const {
+    return sizeof(*this) +
+           DynamicMemoryUsageOf(
+               namespace_id_, namespace_name_, table_id_, table_name_ + pgschema_name_);
+  }
 
  private:
   void check_db_type();
@@ -192,5 +202,3 @@ size_t hash_value(const YBTableName& table_name);
 
 }  // namespace client
 }  // namespace yb
-
-#endif  // YB_CLIENT_YB_TABLE_NAME_H_

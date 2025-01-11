@@ -4,12 +4,11 @@ headerTitle: Keywords
 linkTitle: Keywords
 description: YSQL API keywords.
 summary: Reference for YSQL API
-image: /images/section_icons/api/ysql.png
 menu:
-  stable:
+  stable_api:
     identifier: api-ysql-keywords
     parent: api-ysql
-    weight: 500
+    weight: 90
 type: docs
 ---
 

@@ -29,6 +29,7 @@
 
 #include "yb/util/result.h"
 #include "yb/util/status_format.h"
+#include "yb/util/flags.h"
 
 using std::locale;
 using std::vector;
@@ -49,7 +50,8 @@ using boost::posix_time::time_duration;
 using boost::posix_time::microsec_clock;
 using boost::posix_time::milliseconds;
 
-DEFINE_bool(use_icu_timezones, true, "Use the new ICU library for timezones instead of boost");
+DEFINE_UNKNOWN_bool(use_icu_timezones, true,
+    "Use the new ICU library for timezones instead of boost");
 
 namespace yb {
 
@@ -154,25 +156,31 @@ Result<string> GetTimezone(string timezoneID) {
   return buffer;
 }
 
-Result<time_zone_ptr> StringToTimezone(const std::string& tz, bool use_utc) {
+Result<time_zone_ptr> StringToTimezone(const string& tz, bool use_utc) {
+  string time_zone;
   if (tz.empty()) {
-    return use_utc ? kUtcTimezone : boost::make_shared<posix_time_zone>(GetSystemTimezone());
+    if (use_utc) {
+      return kUtcTimezone;
+    }
+    time_zone = GetSystemTimezone();
+  } else if (FLAGS_use_icu_timezones) {
+    time_zone = VERIFY_RESULT(GetTimezone(tz));
+  } else {
+    time_zone = tz;
   }
-  if (FLAGS_use_icu_timezones) {
-    return boost::make_shared<posix_time_zone>(VERIFY_RESULT(GetTimezone(tz)));
-  }
-  return boost::make_shared<posix_time_zone>(tz);
+
+  return boost::make_shared<posix_time_zone>(time_zone);
 }
 
 } // namespace
 
 //------------------------------------------------------------------------------------------------
-Result<Timestamp> DateTime::TimestampFromString(const string& str,
+Result<Timestamp> DateTime::TimestampFromString(const std::string_view& str,
                                                 const InputFormat& input_format) {
-  std::smatch m;
+  std::cmatch m;
   // trying first regex to match from the format
   for (const auto& reg : input_format.regexes) {
-    if (std::regex_match(str, m, reg)) {
+    if (std::regex_match(str.begin(), str.end(), m, reg)) {
       // setting default values where missing
       const int year = stoi(m.str(1));
       const int month = stoi(m.str(2));
@@ -220,12 +228,16 @@ Timestamp DateTime::TimestampNow() {
   return ToTimestamp(local_microsec_clock::local_time(kUtcTimezone));
 }
 
+string DateTime::SystemTimezone() {
+  return GetSystemTimezone();
+}
+
 //------------------------------------------------------------------------------------------------
-Result<uint32_t> DateTime::DateFromString(const std::string& str) {
+Result<uint32_t> DateTime::DateFromString(const std::string_view& str) {
   // Regex for date format "yyyy-mm-dd"
   static const regex date_format("(-?\\d{1,7})-(\\d{1,2})-(\\d{1,2})");
-  std::smatch m;
-  if (!std::regex_match(str, m, date_format)) {
+  std::cmatch m;
+  if (!std::regex_match(str.begin(), str.end(), m, date_format)) {
     return STATUS(InvalidArgument, "Invalid date format");
   }
   const int year = stoi(m.str(1));
@@ -291,11 +303,11 @@ uint32_t DateTime::DateNow() {
 }
 
 //------------------------------------------------------------------------------------------------
-Result<int64_t> DateTime::TimeFromString(const std::string& str) {
+Result<int64_t> DateTime::TimeFromString(const std::string_view& str) {
   // Regex for time format "hh:mm:ss[.fffffffff]"
   static const regex time_format("(\\d{1,2}):(\\d{1,2}):(\\d{1,2})(\\.(\\d{0,9}))?");
-  std::smatch m;
-  if (!std::regex_match(str, m, time_format)) {
+  std::cmatch m;
+  if (!std::regex_match(str.begin(), str.end(), m, time_format)) {
     return STATUS(InvalidArgument, "Invalid time format");
   }
   const int64_t hour = stoi(m.str(1));
@@ -337,7 +349,7 @@ int64_t DateTime::TimeNow() {
 }
 
 //------------------------------------------------------------------------------------------------
-Result<MonoDelta> DateTime::IntervalFromString(const std::string& str) {
+Result<MonoDelta> DateTime::IntervalFromString(const std::string_view& str) {
   /* See Postgres: DecodeInterval() in datetime.c */
   static const std::vector<std::regex> regexes {
       // ISO 8601: '3d 4h 5m 6s'
@@ -351,8 +363,8 @@ Result<MonoDelta> DateTime::IntervalFromString(const std::string& str) {
   };
   // Try each regex to see if one matches.
   for (const auto& reg : regexes) {
-    std::smatch m;
-    if (std::regex_match(str, m, reg)) {
+    std::cmatch m;
+    if (std::regex_match(str.begin(), str.end(), m, reg)) {
       // All regex's have the name 4 capture groups, in order.
       const auto day = m.str(1).empty() ? 0 : stol(m.str(1));
       const auto hours = m.str(2).empty() ? 0 : stol(m.str(2));
@@ -362,7 +374,7 @@ Result<MonoDelta> DateTime::IntervalFromString(const std::string& str) {
       return MonoDelta::FromSeconds(seconds + (60 * (minutes + 60 * (hours + 24 * day))));
     }
   }
-  return STATUS(InvalidArgument, "Invalid interval", "Wrong format of input string: " + str);
+  return STATUS(InvalidArgument, "Wrong format of input string", str);
 }
 
 //------------------------------------------------------------------------------------------------
@@ -383,6 +395,13 @@ int64_t DateTime::AdjustPrecision(int64_t val,
     input_precision -= 1;
   }
   return val;
+}
+
+// returns floor of the timestamp rounded to output_precision
+int64_t DateTime::FloorTimestamp(
+    int64_t val, size_t input_precision, const size_t output_precision) {
+  auto interim_val = AdjustPrecision(val, input_precision, output_precision);
+  return AdjustPrecision(interim_val, output_precision, input_precision);
 }
 
 namespace {

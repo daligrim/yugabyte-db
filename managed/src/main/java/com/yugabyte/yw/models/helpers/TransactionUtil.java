@@ -6,11 +6,11 @@ import static com.google.common.base.Preconditions.checkNotNull;
 
 import com.google.api.client.util.BackOff;
 import com.google.api.client.util.ExponentialBackOff;
-import io.ebean.Ebean;
+import io.ebean.DB;
 import io.ebean.Transaction;
 import io.ebean.annotation.TxIsolation;
+import jakarta.persistence.PersistenceException;
 import java.io.IOException;
-import javax.persistence.PersistenceException;
 import lombok.Builder;
 import lombok.NonNull;
 import lombok.Value;
@@ -106,7 +106,7 @@ public final class TransactionUtil {
     checkNotNull(runnable, "Runnable must be set");
     int attemptCount = 1;
     while (true) {
-      try (Transaction transaction = Ebean.beginTransaction(TxIsolation.SERIALIZABLE)) {
+      try (Transaction transaction = DB.beginTransaction(TxIsolation.SERIALIZABLE)) {
         if (attemptCount > 1) {
           log.info("Retrying({})...", attemptCount);
         } else {

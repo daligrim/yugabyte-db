@@ -19,6 +19,11 @@ import {
   fetchUniverseInfo,
   fetchUniverseInfoResponse
 } from '../../../../actions/universe';
+import {
+  DEFAULT_RUNTIME_GLOBAL_SCOPE,
+  fetchRunTimeConfigs,
+  fetchRunTimeConfigsResponse,
+} from '../../../../actions/customers';
 import { isDefinedNotNull, isNonEmptyObject } from '../../../../utils/ObjectUtils';
 import { getPrimaryCluster } from '../../../../utils/UniverseUtils';
 import { TASK_LONG_TIMEOUT } from '../../../tasks/constants';
@@ -68,7 +73,13 @@ const mapDispatchToProps = (dispatch) => {
       dispatch(fetchUniverseInfo(universeUUID)).then((response) => {
         dispatch(fetchUniverseInfoResponse(response.payload));
       });
-    }
+    },
+
+    fetchRuntimeConfigs: () => {
+      dispatch(fetchRunTimeConfigs(DEFAULT_RUNTIME_GLOBAL_SCOPE, true)).then((response) =>
+        dispatch(fetchRunTimeConfigsResponse(response.payload))
+      );
+    },
   };
 };
 
@@ -79,11 +90,12 @@ function mapStateToProps(state, ownProps) {
   } = state;
 
   const initialValues = {};
+  let intialSystemdValue = false;
   if (isNonEmptyObject(currentUniverse) && isNonEmptyObject(currentUniverse.data.universeDetails)) {
     initialValues.tlsCertificate = currentUniverse.data.universeDetails.rootCA;
 
     const primaryCluster = getPrimaryCluster(currentUniverse.data.universeDetails.clusters);
-    var intialSystemdValue = primaryCluster.userIntent.useSystemd;
+    intialSystemdValue = primaryCluster.userIntent.useSystemd;
     if (isDefinedNotNull(primaryCluster)) {
       initialValues.ybSoftwareVersion = primaryCluster.userIntent.ybSoftwareVersion;
 
@@ -93,7 +105,7 @@ function mapStateToProps(state, ownProps) {
       if (isNonEmptyObject(masterGFlags)) {
         Object.keys(masterGFlags).forEach((key) => {
           const masterObj = {};
-          if (tserverGFlags.hasOwnProperty(key)) {
+          if (Object.prototype.hasOwnProperty.call(tserverGFlags, key)) {
             masterObj['TSERVER'] = tserverGFlags[key];
           }
           masterObj['Name'] = key;
@@ -104,7 +116,7 @@ function mapStateToProps(state, ownProps) {
       if (isNonEmptyObject(tserverGFlags)) {
         Object.keys(tserverGFlags).forEach((key) => {
           const tserverObj = {};
-          if (!masterGFlags.hasOwnProperty(key)) {
+          if (!Object.prototype.hasOwnProperty.call(masterGFlags, key)) {
             tserverObj['TSERVER'] = tserverGFlags[key];
             tserverObj['Name'] = key;
             gFlagArray.push(tserverObj);
@@ -118,7 +130,8 @@ function mapStateToProps(state, ownProps) {
   initialValues.upgradeOption = 'Rolling';
   initialValues.rollingUpgrade = true;
   initialValues.systemdValue = intialSystemdValue;
-
+  initialValues.universeOverrides = '';
+  initialValues.azOverrides = '';
   let certificates = [];
   const allCertificates = state.customer.userCertificates;
   if (getPromiseState(allCertificates).isSuccess()) {
@@ -134,7 +147,8 @@ function mapStateToProps(state, ownProps) {
     'upgradeOption',
     'systemdValue',
     'ybSoftwareVersion',
-    'tlsCertificate'
+    'tlsCertificate',
+    'gFlags'
   );
 
   return {
@@ -146,7 +160,8 @@ function mapStateToProps(state, ownProps) {
     certificates,
     formValues,
     enableNewEncryptionInTransitModal:
-      test.enableNewEncryptionInTransitModal || released.enableNewEncryptionInTransitModal
+      test.enableNewEncryptionInTransitModal || released.enableNewEncryptionInTransitModal,
+    runtimeConfigs: state.customer.runtimeConfigs
   };
 }
 

@@ -13,6 +13,7 @@
 
 #include "yb/yql/pgwrapper/libpq_utils.h"
 
+#include <chrono>
 #include <string>
 #include <utility>
 
@@ -24,18 +25,20 @@
 #include "yb/gutil/endian.h"
 
 #include "yb/util/backoff_waiter.h"
+#include "yb/util/endian_util.h"
 #include "yb/util/enums.h"
 #include "yb/util/format.h"
 #include "yb/util/logging.h"
 #include "yb/util/monotime.h"
 #include "yb/util/net/net_util.h"
+#include "yb/util/pg_util.h"
 #include "yb/util/status_format.h"
 #include "yb/util/status_log.h"
+#include "yb/util/string_util.h"
 
 using namespace std::literals;
 
-namespace yb {
-namespace pgwrapper {
+namespace yb::pgwrapper {
 
 const std::string& DefaultColumnSeparator() {
   static const std::string result = ", ";
@@ -44,6 +47,12 @@ const std::string& DefaultColumnSeparator() {
 
 const std::string& DefaultRowSeparator() {
   static const std::string result = "; ";
+  return result;
+}
+
+const MonoTime& PGPostgresEpoch() {
+  // Jan 01 2000 00:00:00 GMT+0000
+  static const auto result = MonoTime::FromDuration(946684800s);
   return result;
 }
 
@@ -62,7 +71,9 @@ std::string ExecStatusTypeToStr(ExecStatusType exec_status_type) {
     (PGRES_NONFATAL_ERROR) \
     (PGRES_FATAL_ERROR) \
     (PGRES_COPY_BOTH) \
-    (PGRES_SINGLE_TUPLE)
+    (PGRES_SINGLE_TUPLE) \
+    (PGRES_PIPELINE_SYNC) \
+    (PGRES_PIPELINE_ABORTED)
   switch (exec_status_type) {
     BOOST_PP_SEQ_FOR_EACH(EXEC_STATUS_SWITCH_CASE, ~, EXEC_STATUS_TYPE_ENUM_ELEMENTS)
   }
@@ -126,6 +137,9 @@ std::string BuildConnectionString(const PGConnSettings& settings, bool mask_pass
   if (!settings.password.empty()) {
     result += Format(" password=$0", mask_password ? "<REDACTED>" : settings.password);
   }
+  if (!settings.replication.empty()) {
+    result += Format(" replication=$0", PqEscapeLiteral(settings.replication));
+  }
   return result;
 }
 
@@ -146,8 +160,161 @@ std::string GetPQErrorMessage(const PGconn* conn) {
   return FormPQErrorMessage(PQerrorMessage(conn));
 }
 
-}  // anonymous namespace
+Result<char*> GetValueWithLength(const PGresult* result, int row, int column, size_t size) {
+  size_t len = PQgetlength(result, row, column);
+  if (len != size) {
+    return STATUS_FORMAT(Corruption, "Bad column length: $0, expected: $1, row: $2, column: $3",
+                         len, size, row, column);
+  }
+  return PQgetvalue(result, row, column);
+}
 
+Slice CellSlice(const PGresult* result, int row, int column) {
+  return Slice(PQgetvalue(result, row, column), PQgetlength(result, row, column));
+}
+
+template<class T>
+Result<T> GetValueImpl(const PGresult* result, int row, int column) {
+  if constexpr (std::is_same_v<T, bool> || std::is_same_v<T, char>) {
+    static_assert(sizeof(bool) == sizeof(char));
+    return *VERIFY_RESULT(GetValueWithLength(result, row, column, 1));
+  } else if constexpr (std::is_same_v<T, std::uint16_t>) {
+    return BigEndian::Load16(
+        VERIFY_RESULT(GetValueWithLength(result, row, column, sizeof(uint16_t))));
+  } else if constexpr (std::is_same_v<T, std::uint32_t>) {
+    return BigEndian::Load32(
+        VERIFY_RESULT(GetValueWithLength(result, row, column, sizeof(uint32_t))));
+  } else if constexpr (std::is_same_v<T, std::uint64_t>) {
+    return BigEndian::Load64(
+        VERIFY_RESULT(GetValueWithLength(result, row, column, sizeof(uint64_t))));
+  } else if constexpr (std::is_same_v<T, std::string>) {
+    return CellSlice(result, row, column).ToBuffer();
+  } else if constexpr (std::is_same_v<T, Uuid>) {
+    return Uuid::FromSlice(CellSlice(result, row, column));
+  }
+  if constexpr (std::is_same_v<T, std::vector<float>>) {
+    auto slice = CellSlice(result, row, column);
+    if (slice.size() < 4) {
+      return STATUS_FORMAT(Corruption, "Too small data for float vector: $0", slice.size());
+    }
+    auto input = slice.data();
+    auto size = Read<uint16_t, BigEndian>(input);
+    size_t expected_size = 4 + size * sizeof(float);
+    if (slice.size() != expected_size) {
+      return STATUS_FORMAT(
+          Corruption, "Wrong data size for float vector: $0, expected: $1",
+          slice.size(), expected_size);
+    }
+    input += 2;
+    std::vector<float> vec;
+    vec.reserve(size);
+    while (input != slice.end()) {
+      vec.push_back(bit_cast<float>(Read<uint32_t, BigEndian>(input)));
+    }
+    return vec;
+  }
+}
+
+template<class F>
+struct FloatTraits {
+  using FloatType = F;
+  using IntType = uint32_t;
+};
+
+template<class F>
+requires(std::is_same_v<F, double>)
+struct FloatTraits<F> {
+  using FloatType = F;
+  using IntType = uint64_t;
+};
+
+std::vector<std::string> PerfArguments(int pid) {
+  return {"perf", "record", "-g", Format("-p$0", pid), Format("-o/tmp/perf.$0.data", pid)};
+}
+
+Result<std::string> RowToString(PGresult* result, int row, const std::string& sep) {
+  int cols = PQnfields(result);
+  std::string line;
+  for (int col = 0; col != cols; ++col) {
+    if (col) {
+      line += sep;
+    }
+    line += VERIFY_RESULT(ToString(result, row, col));
+  }
+  return line;
+}
+
+constexpr Oid BOOLOID = 16;
+constexpr Oid CHAROID = 18;
+constexpr Oid NAMEOID = 19;
+constexpr Oid INT8OID = 20;
+constexpr Oid INT2OID = 21;
+constexpr Oid INT4OID = 23;
+constexpr Oid TEXTOID = 25;
+constexpr Oid OIDOID = 26;
+constexpr Oid FLOAT4OID = 700;
+constexpr Oid FLOAT8OID = 701;
+constexpr Oid BPCHAROID = 1042;
+constexpr Oid VARCHAROID = 1043;
+constexpr Oid TIMESTAMPOID = 1114;
+constexpr Oid TIMESTAMPTZOID = 1184;
+constexpr Oid CSTRINGOID = 2275;
+constexpr Oid UUIDOID = 2950;
+constexpr Oid JSONBOID = 3802;
+constexpr Oid VECTOROID = 8078;
+
+template<BasePGType T>
+bool IsValidType(Oid pg_type) {
+  if constexpr (std::is_same_v<T, std::string>) {
+    switch(pg_type) {
+      case NAMEOID: [[fallthrough]];
+      case TEXTOID: [[fallthrough]];
+      case BPCHAROID: [[fallthrough]];
+      case VARCHAROID: [[fallthrough]];
+      case JSONBOID: [[fallthrough]];
+      case CSTRINGOID: return true;
+    }
+    return false;
+  } else if constexpr (std::is_same_v<T, char>) { // NOLINT
+    switch(pg_type) {
+      case CHAROID:  [[fallthrough]];
+      case BPCHAROID: return true;
+    }
+    return false;
+  } else if constexpr (std::is_same_v<T, MonoDelta>) { // NOLINT
+    switch(pg_type) {
+      case TIMESTAMPOID:  [[fallthrough]];
+      case TIMESTAMPTZOID: return true;
+    }
+    return false;
+  } else if constexpr (std::is_same_v<T, bool>) {
+    return pg_type == BOOLOID;
+  } else if constexpr (std::is_same_v<T, int16_t>) {
+    return pg_type == INT2OID;
+  } else if constexpr (std::is_same_v<T, int32_t>) {
+    return pg_type == INT4OID;
+  } else if constexpr (std::is_same_v<T, int64_t>) {
+    return pg_type == INT8OID;
+  } else if constexpr (std::is_same_v<T, float>) {
+    return pg_type == FLOAT4OID;
+  } else if constexpr (std::is_same_v<T, double>) {
+    return pg_type == FLOAT8OID;
+  } else if constexpr (std::is_same_v<T, PGOid>) {
+    return pg_type == OIDOID;
+  } else if constexpr (std::is_same_v<T, Uuid>) {
+    return pg_type == UUIDOID;
+  } else if constexpr (std::is_same_v<T, std::vector<float>>) {
+    return pg_type == VECTOROID;
+  }
+}
+
+template<BasePGType T>
+requires(IsPGNonNeg<T>)
+bool IsValidType(Oid pg_type) {
+  return IsValidType<typename T::Type>(pg_type);
+}
+
+}  // namespace
 
 void PGConnClose::operator()(PGconn* conn) const {
   PQfinish(conn);
@@ -218,6 +385,13 @@ Result<PGConn> PGConn::Connect(const std::string& conn_str,
                 << MonoDelta(CoarseMonoClock::Now() - start);
       return PGConn(std::move(result), simple_query_protocol);
     }
+    if (status == CONNECTION_BAD) {
+      auto msg = GetPQErrorMessage(result.get());
+      if (msg.ends_with("\" does not exist") &&
+          msg.find("FATAL:  database \"") != std::string::npos) {
+        break;
+      }
+    }
   } while (waiter.Wait());
   const MonoDelta duration(CoarseMonoClock::now() - start);
   const auto msg = status == CONNECTION_BAD
@@ -251,6 +425,10 @@ void PGResultClear::operator()(PGresult* result) const {
   PQclear(result);
 }
 
+void PGConn::Reset() {
+  PQreset(impl_.get());
+}
+
 Status PGConn::Execute(const std::string& command, bool show_query_in_error) {
   VLOG(1) << __func__ << " " << command;
   PGResultPtr res(PQexec(impl_.get(), command.c_str()));
@@ -271,6 +449,15 @@ Status PGConn::Execute(const std::string& command, bool show_query_in_error) {
                   PgsqlError(GetSqlState(res.get()))).CloneAndAddErrorCode(AuxilaryMessage(msg));
   }
   return Status::OK();
+}
+
+ConnStatusType PGConn::ConnStatus() {
+  return PQstatus(impl_.get());
+}
+
+bool PGConn::IsBusy() {
+  static constexpr int kIsBusy = 1;
+  return PQisBusy(impl_.get()) == kIsBusy;
 }
 
 Result<PGResultPtr> CheckResult(PGResultPtr result, const std::string& command) {
@@ -364,29 +551,37 @@ Status PGConn::RollbackTransaction() {
   return Execute("ROLLBACK");
 }
 
-Result<bool> PGConn::HasIndexScan(const std::string& query) {
-  constexpr int kExpectedColumns = 1;
-  auto res = VERIFY_RESULT(FetchFormat("EXPLAIN $0", query));
-
-  {
-    int fetched_columns = PQnfields(res.get());
-    if (fetched_columns != kExpectedColumns) {
-      return STATUS_FORMAT(
-          InternalError, "Fetched $0 columns, expected $1", fetched_columns, kExpectedColumns);
-    }
+Status PGConn::TestFailDdl(const std::string& ddl_to_fail) {
+  RETURN_NOT_OK(Execute("SET yb_test_fail_next_ddl=true"));
+  Status s = Execute(ddl_to_fail);
+  if (s.ok()) {
+    return STATUS_FORMAT(InternalError,
+                         "DDL '$0' should have failed, we explicitly instructed it to!",
+                         ddl_to_fail);
   }
+  std::string msg = reinterpret_cast<const char*>(s.message().data());
+  if (msg.find("Failed DDL operation as requested") != std::string::npos) {
+    return Status::OK();
+  }
+  // Unexpected error.
+  return s;
+}
 
-  for (int line = 0; line < PQntuples(res.get()); ++line) {
-    std::string value = VERIFY_RESULT(GetString(res.get(), line, 0));
-    if (value.find("Index Scan") != std::string::npos) {
-      return true;
-    } else if (value.find("Index Only Scan") != std::string::npos) {
+Result<bool> PGConn::HasIndexScan(const std::string& query) {
+  return VERIFY_RESULT(HasScanType(query, "Index")) ||
+         VERIFY_RESULT(HasScanType(query, "Index Only"));
+}
+
+Result<bool> PGConn::HasScanType(const std::string& query, const std::string expected_scan_type) {
+  const auto rows = VERIFY_RESULT(FetchRows<std::string>(Format("EXPLAIN $0", query)));
+  const auto search = Format("$0 Scan", expected_scan_type);
+  for (const auto& row : rows) {
+    if (row.find(search) != std::string::npos) {
       return true;
     }
   }
   return false;
 }
-
 
 Status PGConn::CopyBegin(const std::string& command) {
   auto result = VERIFY_RESULT(CheckResult(
@@ -498,85 +693,42 @@ Result<PGResultPtr> PGConn::CopyEnd() {
   return PGResultPtr(PQgetResult(impl_.get()));
 }
 
-Result<char*> GetValueWithLength(PGresult* result, int row, int column, size_t size) {
-  size_t len = PQgetlength(result, row, column);
-  if (len != size) {
-    return STATUS_FORMAT(Corruption, "Bad column length: $0, expected: $1, row: $2, column: $3",
-                         len, size, row, column);
-  }
-  return PQgetvalue(result, row, column);
-}
-
-Result<bool> GetBool(PGresult* result, int row, int column) {
-  return *VERIFY_RESULT(GetValueWithLength(result, row, column, sizeof(bool)));
-}
-
-Result<int32_t> GetInt32(PGresult* result, int row, int column) {
-  return BigEndian::Load32(VERIFY_RESULT(GetValueWithLength(result, row, column, sizeof(int32_t))));
-}
-
-Result<int64_t> GetInt64(PGresult* result, int row, int column) {
-  return BigEndian::Load64(VERIFY_RESULT(GetValueWithLength(result, row, column, sizeof(int64_t))));
-}
-
-Result<double> GetDouble(PGresult* result, int row, int column) {
-  auto temp =
-      BigEndian::Load64(VERIFY_RESULT(GetValueWithLength(result, row, column, sizeof(int64_t))));
-  return *reinterpret_cast<double*>(&temp);
-}
-
-Result<std::string> GetString(PGresult* result, int row, int column) {
-  auto len = PQgetlength(result, row, column);
-  auto value = PQgetvalue(result, row, column);
-  return std::string(value, len);
-}
-
-Result<std::string> ToString(PGresult* result, int row, int column) {
-  constexpr Oid INT8OID = 20;
-  constexpr Oid INT4OID = 23;
-  constexpr Oid TEXTOID = 25;
-  constexpr Oid FLOAT8OID = 701;
-  constexpr Oid BPCHAROID = 1042;
-  constexpr Oid VARCHAROID = 1043;
-
+Result<std::string> ToString(const PGresult* result, int row, int column) {
   if (PQgetisnull(result, row, column)) {
     return "NULL";
   }
 
   auto type = PQftype(result, column);
   switch (type) {
+    case BOOLOID:
+      return AsString(VERIFY_RESULT(GetValue<bool>(result, row, column)));
     case INT8OID:
-      return std::to_string(VERIFY_RESULT(GetInt64(result, row, column)));
+      return AsString(VERIFY_RESULT(GetValue<int64_t>(result, row, column)));
+    case INT2OID:
+      return AsString(VERIFY_RESULT(GetValue<int16_t>(result, row, column)));
     case INT4OID:
-      return std::to_string(VERIFY_RESULT(GetInt32(result, row, column)));
+      return AsString(VERIFY_RESULT(GetValue<int32_t>(result, row, column)));
+    case FLOAT4OID:
+      return AsString(VERIFY_RESULT(GetValue<float>(result, row, column)));
     case FLOAT8OID:
-      return std::to_string(VERIFY_RESULT(GetDouble(result, row, column)));
-    case TEXTOID: FALLTHROUGH_INTENDED;
-    case BPCHAROID: FALLTHROUGH_INTENDED;
-    case VARCHAROID:
-      return VERIFY_RESULT(GetString(result, row, column));
-    default:
-      return Format("Type not supported: $0", type);
+      return AsString(VERIFY_RESULT(GetValue<double>(result, row, column)));
+    case NAMEOID: [[fallthrough]];
+    case TEXTOID: [[fallthrough]];
+    case BPCHAROID: [[fallthrough]];
+    case VARCHAROID: [[fallthrough]];
+    case CSTRINGOID:
+      return VERIFY_RESULT(GetValue<std::string>(result, row, column));
+    case OIDOID:
+      return AsString(VERIFY_RESULT(GetValue<PGOid>(result, row, column)));
+    case UUIDOID:
+      return AsString(VERIFY_RESULT(GetValue<Uuid>(result, row, column)));
+    case TIMESTAMPOID: [[fallthrough]];
+    case TIMESTAMPTZOID:
+      return AsString(VERIFY_RESULT(GetValue<MonoDelta>(result, row, column)));
+    case VECTOROID:
+      return AsString(VERIFY_RESULT(GetValue<std::vector<float>>(result, row, column)));
   }
-}
-
-Result<std::string> RowToString(PGresult* result, int row, const std::string& sep) {
-  int cols = PQnfields(result);
-  std::string line;
-  for (int col = 0; col != cols; ++col) {
-    if (col) {
-      line += sep;
-    }
-    line += VERIFY_RESULT(ToString(result, row, col));
-  }
-  return line;
-}
-
-void LogResult(PGresult* result) {
-  int rows = PQntuples(result);
-  for (int row = 0; row != rows; ++row) {
-    LOG(INFO) << RowToString(result, row);
-  }
+  return Format("Type not supported: $0", type);
 }
 
 // Escape literals in postgres (e.g. to make a libpq connection to a database named
@@ -610,10 +762,6 @@ std::string PqEscapeIdentifier(const std::string& input) {
   return output;
 }
 
-bool HasTryAgain(const Status& status) {
-  return status.ToString().find("Try again:") != std::string::npos;
-}
-
 PGConnBuilder::PGConnBuilder(const PGConnSettings& settings)
     : conn_str_(BuildConnectionString(settings)),
       conn_str_for_log_(BuildConnectionString(settings, true /* mask_password */)),
@@ -632,5 +780,153 @@ Result<PGConn> PGConnBuilder::Connect(bool simple_query_protocol) const {
   return PGConn::Connect(conn_str_, simple_query_protocol, conn_str_for_log_);
 }
 
-} // namespace pgwrapper
-} // namespace yb
+Result<PGConn> Execute(Result<PGConn> connection, const std::string& query) {
+  if (connection.ok()) {
+    RETURN_NOT_OK((*connection).Execute(query));
+  }
+  return connection;
+}
+
+Result<PGConn> SetHighPriTxn(Result<PGConn> connection) {
+  return Execute(std::move(connection), "SET yb_transaction_priority_lower_bound=0.5");
+}
+
+Result<PGConn> SetLowPriTxn(Result<PGConn> connection) {
+  return Execute(std::move(connection), "SET yb_transaction_priority_upper_bound=0.4");
+}
+
+Result<PGConn> SetDefaultTransactionIsolation(
+    Result<PGConn> connection, IsolationLevel isolation_level) {
+  switch (isolation_level) {
+    case IsolationLevel::NON_TRANSACTIONAL:
+      return STATUS(InvalidArgument, "default transaction_isolation non-transactional is invalid");
+    case IsolationLevel::READ_COMMITTED:
+      return Execute(std::move(connection), "SET default_transaction_isolation = 'read committed'");
+    case IsolationLevel::SNAPSHOT_ISOLATION:
+      return Execute(
+          std::move(connection), "SET default_transaction_isolation = 'repeatable read'");
+    case IsolationLevel::SERIALIZABLE_ISOLATION:
+      return Execute(std::move(connection), "SET default_transaction_isolation = 'serializable'");
+  }
+
+  FATAL_INVALID_ENUM_VALUE(IsolationLevel, isolation_level);
+}
+
+Result<IsolationLevel> EffectiveIsolationLevel(PGConn* conn) {
+  const std::string effective_isolation = CHECK_RESULT(
+      conn->FetchRow<std::string>("SELECT yb_get_effective_transaction_isolation_level()"));
+
+  if (effective_isolation == "read committed")
+      return IsolationLevel::READ_COMMITTED;
+  if (effective_isolation == "repeatable read")
+      return IsolationLevel::SNAPSHOT_ISOLATION;
+  if (effective_isolation == "serializable")
+      return IsolationLevel::SERIALIZABLE_ISOLATION;
+
+  return STATUS_FORMAT(NotFound, "Unknown effective isolation level: $0", effective_isolation);
+}
+
+Status SetMaxBatchSize(PGConn* conn, size_t max_batch_size) {
+  return conn->ExecuteFormat("SET ysql_session_max_batch_size = $0", max_batch_size);
+}
+
+PGConnPerf::PGConnPerf(yb::pgwrapper::PGConn* conn)
+    : process_("perf",
+               PerfArguments(CHECK_RESULT(conn->FetchRow<PGUint32>("SELECT pg_backend_pid()")))) {
+
+  CHECK_OK(process_.Start());
+}
+
+PGConnPerf::~PGConnPerf() {
+  CHECK_OK(process_.Kill(SIGINT));
+  LOG(INFO) << "Perf exec code: " << CHECK_RESULT(process_.Wait());
+}
+
+PGConnBuilder CreateInternalPGConnBuilder(
+    const HostPort& pgsql_proxy_bind_address, const std::string& database_name,
+    uint64_t postgres_auth_key, const std::optional<CoarseTimePoint>& deadline) {
+  size_t connect_timeout = 0;
+  if (deadline && *deadline != CoarseTimePoint::max()) {
+    // By default, connect_timeout is 0, meaning infinite. 1 is automatically converted to 2, so set
+    // it to at least 2 in the first place. See connectDBComplete.
+    connect_timeout = static_cast<size_t>(
+        std::max(2, static_cast<int>(ToSeconds(*deadline - CoarseMonoClock::Now()))));
+  }
+
+  // Note that the plain password in the connection string will be sent over the wire, but since
+  // it only goes over a unix-domain socket, there should be no eavesdropping/tampering issues.
+  return PGConnBuilder(
+      {.host = PgDeriveSocketDir(pgsql_proxy_bind_address),
+       .port = pgsql_proxy_bind_address.port(),
+       .dbname = database_name,
+       .user = "postgres",
+       .password = UInt64ToString(postgres_auth_key),
+       .connect_timeout = connect_timeout});
+}
+
+namespace libpq_utils::internal {
+
+template<BasePGType T>
+Status GetValueHelper<T>::CheckType(const PGresult* result, int column) {
+  const auto pg_type = PQftype(result, column);
+  SCHECK(
+      IsValidType<T>(pg_type), Corruption,
+      "Unexpected type $0 of column #$1 ('$2')", pg_type, column, PQfname(result, column));
+  return Status::OK();
+}
+
+template<BasePGType T>
+GetValueResult<T> GetValueHelper<T>::Get(const PGresult* result, int row, int column) {
+  SCHECK(
+      (!PQgetisnull(result, row, column)),
+      Corruption, "Unexpected NULL value at row: $0, column: $1", row, column);
+
+  if constexpr (IsPGNonNeg<T>) {
+    const auto value = VERIFY_RESULT(GetValueHelper<typename T::Type>::Get(result, row, column));
+    SCHECK_GE(value, 0, Corruption, "Bad narrow cast");
+    return value;
+  } else if constexpr (IsPGFloatType<T>) { // NOLINT
+    using FloatType = typename FloatTraits<T>::FloatType;
+    using IntType = typename FloatTraits<T>::IntType;
+    static_assert(sizeof(FloatType) == sizeof(IntType), "Wrong sizes");
+    const auto value = VERIFY_RESULT(GetValueImpl<IntType>(result, row, column));
+    return *pointer_cast<const FloatType*>(&value);
+  } else if constexpr (IsPGIntType<T>) {
+    return GetValueImpl<std::make_unsigned_t<T>>(result, row, column);
+  } else if constexpr (std::is_same_v<T, MonoDelta>) { // NOLINT
+    return MonoDelta::FromMicroseconds(
+        VERIFY_RESULT(GetValueHelper<int64_t>::Get(result, row, column)));
+  } else {
+    return GetValueImpl<typename PGTypeTraits<T>::ReturnType>(result, row, column);
+  }
+}
+
+template struct GetValueHelper<int16_t>;
+template struct GetValueHelper<int32_t>;
+template struct GetValueHelper<int64_t>;
+template struct GetValueHelper<PGUint16>;
+template struct GetValueHelper<PGUint32>;
+template struct GetValueHelper<PGUint64>;
+template struct GetValueHelper<float>;
+template struct GetValueHelper<double>;
+template struct GetValueHelper<bool>;
+template struct GetValueHelper<std::string>;
+template struct GetValueHelper<char>;
+template struct GetValueHelper<PGOid>;
+template struct GetValueHelper<Uuid>;
+template struct GetValueHelper<MonoDelta>;
+
+FetchHelper<RowAsString>::RowsResult FetchHelper<RowAsString>::FetchRows(
+    Result<PGResultPtr>&& source) {
+  auto result = VERIFY_RESULT(std::move(source));
+  RowsType rows;
+  auto num_rows = PQntuples(result.get());
+  rows.reserve(num_rows);
+  for (decltype(num_rows) row = 0; row < num_rows; ++row) {
+    rows.push_back(VERIFY_RESULT(RowToString(result.get(), row, DefaultColumnSeparator())));
+  }
+  return rows;
+}
+
+} // namespace libpq_utils::internal
+} // namespace yb::pgwrapper

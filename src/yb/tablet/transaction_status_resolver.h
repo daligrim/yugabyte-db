@@ -11,8 +11,7 @@
 // under the License.
 //
 
-#ifndef YB_TABLET_TRANSACTION_STATUS_RESOLVER_H
-#define YB_TABLET_TRANSACTION_STATUS_RESOLVER_H
+#pragma once
 
 #include <stdint.h>
 
@@ -29,14 +28,23 @@ namespace yb {
 namespace tablet {
 
 struct TransactionStatusInfo {
+  TabletId status_tablet;
   TransactionId transaction_id = TransactionId::Nil();
   TransactionStatus status;
-  AbortedSubTransactionSet aborted_subtxn_set;
+  SubtxnSet aborted_subtxn_set;
   HybridTime status_ht;
   HybridTime coordinator_safe_time;
+  // Status containing the deadlock info if the transaction was aborted due to a deadlock.
+  // Defaults to Status::OK() in all other cases.
+  Status expected_deadlock_status = Status::OK();
+  // Only relevant for docdb transactions of type PgClientSessionKind::kPgSession. The field is
+  // used by the the wait-queue to resume deadlocked session advisory lock requests.
+  PgSessionRequestVersion pg_session_req_version = 0;
 
   std::string ToString() const {
-    return YB_STRUCT_TO_STRING(transaction_id, status, status_ht, coordinator_safe_time);
+    return YB_STRUCT_TO_STRING(
+        status_tablet, transaction_id, status, status_ht, coordinator_safe_time,
+        expected_deadlock_status, pg_session_req_version);
   }
 };
 
@@ -78,5 +86,3 @@ class TransactionStatusResolver {
 
 } // namespace tablet
 } // namespace yb
-
-#endif // YB_TABLET_TRANSACTION_STATUS_RESOLVER_H

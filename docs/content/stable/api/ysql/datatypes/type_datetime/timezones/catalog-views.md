@@ -4,7 +4,7 @@ headerTitle: The pg_timezone_names and pg_timezone_abbrevs catalog views
 linkTitle: Catalog views
 description: Explains the information content of the pg_timezone_names and pg_timezone_abbrevs catalog views. [YSQL]
 menu:
-  stable:
+  stable_api:
     identifier: catalog-views
     parent: timezones
     weight: 10
@@ -32,7 +32,7 @@ This is the result:
 
 ## pg_timezone_names
 
-The \\_d_ metacommand produces this result:
+The \\_d_ meta-command produces this result:
 
 ```outout
    Column   |   Type
@@ -159,7 +159,7 @@ The definition of the _[extended_timezone_names](../extended-timezone-names/)_ v
 
 ## pg_timezone_abbrevs
 
-The \\_d_ metacommand produces this result:
+The \\_d_ meta-command produces this result:
 
 ```output
    Column   |   Type

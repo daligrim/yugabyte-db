@@ -3,11 +3,10 @@ title: Build from source code on Ubuntu
 headerTitle: Build the source code
 linkTitle: Build the source
 description: Build YugabyteDB from source code on Ubuntu.
-image: /images/section_icons/index/quick_start.png
 headcontent: Build the source code.
 menu:
   preview:
-    identifier: build-from-src-3-ubuntu
+    identifier: build-from-src-4-ubuntu
     parent: core-database
     weight: 2912
 type: docs
@@ -16,22 +15,29 @@ type: docs
 <ul class="nav nav-tabs-alt nav-tabs-yb">
 
   <li >
-    <a href="{{< relref "./build-from-src-macos.md" >}}" class="nav-link">
-      <i class="fab fa-apple" aria-hidden="true"></i>
+    <a href="../build-from-src-almalinux/" class="nav-link">
+      <i class="fa-brands fa-linux" aria-hidden="true"></i>
+      AlmaLinux
+    </a>
+  </li>
+
+  <li >
+    <a href="../build-from-src-macos/" class="nav-link">
+      <i class="fa-brands fa-apple" aria-hidden="true"></i>
       macOS
     </a>
   </li>
 
   <li >
-    <a href="{{< relref "./build-from-src-centos.md" >}}" class="nav-link">
-      <i class="fab fa-linux" aria-hidden="true"></i>
+    <a href="../build-from-src-centos/" class="nav-link">
+      <i class="fa-brands fa-linux" aria-hidden="true"></i>
       CentOS
     </a>
   </li>
 
   <li >
-    <a href="{{< relref "./build-from-src-ubuntu.md" >}}" class="nav-link active">
-      <i class="fab fa-linux" aria-hidden="true"></i>
+    <a href="../build-from-src-ubuntu/" class="nav-link active">
+      <i class="fa-brands fa-linux" aria-hidden="true"></i>
       Ubuntu
     </a>
   </li>
@@ -40,74 +46,207 @@ type: docs
 
 {{< note title="Note" >}}
 
-CentOS 7 is the recommended Linux development and production platform for YugabyteDB.
+AlmaLinux 8 is the recommended Linux development platform for YugabyteDB.
 
 {{< /note >}}
 
-## Install necessary packages
+The following instructions are for Ubuntu 20.04 and 22.04.
 
-Update packages on your system, install development tools and additional packages:
+## TLDR
 
-```sh
-sudo apt-get update
-sudo apt-get install uuid-dev libbz2-dev libreadline-dev maven ninja-build \
-                     cmake curl rsync python3-pip python3-venv zip autoconf libtool \
-                     pkg-config libssl1.0-dev libicu-dev bison flex \
-                     libncurses5-dev
-```
-
-Assuming this repository is checked out in `~/code/yugabyte-db`, do the following:
+{{% readfile "includes/tldr.md" %}}
 
 ```sh
-cd ~/code/yugabyte-db
-./yb_build.sh release
+# Modify to your preference:
+shellrc=~/.bashrc
+
+source <(cat /etc/os-release | grep '^VERSION_ID=')
+case "$VERSION_ID" in
+  20.04)
+    gcc_version=10
+    ;;
+  22.04)
+    gcc_version=11
+    ;;
+  *)
+    echo "Unknown version $VERSION_ID"
+    exit 1
+esac
+
+sudo apt update
+DEBIAN_FRONTEND=noninteractive sudo apt upgrade -y
+packages=(
+  autoconf
+  build-essential
+  ccache
+  curl
+  file
+  g++-"$gcc_version"
+  gcc-"$gcc_version"
+  gettext
+  git
+  golang-1.20
+  libffi-dev
+  locales
+  maven
+  ninja-build
+  npm
+  patchelf
+  pkg-config
+  python3
+  python3-dev
+  python3-venv
+  rsync
+)
+# Avoid tzdata package configuration prompt.
+if [ ! -e /etc/localtime ]; then
+  sudo ln -s /usr/share/zoneinfo/Etc/UTC /etc/localtime
+fi
+DEBIAN_FRONTEND=noninteractive sudo apt install -y "${packages[@]}"
+sudo locale-gen en_US.UTF-8
+sudo mkdir /opt/yb-build
+
+# If you'd like to use an unprivileged user for development, manually
+# run/modify instructions from here onwards (change $USER, make sure shell
+# variables are set appropriately when switching users).
+sudo chown "$USER" /opt/yb-build
+mkdir ~/tools
+curl -L "https://github.com/Kitware/CMake/releases/download/v3.25.2/cmake-3.25.2-linux-x86_64.tar.gz" | tar xzC ~/tools
+source <(echo 'export PATH="$HOME/tools/cmake-3.25.2-linux-x86_64/bin:$PATH"' \
+         | tee -a "$shellrc")
+source <(echo 'export PATH="/usr/lib/go-1.20/bin:$PATH"' \
+         | tee -a "$shellrc")
+source <(echo 'export YB_CCACHE_DIR="$HOME/.cache/yb_ccache"' \
+         | tee -a "$shellrc")
+
+git clone https://github.com/yugabyte/yugabyte-db
+cd yugabyte-db
+case "$VERSION_ID" in
+  20.04)
+    ./yb_release --build_args=--clang16
+    ;;
+  22.04)
+    ./yb_release --build_args=--clang17
+    ;;
+esac
 ```
 
-{{< note title="Note" >}}
+## Detailed instructions
 
-If you see errors, such as `g++: internal compiler error: Killed`, the system has probably run out of memory.
-Try again by running the build script with less concurrency, for example, `-j1`.
-
-{{< /note >}}
-
-The command above will build the release configuration, add the C++ binaries into the `build/release-gcc-dynamic-ninja` directory, and create a `build/latest` symlink to that directory.
-
-
-{{< note title="Note" >}}
-If you are getting errors in the form of:
-```
-uild/release-gcc-dynamic-ninja/postgres_build/src/backend/libpq/be-secure-openssl.o: In function `my_sock_read':
-src/postgres/src/backend/libpq/be-secure-openssl.c:665: undefined reference to `BIO_get_data'
-build/release-gcc-dynamic-ninja/postgres_build/src/backend/libpq/be-secure-openssl.o: In function `my_sock_write':
-src/postgres/src/backend/libpq/be-secure-openssl.c:685: undefined reference to `BIO_get_data'
-```
-The code is probably not finding the right path for libssl1.0. Try a clean build `./yb_build.sh --clean release`.
-If that doesn't work, look into your $PATH if some other openssl version path is being used.
-{{< /note >}}
-
-
-
-{{< tip title="Tip" >}}
-
-You can find the binaries you just built in `build/latest` directory.
-
-{{< /tip >}}
-
-## Build Java code
-
-YugabyteDB core is written in C++, but the repository contains Java code needed to run sample applications. To build the Java part, you need:
-
-* JDK 8
-* [Apache Maven](https://maven.apache.org/).
-
-Also make sure Maven's bin directory is added to your `PATH` (for example, by adding to your `~/.bashrc`). See the example below (if you've installed Maven into `~/tools/apache-maven-3.6.3`)
+Update and install basic development packages as follows:
 
 ```sh
-export PATH=$HOME/tools/apache-maven-3.6.3/bin:$PATH
+sudo apt update
+sudo apt upgrade -y
+packages=(
+  autoconf
+  build-essential
+  curl
+  gettext
+  git
+  locales
+  pkg-config
+  rsync
+)
+sudo apt install -y "${packages[@]}"
+sudo locale-gen en_US.UTF-8
 ```
 
-For building YugabyteDB Java code, you'll need to install Java and Apache Maven.
+### /opt/yb-build
 
-## Build release package
+{{% readfile "includes/opt-yb-build.md" %}}
 
-Currently a release package can only be built in [CentOS](../build-from-src-centos) & [MacOS](../build-from-src-macos).
+### Python 3
+
+{{% readfile "includes/python.md" %}}
+
+```sh
+sudo apt install -y libffi-dev python3 python3-dev python3-venv
+```
+
+### CMake 3
+
+{{% readfile "includes/cmake.md" %}}
+
+The CMake version in the package manager is too old (3.16), so manually download a release as follows:
+
+```sh
+mkdir ~/tools
+curl -L "https://github.com/Kitware/CMake/releases/download/v3.25.2/cmake-3.25.2-linux-x86_64.tar.gz" | tar xzC ~/tools
+# Also add the following line to your .bashrc or equivalent.
+export PATH="$HOME/tools/cmake-3.25.2-linux-x86_64/bin:$PATH"
+```
+
+### Java
+
+{{% readfile "includes/java.md" %}}
+
+Install the following package to satisfy the preceding requirements:
+
+```sh
+sudo apt install -y maven
+```
+
+### yugabyted-ui
+
+{{% readfile "includes/yugabyted-ui.md" %}}
+
+```sh
+sudo apt install -y npm golang-1.20
+# Also add the following line to your .bashrc or equivalent.
+export PATH="/usr/lib/go-1.20/bin:$PATH"
+```
+
+### Ninja (optional)
+
+{{% readfile "includes/ninja.md" %}}
+
+```sh
+sudo apt install -y ninja-build
+```
+
+### Ccache (optional)
+
+{{% readfile "includes/ccache.md" %}}
+
+```sh
+sudo apt install -y ccache
+# Also add the following line to your .bashrc or equivalent.
+export YB_CCACHE_DIR="$HOME/.cache/yb_ccache"
+```
+
+### GCC (optional)
+
+To compile with GCC, install the following packages, and adjust the version numbers to match the GCC version you plan to use.
+
+```sh
+sudo apt install -y gcc-13 g++-13
+```
+
+## Build the code
+
+{{% readfile "includes/build-the-code.md" %}}
+
+### Build release package (optional)
+
+Perform the following steps to build a release package:
+
+1. [Satisfy requirements for building yugabyted-ui](#yugabyted-ui).
+1. Install additional packages using the following command:
+
+   ```sh
+   sudo apt install -y file patchelf
+   ```
+
+1. Run the `yb_release` script using the following command:
+
+   ```sh
+   ./yb_release
+   ```
+
+   ```output.sh
+   ......
+   2023-02-17 01:26:37,156 [yb_release.py:299 INFO] Generated a package at '/home/user/code/yugabyte-db/build/yugabyte-2.17.2.0-ede2a2619ea8470064a5a2c0d7fa510dbee3ce81-release-clang15-ubuntu20-x86_64.tar.gz'
+   ```
+
+{{% readfile "includes/ulimit.md" %}}

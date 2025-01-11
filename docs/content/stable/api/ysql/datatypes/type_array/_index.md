@@ -3,21 +3,14 @@ title: YSQL array
 linkTitle: Array
 headerTitle: Array data types and functionality
 description: YSQL lets you construct an array data type, of any dimensionality, of any built-in or user-defined data type. You can use this constructed data type for a table column and for a variable or formal parameter in a PL/pgSQL procedure.
-image: /images/section_icons/api/ysql.png
+image: /images/section_icons/api/subsection.png
 menu:
-  stable:
+  stable_api:
     identifier: api-ysql-datatypes-array
     parent: api-ysql-datatypes
 type: indexpage
+showRightNav: true
 ---
-**On this page**<br>
-&#160;&#160;&#160;&#160;[Synopsis](./#synopsis)<br>
-&#160;&#160;&#160;&#160;[Atomically null vs having all values null](./#atomically-null-vs-having-all-values-null)<br>
-&#160;&#160;&#160;&#160;[Type construction](./#type-construction)<br>
-&#160;&#160;&#160;&#160;[Informal sketch of array functionality](./#informal-sketch-of-array-functionality)<br>
-&#160;&#160;&#160;&#160;[Uses of arrays](./#uses-of-arrays)<br>
-&#160;&#160;&#160;&#160;[Example use case: GPS trip data](./#example-use-case-gps-trip-data)<br>
-&#160;&#160;&#160;&#160;[Organization of the remaining array functionality content](./#organization-of-the-remaining-array-functionality-content)
 
 ## Synopsis
 

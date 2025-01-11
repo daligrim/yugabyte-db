@@ -23,9 +23,9 @@ import org.yb.client.GetCheckpointResponse;
 import static org.yb.AssertionWrappers.*;
 import org.junit.Before;
 import org.junit.Test;
-import org.yb.util.YBTestRunnerNonTsanOnly;
+import org.yb.YBTestRunner;
 
-@RunWith(value = YBTestRunnerNonTsanOnly.class)
+@RunWith(value = YBTestRunner.class)
 public class TestCheckpoint extends CDCBaseClass {
   private final static Logger LOG = LoggerFactory.getLogger(TestCheckpoint.class);
 
@@ -63,7 +63,8 @@ public class TestCheckpoint extends CDCBaseClass {
   public void testCheckpointing() {
     try {
       CDCSubscriber testSubscriber = new CDCSubscriber(getMasterAddresses());
-      testSubscriber.createStream("proto", "EXPLICIT"); // setting a stream with PROTO format
+      testSubscriber.createStream(
+          "proto", "EXPLICIT", "CHANGE"); // setting a stream with PROTO format
 
       // Dummy insert statement.
       int rowsAffected = statement.executeUpdate("insert into test values (1, 2, 3);");
@@ -97,7 +98,8 @@ public class TestCheckpoint extends CDCBaseClass {
   public void testSettingNegativeIndexAsCheckpoint() {
     try {
       CDCSubscriber testSubscriber = new CDCSubscriber(getMasterAddresses());
-      testSubscriber.createStream("proto", "EXPLICIT"); // setting a stream with PROTO format
+      testSubscriber.createStream(
+          "proto", "EXPLICIT", "CHANGE"); // setting a stream with PROTO format
 
       // Dummy insert statement.
       int rowsAffected = statement.executeUpdate("insert into test values (1, 2, 3);");
@@ -139,7 +141,7 @@ public class TestCheckpoint extends CDCBaseClass {
     try {
       CDCSubscriber testSubscriber = new CDCSubscriber(getMasterAddresses());
       // Setting the checkpoint type as IMPLICIT.
-      testSubscriber.createStream("proto", "IMPLICIT");
+      testSubscriber.createStream("proto", "IMPLICIT", "CHANGE");
 
       // Dummy insert.
       int rowsAffected = statement.executeUpdate("insert into test values (1, 2, 3);");

@@ -1,11 +1,11 @@
-import React, { Component } from 'react';
+import { Component } from 'react';
 import { LinkContainer } from 'react-router-bootstrap';
 import { MenuItem } from 'react-bootstrap';
 import { isEnabled, isHidden } from '../../../../utils/LayoutUtils';
 
 export class YBMenuItem extends Component {
   render() {
-    const { availability, to, id, className, onClick, disabled } = this.props;
+    const { availability, to, id, className, onClick, disabled, dataTestId } = this.props;
     if (isHidden(availability) && availability !== undefined) return null;
     if (isEnabled(availability) && !disabled) {
       if (to) {
@@ -18,7 +18,7 @@ export class YBMenuItem extends Component {
         );
       } else {
         return (
-          <MenuItem className={className} onClick={onClick}>
+          <MenuItem className={className} onClick={onClick} data-testid={dataTestId} >
             {this.props.children}
           </MenuItem>
         );

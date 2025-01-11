@@ -1,10 +1,9 @@
 ---
 title: CLIs and command line tools
-headerTitle: CLIs
+headerTitle: Command line tools
 linkTitle: CLIs
 description: Use these CLIs and command line tools to interact with YugabyteDB.
-image: /images/section_icons/index/admin.png
-headcontent: Command line interfaces (CLIs) and tools reference.
+headcontent: Tools for interacting with, configuring, and managing YugabyteDB
 menu:
   stable:
     identifier: admin
@@ -13,107 +12,56 @@ menu:
 type: indexpage
 ---
 
-{{< note title="Note" >}}
+YugabyteDB ships with a variety of tools to interact with, manage, and configure your cluster. Each tool has been designed for a specific purpose. The following illustration shows which tools operate on which parts of the cluster.
 
-Information about configuring the [YB-Master](../reference/configuration/yb-master/) and [YB-TServer](../reference/configuration/yb-tserver/) services is in the [Configuration](../reference/configuration/) section.
+<!-- ![Tools and their purpose](/images/admin/tools_functionalities.png) -->
+![Tools and their purpose](/images/admin/tools_functionalities1.png)
 
-{{< /note >}}
+For information about [yugabyted](../reference/configuration/yugabyted/) and configuring [YB-Master](../reference/configuration/yb-master/) and [YB-TServer](../reference/configuration/yb-tserver/) services, refer to [Configuration](../reference/configuration/).
 
-<div class="row">
-  <div class="col-12 col-md-6 col-lg-12 col-xl-6">
-    <a class="section-link icon-offset" href="yb-ctl/">
-      <div class="head">
-        <img class="icon" src="/images/section_icons/admin/yb-ctl.png" aria-hidden="true" />
-        <div class="title">yb-ctl</div>
-      </div>
-      <div class="body">
-        Command line utility to easily create and manage local clusters on macOS or Linux.
-      </div>
-    </a>
-  </div>
+For information about YugabyteDB API clients (YSQL shell and YCQL shell), refer to [Client shells](../api/#client-shells).
 
-  <div class="col-12 col-md-6 col-lg-12 col-xl-6">
-    <a class="section-link icon-offset" href="yb-docker-ctl/">
-      <div class="head">
-        <img class="icon" src="/images/section_icons/admin/yb-docker-ctl.png" aria-hidden="true" />
-        <div class="title">yb-docker-ctl</div>
-      </div>
-      <div class="body">
-        Command line utility to easily create and manage Docker-based local clusters.
-      </div>
-    </a>
-  </div>
+{{<tip title="Specifying values that have a hypen">}}
+For all the command line tools, when passing in an argument with a value that starts with a hyphen (for example, `-1`), add a double hyphen (`--`) at the end of other arguments followed by the argument name and value. This tells the binary to treat those arguments as positional. For example, to specify `set_flag ysql_select_parallelism -1`, you need to do the following:
 
-  <div class="col-12 col-md-6 col-lg-12 col-xl-6">
-    <a class="section-link icon-offset" href="ysqlsh/">
-      <div class="head">
-        <img class="icon" src="/images/section_icons/api/ysql.png" aria-hidden="true" />
-        <div class="title">ysqlsh</div>
-      </div>
-      <div class="body">
-        CLI shell for interacting with YugabyteDB using YSQL.
-      </div>
-    </a>
-  </div>
+```bash
+yb-ts-cli [other arguments] -- set_flag ysql_select_parallelism -1
+```
 
-  <div class="col-12 col-md-6 col-lg-12 col-xl-6">
-    <a class="section-link icon-offset" href="ycqlsh/">
-      <div class="head">
-        <img class="icon" src="/images/section_icons/api/ycql.png" aria-hidden="true" />
-        <div class="title">ycqlsh</div>
-      </div>
-      <div class="body">
-        CLI shell for interacting with YugabyteDB using YCQL.
-      </div>
-    </a>
-  </div>
+{{</tip>}}
 
-  <div class="col-12 col-md-6 col-lg-12 col-xl-6">
-    <a class="section-link icon-offset" href="yb-admin/">
-      <div class="head">
-        <img class="icon" src="/images/section_icons/api/ysql.png" aria-hidden="true" />
-        <div class="title">yb-admin</div>
-      </div>
-      <div class="body">
-        CLI for administering YugabyteDB clusters.
-      </div>
-    </a>
-  </div>
+## Tools
 
-  <div class="col-12 col-md-6 col-lg-12 col-xl-6">
-    <a class="section-link icon-offset" href="yb-ts-cli/">
-      <div class="head">
-        <img class="icon" src="/images/section_icons/api/ysql.png" aria-hidden="true" />
-        <div class="title">yb-ts-cli</div>
-      </div>
-      <div class="body">
-        Command line tool for advanced operations on tablet servers.
-      </div>
-    </a>
-  </div>
+{{<index/block>}}
 
-  <div class="col-12 col-md-6 col-lg-12 col-xl-6">
-    <a class="section-link icon-offset" href="ysql-dump/">
-      <div class="head">
-        <img class="icon" src="/images/section_icons/api/ysql.png" aria-hidden="true" />
-        <div class="title">ysql_dump</div>
-      </div>
-      <div class="body">
-        Extract a YugabyteDB database into a SQL script file.
-      </div>
-    </a>
-  </div>
+  {{<index/item
+    title="yb-admin"
+    body="Administer YugabyteDB cluster configuration and features."
+    href="yb-admin/"
+    icon="fa-light fa-screwdriver-wrench">}}
 
-  <div class="col-12 col-md-6 col-lg-12 col-xl-6">
-    <a class="section-link icon-offset" href="ysql-dumpall/">
-      <div class="head">
-        <img class="icon" src="/images/section_icons/api/ysql.png" aria-hidden="true" />
-        <div class="title">ysql_dumpall</div>
-      </div>
-      <div class="body">
-        Extract all YugabyteDB databases into a SQL script file.
-      </div>
-    </a>
-  </div>
+  {{<index/item
+    title="yb-ts-cli"
+    body="Perform advanced operations on tablet servers."
+    href="yb-ts-cli/"
+    icon="fa-light fa-toolbox">}}
 
-</div>
+  {{<index/item
+    title="ysql_dump"
+    body="Extract a single YugabyteDB database into an SQL script file."
+    href="ysql-dump/"
+    icon="fa-light fa-file-export">}}
+
+  {{<index/item
+    title="ysql_dumpall"
+    body="Extract all YugabyteDB databases into an SQL script file."
+    href="ysql-dumpall/"
+    icon="fa-light fa-copy">}}
+
+  {{<index/item
+    title="yb-ctl"
+    body="Create and manage local clusters on macOS or Linux."
+    href="yb-ctl/"
+    icon="fa-light fa-toolbox">}}
+
+{{</index/block>}}

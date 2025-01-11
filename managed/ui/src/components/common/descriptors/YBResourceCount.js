@@ -1,6 +1,6 @@
 // Copyright (c) YugaByte, Inc.
 
-import React, { PureComponent } from 'react';
+import { PureComponent } from 'react';
 import PropTypes from 'prop-types';
 
 import './stylesheets/YBResourceCount.scss';
@@ -16,7 +16,8 @@ export default class YBResourceCount extends PureComponent {
     unitPlural: PropTypes.string,
     separatorLine: PropTypes.bool,
     icon: PropTypes.string,
-    sizePrefix: PropTypes.string
+    sizePrefix: PropTypes.string,
+    sizeClassName: PropTypes.string
   };
   static defaultProps = {
     pluralizeKind: false,
@@ -36,12 +37,14 @@ export default class YBResourceCount extends PureComponent {
       kind,
       unit,
       inline,
+      label,
       pluralizeKind,
       className,
       pluralizeUnit,
       separatorLine,
       icon,
-      sizePrefix
+      sizePrefix,
+      sizeClassName
     } = this.props;
     const displayUnit =
       unit && pluralizeUnit
@@ -55,13 +58,15 @@ export default class YBResourceCount extends PureComponent {
           ? kind
           : this.props.kindPlural || this.pluralize(kind)
         : kind;
-    const classNames = (inline ? 'yb-resource-count-inline ' : null) + className;
+    const classNames = (inline ? 'yb-resource-count-inline ' : null) + ' ' + className;
 
     return (
       <div className={'yb-resource-count ' + classNames}>
-        <div className="yb-resource-count-size">
+        {label && <div className="yb-resource-count-label">{label}</div>}
+        <div className={'yb-resource-count-size ' + sizeClassName}>
           {sizePrefix && <span className="yb-resource-count-size-prefix">{sizePrefix}</span>}
-          {size} {kind && inline && <div className="yb-resource-count-kind">{displayKind}</div>}
+          {size}
+          {kind && inline && <div className="yb-resource-count-kind">{displayKind}</div>}
           {displayUnit && <span className="yb-resource-count-unit">{displayUnit}</span>}
         </div>
         {separatorLine && <div className="yb-resource-separator-line" />}

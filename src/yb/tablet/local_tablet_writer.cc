@@ -45,7 +45,7 @@ class AutoIncrementingCounter {
 
 } // namespace
 
-LocalTabletWriter::LocalTabletWriter(Tablet* tablet)
+LocalTabletWriter::LocalTabletWriter(TabletPtr tablet)
     : tablet_(tablet), req_(std::make_unique<tserver::WriteRequestPB>()),
       resp_(std::make_unique<tserver::WriteResponsePB>()) {
 }
@@ -63,14 +63,14 @@ Status LocalTabletWriter::Write(QLWriteRequestPB* request) {
 Status LocalTabletWriter::WriteBatch(Batch* batch) {
   req_->Clear();
   for (auto& req : *batch) {
-    req.set_schema_version(tablet_->metadata()->schema_version());
+    req.set_schema_version(tablet_->metadata()->primary_table_schema_version());
     QLSetHashCode(&req);
   }
   req_->mutable_ql_write_batch()->Swap(batch);
 
   auto query = std::make_unique<WriteQuery>(
       OpId::kUnknownTerm, CoarseTimePoint::max() /* deadline */, this,
-      tablet_, resp_.get());
+      tablet_, nullptr, resp_.get());
   query->set_client_request(*req_);
   write_promise_ = std::promise<Status>();
   tablet_->AcquireLocksAndPerformDocOperations(std::move(query));

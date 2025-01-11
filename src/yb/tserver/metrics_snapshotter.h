@@ -11,10 +11,10 @@
 // under the License.
 //
 
-#ifndef YB_TSERVER_METRICS_SNAPSHOTTER_H
-#define YB_TSERVER_METRICS_SNAPSHOTTER_H
+#pragma once
 
 #include <memory>
+#include <vector>
 
 #include "yb/gutil/macros.h"
 
@@ -33,14 +33,15 @@ class MetricsSnapshotter {
   Status Stop();
 
   ~MetricsSnapshotter();
+  static Result<std::vector<double>> GetCpuUsageInInterval(int ms);
+  static Result<std::vector<uint64_t>> GetMemoryUsage();
 
  private:
   class Thread;
   std::unique_ptr<Thread> thread_;
+  static Result<std::vector<uint64_t>> GetCpuUsage();
   DISALLOW_COPY_AND_ASSIGN(MetricsSnapshotter);
 };
 
 } // namespace tserver
 } // namespace yb
-
-#endif // YB_TSERVER_METRICS_SNAPSHOTTER_H

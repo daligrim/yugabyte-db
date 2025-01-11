@@ -4,7 +4,8 @@ headerTitle: TLS and authentication
 linkTitle: TLS and authentication
 description: Use authentication in conjunction with TLS encryption.
 headcontent: Use authentication in conjunction with TLS encryption
-image: /images/section_icons/secure/authentication.png
+tags:
+  other: ysql
 menu:
   stable:
     identifier: tls-authentication
@@ -13,20 +14,11 @@ menu:
 type: docs
 ---
 
-<ul class="nav nav-tabs-alt nav-tabs-yb">
-  <li >
-    <a href="../tls-authentication/" class="nav-link active">
-      <i class="icon-postgres" aria-hidden="true"></i>
-      YSQL
-    </a>
-  </li>
-</ul>
-
 TLS can be configured in conjunction with authentication using the following configuration flags related to TLS and authentication:
 
-* [`ysql_enable_auth`](../../authentication/password-authentication/) to enable password (md5) authentication
-* [`use_client_to_server_encryption`](../client-to-server/) to enable client-server TLS encryption
-* [`ysql_hba_conf_csv`](../../authentication/host-based-authentication/) to manually set a host-based authentication (HBA) configuration
+* [ysql_enable_auth](../../authentication/password-authentication/) to enable password (md5) authentication
+* [use_client_to_server_encryption](../server-to-server/) to enable client-server TLS encryption
+* [ysql_hba_conf_csv](../../authentication/host-based-authentication/) to manually set a host-based authentication (HBA) configuration
 
 The default (auto-generated) configuration in the `ysql_hba.conf` file depends on whether auth (`ysql_enable_auth`) and/or TLS (`use_client_to_server_encryption`) are enabled.
 
@@ -64,15 +56,15 @@ hostssl mydb myuser myhost cert,hostssl all all all reject
 To begin, download and configure sample certificates:
 
 ```sh
-$ wget https://raw.githubusercontent.com/yugabyte/yugabyte-db/master/ent/test_certs/ca.crt
-$ wget -O node.127.0.0.1.key https://raw.githubusercontent.com/yugabyte/yugabyte-db/master/ent/test_certs/ysql.key
-$ wget -O node.127.0.0.1.crt https://raw.githubusercontent.com/yugabyte/yugabyte-db/master/ent/test_certs/ysql.crt
+$ wget https://raw.githubusercontent.com/yugabyte/yugabyte-db/master/test_certs/ca.crt
+$ wget -O node.127.0.0.1.key https://raw.githubusercontent.com/yugabyte/yugabyte-db/master/test_certs/ysql.key
+$ wget -O node.127.0.0.1.crt https://raw.githubusercontent.com/yugabyte/yugabyte-db/master/test_certs/ysql.crt
 $ chmod 600 ca.crt node.127.0.0.1.key node.127.0.0.1.crt
 $ CERTS=`pwd`
 $ ENABLE_TLS="use_client_to_server_encryption=true,certs_for_client_dir=$CERTS"
 ```
 
-`node.127.0.0.1.crt` and `node.127.0.0.1.key` are the default values for the `ssl_cert_file` and `ssl_key_file` server-side configuration for a YSQL node. If your local IP is not 127.0.0.1, then use the appropriate local IP to name the two files. Alternatively use `ysql_pg_conf` to set `ssl_cert_file` and `ssl_key_file` to the appropriate values.
+`node.127.0.0.1.crt` and `node.127.0.0.1.key` are the default values for the `ssl_cert_file` and `ssl_key_file` server-side configuration for a YSQL node. If your local IP is not 127.0.0.1, then use the appropriate local IP to name the two files. Alternatively use `ysql_pg_conf_csv` to set `ssl_cert_file` and `ssl_key_file` to the appropriate values.
 
 ### TLS without authentication
 
@@ -101,21 +93,21 @@ $ ./bin/ysqlsh "sslmode=require"
 ```
 
 ```output
-ysqlsh (11.2-YB-2.7.0.0-b0)
+ysqlsh (11.2-YB-{{<yb-version version="stable" format="build">}})
 SSL connection (protocol: TLSv1.2, cipher: ECDHE-RSA-AES256-GCM-SHA384, bits: 256, compression: off)
 Type "help" for help.
 ```
 
-The default `ysqlsh` SSL mode is `prefer` (see <https://www.postgresql.org/docs/11/libpq-ssl.html>), which tries SSL first, but falls back to no-ssl if the server does not support it.
+The default ysqlsh SSL mode is `prefer` (refer to [SSL Support](https://www.postgresql.org/docs/11/libpq-ssl.html) in the PostgreSQL documentation), which tries SSL first, but falls back to `disable` if the server does not support it.
 
-In this case, a plain `ysqlsh` with no options will work and use encryption:
+In this case, a plain ysqlsh with no options will work and use encryption:
 
 ```sh
 $ ./bin/ysqlsh
 ```
 
 ```output
-ysqlsh (11.2-YB-2.7.0.0-b0)
+ysqlsh (11.2-YB-{{<yb-version version="stable" format="build">}})
 SSL connection (protocol: TLSv1.2, cipher: ECDHE-RSA-AES256-GCM-SHA384, bits: 256, compression: off)
 Type "help" for help.
 ```
@@ -140,7 +132,7 @@ $ ./bin/ysqlsh
 
 ```output
 Password for user yugabyte:
-ysqlsh (11.2-YB-2.7.0.0-b0)
+ysqlsh (11.2-YB-{{<yb-version version="stable" format="build">}})
 SSL connection (protocol: TLSv1.2, cipher: ECDHE-RSA-AES256-GCM-SHA384, bits: 256, compression: off)
 Type "help" for help.
 ```
@@ -181,7 +173,7 @@ $ ./bin/ysqlsh "sslcert=$CERTS/node.127.0.0.1.crt sslkey=$CERTS/node.127.0.0.1.k
 ```
 
 ```output
-ysqlsh (11.2-YB-2.7.0.0-b0)
+ysqlsh (11.2-YB-{{<yb-version version="stable" format="build">}})
 SSL connection (protocol: TLSv1.2, cipher: ECDHE-RSA-AES256-GCM-SHA384, bits: 256, compression: off)
 Type "help" for help.
 ```
@@ -224,7 +216,7 @@ $ ./bin/ysqlsh "sslcert=$CERTS/node.127.0.0.1.crt sslkey=$CERTS/node.127.0.0.1.k
 
 ```output
 Password for user yugabyte:
-ysqlsh (11.2-YB-2.7.0.0-b0)
+ysqlsh (11.2-YB-{{<yb-version version="stable" format="build">}})
 SSL connection (protocol: TLSv1.2, cipher: ECDHE-RSA-AES256-GCM-SHA384, bits: 256, compression: off)
 Type "help" for help.
 ```

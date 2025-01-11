@@ -23,7 +23,7 @@ type: docs
   </li>
   <li >
     <a href="../aks/" class="nav-link">
-      <i class="fas fa-cubes" aria-hidden="true"></i>
+      <i class="fa-regular fa-dharmachakra" aria-hidden="true"></i>
       Azure Kubernetes Service (AKS)
     </a>
   </li>
@@ -129,7 +129,7 @@ The key's randomart image is:
     $ az group deployment show -g <Your-Azure-Resource-Group> -n <Your-Deployment-Name> --query properties.outputs
     ```
 
-    The output displays the YugabyteDB Admin URL, JDBC URL, YSQL, YCQL, and YEDIS connection string. You can use the YugabyteDB Admin URL to access the Admin portal.
+    The output displays the YugabyteDB Admin URL, JDBC URL, YSQL, and YCQL connection strings. You can use the YugabyteDB Admin URL to access the Admin portal.
 
 ## Deploy using Azure Portal
 

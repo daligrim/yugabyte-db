@@ -24,7 +24,7 @@ import org.yb.util.YBTestRunnerNonTsanOnly;
  * Runs the pg_regress test suite on YB code.
  */
 @RunWith(value=YBTestRunnerNonTsanOnly.class)
-public class TestPgRegressFeature extends BasePgSQLTest {
+public class TestPgRegressFeature extends BasePgRegressTest {
 
   private static final int TURN_OFF_SEQUENCE_CACHE_FLAG = 0;
   private static final String TURN_OFF_COPY_FROM_BATCH_TRANSACTION =
@@ -39,7 +39,7 @@ public class TestPgRegressFeature extends BasePgSQLTest {
   protected Map<String, String> getTServerFlags() {
     Map<String, String> flagMap = super.getTServerFlags();
     flagMap.put("ysql_sequence_cache_minval", Integer.toString(TURN_OFF_SEQUENCE_CACHE_FLAG));
-    flagMap.put("ysql_pg_conf", TURN_OFF_COPY_FROM_BATCH_TRANSACTION);
+    appendToYsqlPgConf(flagMap, TURN_OFF_COPY_FROM_BATCH_TRANSACTION);
     if(!TestUtils.isReleaseBuild()){
       flagMap.put("yb_client_admin_operation_timeout_sec", Integer.toString(240));
     }

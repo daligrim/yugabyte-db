@@ -4,7 +4,7 @@ headerTitle: PREPARE
 linkTitle: PREPARE
 description: Use the PREPARE statement to create a handle to a prepared statement by parsing, analyzing, and rewriting (but not executing) the target statement.
 menu:
-  stable:
+  stable_api:
     identifier: perf_prepare
     parent: statements
 type: docs
@@ -16,29 +16,9 @@ Use the `PREPARE` statement to create a handle to a prepared statement by parsin
 
 ## Syntax
 
-<ul class="nav nav-tabs nav-tabs-yb">
-  <li >
-    <a href="#grammar" class="nav-link active" id="grammar-tab" data-toggle="tab" role="tab" aria-controls="grammar" aria-selected="true">
-      <i class="fas fa-file-alt" aria-hidden="true"></i>
-      Grammar
-    </a>
-  </li>
-  <li>
-    <a href="#diagram" class="nav-link" id="diagram-tab" data-toggle="tab" role="tab" aria-controls="diagram" aria-selected="false">
-      <i class="fas fa-project-diagram" aria-hidden="true"></i>
-      Diagram
-    </a>
-  </li>
-</ul>
-
-<div class="tab-content">
-  <div id="grammar" class="tab-pane fade show active" role="tabpanel" aria-labelledby="grammar-tab">
-  {{% includeMarkdown "../../syntax_resources/the-sql-language/statements/prepare_statement.grammar.md" %}}
-  </div>
-  <div id="diagram" class="tab-pane fade" role="tabpanel" aria-labelledby="diagram-tab">
-  {{% includeMarkdown "../../syntax_resources/the-sql-language/statements/prepare_statement.diagram.md" %}}
-  </div>
-</div>
+{{%ebnf%}}
+  prepare_statement
+{{%/ebnf%}}
 
 ## Semantics
 

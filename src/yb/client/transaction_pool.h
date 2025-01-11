@@ -11,8 +11,7 @@
 // under the License.
 //
 
-#ifndef YB_CLIENT_TRANSACTION_POOL_H
-#define YB_CLIENT_TRANSACTION_POOL_H
+#pragma once
 
 #include "yb/client/client_fwd.h"
 
@@ -25,8 +24,6 @@ class MetricEntity;
 
 namespace client {
 
-YB_STRONGLY_TYPED_BOOL(ForceGlobalTransaction);
-
 // Pool that maintains set of preallocated ready transactions.
 // The size of the pool is auto adjusted, i.e. the more transactions we request - the more
 // transactions will be allocated.
@@ -37,14 +34,17 @@ class TransactionPool {
   TransactionPool(TransactionManager* manager, MetricEntity* metric_entity);
   ~TransactionPool();
 
-  // Tries to take a new ready transaction from the pool.
-  // If pool is empty a newly created transaction is returned.
+  // When force_create_txn == ForceCreateTransaction::kTrue, a new txn is created and returned.
+  // Else, tries to take a new ready transaction from the pool. If pool is empty a newly created
+  // transaction is returned.
   // If force_global_transaction is true, the transaction will always use a global transaction
   // status tablet.
   //
   // Ready means that transaction is registered at status tablet and intents could be written
   // immediately.
-  YBTransactionPtr Take(ForceGlobalTransaction force_global_transaction, CoarseTimePoint deadline);
+  YBTransactionPtr Take(
+      ForceGlobalTransaction force_global_transaction, CoarseTimePoint deadline,
+      ForceCreateTransaction force_create_txn = ForceCreateTransaction::kFalse);
 
   // Takes and initializes a transaction from the pool. See Take for details.
   Result<YBTransactionPtr> TakeAndInit(
@@ -66,5 +66,3 @@ class TransactionPool {
 
 } // namespace client
 } // namespace yb
-
-#endif // YB_CLIENT_TRANSACTION_POOL_H

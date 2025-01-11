@@ -11,12 +11,11 @@
 // under the License.
 //
 
-#ifndef YB_UTIL_PRIORITY_THREAD_POOL_H
-#define YB_UTIL_PRIORITY_THREAD_POOL_H
+#pragma once
 
 #include <memory>
 
-#include <gflags/gflags_declare.h>
+#include "yb/util/flags.h"
 
 #include "yb/gutil/casts.h"
 
@@ -61,10 +60,10 @@ class PriorityThreadPoolTask {
   virtual std::string ToString() const = 0;
 
   // Updates any stats (ex: metrics) associated with the tasks changing state to another.
-  virtual void UpdateStatsStateChangedTo(PriorityThreadPoolTaskState state) const {}
+  virtual void StateChangedTo(PriorityThreadPoolTaskState state) {}
 
   // Updates any stats (ex: metrics) associated with the tasks changing state from another.
-  virtual void UpdateStatsStateChangedFrom(PriorityThreadPoolTaskState state) const {}
+  virtual void StateChangedFrom(PriorityThreadPoolTaskState state) {}
 
   // Calculates group no priority for the task based on the number of active_tasks.
   // Group No priority is used for prioritizing which tasks to run.
@@ -138,6 +137,7 @@ class PriorityThreadPool {
   void TEST_SetThreadCreationFailureProbability(double probability);
 
   size_t TEST_num_tasks_pending();
+  std::mutex* TEST_mutex();
 
  private:
   class Impl;
@@ -145,5 +145,3 @@ class PriorityThreadPool {
 };
 
 } // namespace yb
-
-#endif // YB_UTIL_PRIORITY_THREAD_POOL_H
