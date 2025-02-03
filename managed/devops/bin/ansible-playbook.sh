@@ -12,7 +12,27 @@ set -euo pipefail
 
 . "${BASH_SOURCE%/*}/common.sh"
 
-activate_virtualenv
+detect_os
 
-set -x
-"$devops_bin_dir/ansible_runner.sh" ansible-playbook "$@"
+# Use the PEX environment when we are not executing on macOS, and if the environment variable
+# YB_USE_VIRTUAL_ENV is unset. Also, the pexEnv folder should exist before activating the
+# PEX virtual environment.
+if [ "$is_mac" == false ] && \
+   [[ -z ${YB_USE_VIRTUAL_ENV:-} ]] && \
+   [ -d "$yb_devops_home/pex/pexEnv" ]; then
+
+  activate_pex
+  pythonpath=$(head -n 1 "$pex_venv_dir/bin/ansible-playbook")
+  if [[ "$pythonpath" =~ ^#\!\/.* ]]; then
+    # Remove the #! from beginning of shebang
+    ${pythonpath:2} $pex_venv_dir/bin/ansible-playbook "$@"
+  else
+    log "Found \"$pythonpath\" shebang in PEX ansible-playbook script, invoking directly."
+    ansible-playbook "$@"
+  fi
+
+else
+  activate_virtualenv
+  ansible-playbook "$@"
+fi
+

@@ -1,20 +1,19 @@
 // Copyright (c) YugaByte, Inc.
-
-import React, { Component } from 'react';
-import { Alert, Row } from 'react-bootstrap';
+import { Component } from 'react';
+import { Alert, Row, Panel, OverlayTrigger, Tooltip } from 'react-bootstrap';
 import { BootstrapTable, TableHeaderColumn } from 'react-bootstrap-table';
-import moment from 'moment';
+import moment from 'moment-timezone';
 import { sortBy, values } from 'lodash';
-
+import { NodeAgentStatusModal } from '../../../configRedesign/providerRedesign/providerView/instanceTypes/NodeAgentStatusModal';
 import { YBLoading } from '../../../common/indicators';
 import TreeNode from '../../../common/TreeNode';
 import { YBPanelItem } from '../../../panels';
-import { Panel } from 'react-bootstrap';
 import { isNonEmptyArray, isEmptyArray, isNonEmptyString } from '../../../../utils/ObjectUtils';
 import { getPromiseState } from '../../../../utils/PromiseUtils';
 import { UniverseAction } from '../../../universes';
-import { isDisabled, isNotHidden } from '../../../../utils/LayoutUtils';
-import { getPrimaryCluster } from '../../../../utils/UniverseUtils';
+import { isNotHidden } from '../../../../utils/LayoutUtils';
+import { getPrimaryCluster, getIsKubernetesUniverse } from '../../../../utils/UniverseUtils';
+import Wrench from '../../../../redesign/assets/wrench.svg';
 
 import './UniverseHealthCheckList.scss';
 
@@ -22,11 +21,13 @@ export const UniverseHealthCheckList = (props) => {
   const {
     universe: { healthCheck, currentUniverse },
     currentCustomer,
-    currentUser
+    currentUser,
+    isNodeAgentEnabled
   } = props;
   const primaryCluster = getPrimaryCluster(
     props?.universe?.currentUniverse?.data?.universeDetails?.clusters
   );
+  const isK8universe = getIsKubernetesUniverse(currentUniverse.data);
   const useSystemd = primaryCluster?.userIntent?.useSystemd;
   let nodesCronStatus = <span />;
   const inactiveCronNodes = getNodesWithInactiveCrons(currentUniverse.data).join(', ');
@@ -46,7 +47,7 @@ export const UniverseHealthCheckList = (props) => {
     getPromiseState(healthCheck).isError() ||
     (getPromiseState(healthCheck).isSuccess() && isEmptyArray(healthCheck.data))
   ) {
-    content = <div>There're no finished Health checks available at the moment.</div>;
+    content = <div>{"There're no finished Health checks available at the moment."}</div>;
   } else if (getPromiseState(healthCheck).isSuccess() && isNonEmptyArray(healthCheck.data)) {
     const data = [...healthCheck.data].reverse();
     const timestamps = prepareData(data, currentUser.data.timezone);
@@ -56,11 +57,12 @@ export const UniverseHealthCheckList = (props) => {
         key={timestamp.timestampMoment.unix()}
         timestamp={timestamp}
         index={index}
+        universeDetails={currentUniverse?.data?.universeDetails}
+        isK8universe={isK8universe}
+        isNodeAgentEnabled={isNodeAgentEnabled}
       />
     ));
   }
-
-  const actions_disabled = isDisabled(currentCustomer.data.features, 'universes.actions');
 
   return (
     <YBPanelItem
@@ -71,19 +73,17 @@ export const UniverseHealthCheckList = (props) => {
             <div className="pull-left">
               <h2>Health Checks</h2>
             </div>
-            {isNotHidden(currentCustomer.data.features, 'universes.details.health.alerts') &&
+            {isNotHidden(currentCustomer.data.features, 'universes.details.health.alerts') && (
               <div className="pull-right">
                 <div className="backup-action-btn-group">
                   <UniverseAction
                     className="table-action"
                     universe={currentUniverse.data}
                     actionType="alert-config"
-                    btnClass={'btn-orange'}
-                    disabled={actions_disabled}
                   />
                 </div>
               </div>
-            }
+            )}
           </Row>
           <Row>{nodesCronStatus}</Row>
         </div>
@@ -96,11 +96,19 @@ export const UniverseHealthCheckList = (props) => {
 class Timestamp extends Component {
   constructor(props) {
     super(props);
-    this.state = { isOpen: false, ...this.props };
+    this.state = { isOpen: false, ...this.props, isNodeAgentStatusModalOpen: false };
   }
+
   render() {
-    const { timestamp, index } = this.props;
+    const { timestamp, index, universeDetails, isK8universe, isNodeAgentEnabled } = this.props;
+    const { isNodeAgentStatusModalOpen } = this.state;
     const defaultExpanded = this.state.isOpen || index === 0;
+
+    const nodeDetails = universeDetails.nodeDetailsSet;
+    const nodeIPs = nodeDetails?.map((nodeDetail) => {
+      return nodeDetail.cloudInfo.private_ip;
+    });
+
     return (
       <Panel
         eventKey={this.props.eventKey}
@@ -116,18 +124,59 @@ class Timestamp extends Component {
             }}
           >
             <span>{timestampFormatter(timestamp.timestampMoment)}</span>
-            {countFormatter(timestamp.healthyNodes, 'node', 'nodes', false, false, 'healthy')}
-            {countFormatter(timestamp.errorNodes, 'node', 'nodes', true, false, 'failing')}
-            {countFormatter(timestamp.warningNodes, 'node', 'nodes', false, true, 'warning')}
+            <div className="universe-status">
+              {countFormatter(timestamp.errorNodes, 'node', 'nodes', true, false, 'failing')}
+              {isNonEmptyArray(timestamp.errorNodes) && !isK8universe && isNodeAgentEnabled && (
+                <>
+                  <img src={Wrench} alt="wrench" />
+                  <span
+                    className="node-agent-status"
+                    onClick={() => {
+                      this.setState({ isNodeAgentStatusModalOpen: true });
+                    }}
+                  >
+                    Check Node Agent Status
+                  </span>
+                </>
+              )}
+              {countFormatter(timestamp.healthyNodes, 'node', 'nodes', false, false, 'healthy')}
+              {countFormatter(timestamp.warningNodes, 'node', 'nodes', false, true, 'warning')}
+            </div>
           </Panel.Title>
         </Panel.Heading>
         <Panel.Body collapsible>
-          <NodeList nodes={timestamp.nodes} defaultExpanded={defaultExpanded} />
+          <>
+            {isNodeAgentStatusModalOpen && (
+              <NodeAgentStatusModal
+                nodeIPs={nodeIPs}
+                onClose={() => this.setState({ isNodeAgentStatusModalOpen: false })}
+                open={isNodeAgentStatusModalOpen}
+                isAssignedNodes={true}
+              />
+            )}
+            <NodeList nodes={timestamp.nodes} defaultExpanded={defaultExpanded} />
+          </>
         </Panel.Body>
       </Panel>
     );
   }
 }
+
+const IPAddressTooltip = (node) => {
+  const IPAddressSubstring = node.ipAddress.substring(0, 120);
+  return (
+    <OverlayTrigger
+      placement="top"
+      overlay={
+        <Tooltip className="high-index" id="health-check-ip-tooltip">
+          {node.ipAddress}
+        </Tooltip>
+      }
+    >
+      <span className="tree-node-main-heading">{`${IPAddressSubstring}...`}</span>
+    </OverlayTrigger>
+  );
+};
 
 const NodeList = (props) => {
   const { nodes, defaultExpanded } = props;
@@ -139,7 +188,10 @@ const NodeList = (props) => {
           defaultExpanded={defaultExpanded}
           header={
             <span>
-              <span className="tree-node-main-heading">{node.ipAddress}</span>-
+              <span className="tree-node-main-heading">
+                {node.ipAddress.length > 120 ? IPAddressTooltip(node) : node.ipAddress}
+              </span>
+              -
               {node.passingChecks.length > 0 &&
                 countFormatter(node.passingChecks, 'check', 'checks', false, false, 'OK')}
               {node.failedChecks.length > 0 &&
@@ -207,8 +259,8 @@ const countFormatter = (items, singleUnit, pluralUnit, hasError, hasWarning, des
     return;
   }
   return (
-    <span className={`count status-${hasError ? 'bad' : (hasWarning ? 'warning' : 'good')}`}>
-      <i className={`fa fa-${hasError ? 'times' : (hasWarning ? 'exclamation' : 'check')}`} />
+    <span className={`count status-${hasError ? 'bad' : hasWarning ? 'warning' : 'good'}`}>
+      <i className={`fa fa-${hasError ? 'times' : hasWarning ? 'exclamation' : 'check'}`} />
       {items.length} {descriptor} {items.length === 1 ? singleUnit : pluralUnit}
     </span>
   );
@@ -236,9 +288,9 @@ const detailsFormatter = (cell, row) => {
 // For performance optimization, move this to a Redux reducer, so that it doesn't get run on each render.
 function prepareData(data, timezone) {
   return data.map((timeData) => {
-    let timestampMoment = moment.utc(timeData.timestamp).local();
+    let timestampMoment = moment.utc(timeData.timestamp_iso).local();
     if (timezone) {
-      timestampMoment = moment.utc(timeData.timestamp).tz(timezone);
+      timestampMoment = moment.utc(timeData.timestamp_iso).tz(timezone);
     }
     const nodesByIpAddress = {};
     timeData.data.forEach((check) => {
@@ -257,8 +309,9 @@ function prepareData(data, timezone) {
       }
       const node = nodesByIpAddress[ipAddress];
       node.checks.push(check);
-      node[check.has_error ? 'failedChecks' :
-                             (check.has_warning ? 'warningChecks' : 'passingChecks')].push(check);
+      node[
+        check.has_error ? 'failedChecks' : check.has_warning ? 'warningChecks' : 'passingChecks'
+      ].push(check);
       if (check.has_error) {
         node.hasError = true;
       }
@@ -267,18 +320,19 @@ function prepareData(data, timezone) {
       }
     });
     values(nodesByIpAddress).forEach((node) => {
-      node.checks = sortBy(node.checks,
-                           (check) => (check.has_error ? 0 : (check.has_warning ? 0 : 1)));
+      node.checks = sortBy(node.checks, (check) =>
+        check.has_error ? 0 : check.has_warning ? 0 : 1
+      );
     });
     const nodes = sortBy(
       values(nodesByIpAddress),
-      (node) => `${node.hasError ? 0 : (node.has_warning ? 0 : 1)}-${node.ipAddress}`
+      (node) => `${node.hasError ? 0 : node.has_warning ? 0 : 1}-${node.ipAddress}`
     );
     const healthyNodes = [];
     const errorNodes = [];
     const warningNodes = [];
     nodes.forEach((node) => {
-      (node.hasError ? errorNodes : (node.hasWarning ? warningNodes : healthyNodes)).push(node);
+      (node.hasError ? errorNodes : node.hasWarning ? warningNodes : healthyNodes).push(node);
     });
     return { timestampMoment, nodes, healthyNodes, errorNodes, warningNodes };
   });

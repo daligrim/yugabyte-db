@@ -40,11 +40,11 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-#ifndef YB_SERVER_WEBSERVER_H
-#define YB_SERVER_WEBSERVER_H
+#pragma once
 
 #include <memory>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include "yb/server/webserver_options.h"
@@ -79,6 +79,8 @@ class Webserver : public WebCallbackRegistry {
   // Return the single HostPort that this server was asked to bind on
   Status GetInputHostPort(HostPort* hp) const;
 
+  void SetLogging(bool enable_access_logging, bool enable_tcmalloc_logging);
+
   void RegisterPathHandler(const std::string& path,
                            const std::string& alias,
                            const PathHandlerCallback& callback,
@@ -92,11 +94,17 @@ class Webserver : public WebCallbackRegistry {
   // True if serving all traffic over SSL, false otherwise
   bool IsSecure() const;
 
+  void SetAutoFlags(std::unordered_set<std::string>&& flags);
+
+  bool ContainsAutoFlag(const std::string& flag) const;
+
+  void SetFlags(std::unordered_set<std::string>&& flags);
+
+  bool ContainsFlag(const std::string& flag) const;
+
  private:
   class Impl;
   std::unique_ptr<Impl> impl_;
 };
 
 } // namespace yb
-
-#endif // YB_SERVER_WEBSERVER_H

@@ -11,8 +11,7 @@
 // under the License.
 //
 
-#ifndef YB_COMMON_COMMON_FWD_H
-#define YB_COMMON_COMMON_FWD_H
+#pragma once
 
 #include <memory>
 #include <vector>
@@ -22,23 +21,18 @@
 #include "yb/common/ql_protocol.fwd.h"
 #include "yb/common/redis_protocol.fwd.h"
 #include "yb/common/wire_protocol.fwd.h"
+#include "yb/util/strongly_typed_bool.h"
 
 namespace yb {
 
 class ClockBase;
 class ColumnId;
 class ColumnSchema;
+class ConstContiguousRow;
 class DocHybridTime;
+class EncodedDocHybridTime;
 class HybridTime;
-class IndexInfo;
-class IndexMap;
-class Partition;
-class PartitionSchema;
-class PgsqlScanSpec;
-class QLResultSet;
-class QLRow;
-class QLRowBlock;
-class QLScanSpec;
+class MissingValueProvider;
 class TableProperties;
 class TransactionStatusManager;
 class TypeInfo;
@@ -49,18 +43,12 @@ typedef std::shared_ptr<Schema> SchemaPtr;
 typedef std::string PartitionKey;
 typedef std::shared_ptr<const PartitionKey> PartitionKeyPtr;
 
-class QLExprExecutor;
-typedef std::shared_ptr<QLExprExecutor> QLExprExecutorPtr;
-
-class QLTableRow;
 class QLType;
 class QLValue;
 
 struct DeletedColumn;
-struct IndexColumn;
 struct OpId;
 struct PgObjectId;
-struct QLTableColumn;
 struct ReadHybridTime;
 struct TransactionMetadata;
 struct TransactionOperationContext;
@@ -74,10 +62,11 @@ using QLTypePtr = std::shared_ptr<QLType>;
 using PgObjectIds = std::vector<PgObjectId>;
 
 enum class PgSystemAttrNum : int;
-enum class QLNameOption : int8_t;
-enum class YBHashSchema;
+enum class DataType;
 
-enum SortingType : uint8_t;
+enum class SortingType;
+
+YB_STRONGLY_TYPED_BOOL(ClampUncertaintyWindow);
 
 namespace common {
 
@@ -86,5 +75,3 @@ class Jsonb;
 } // namespace common
 
 } // namespace yb
-
-#endif // YB_COMMON_COMMON_FWD_H

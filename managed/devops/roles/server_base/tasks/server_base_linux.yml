@@ -6,7 +6,7 @@
 #
 # https://github.com/YugaByte/yugabyte-db/blob/master/licenses/POLYFORM-FREE-TRIAL-LICENSE-1.0.0.txt
 #
-# Common server configuration tasks for Linux (currently Debian and RedHat families).
+# Common server configuration tasks for Linux (currently Debian, RedHat, SUSE families).
 #
 # **** NOTE!! *****
 # This file handles requirements that are common across build/dev environment and prod/test
@@ -116,45 +116,33 @@
         backup: no
       with_items: "{{ repos.files }}"
 
-    - name: Replace mirror links from https to http
+    when: ansible_os_family == "RedHat" and (cloud_type is not defined or cloud_type != "onprem")
+
+  - block:
+    - name: Find CentOS repo files
+      find:
+        paths: /etc/yum.repos.d/
+        patterns: 'CentOS-*'
+      register: repo_files
+
+    - name: Comment out mirrorlist URLs on CentOS 7
       become: yes
       become_method: sudo
       replace:
-        dest: "{{ item.path }}"
-        regexp: '^(.*)https(.*)$'
-        replace: '\1http\2'
-        backup: no
-      with_items: "{{ repos.files }}"
+        dest: "{{ item }}"
+        regexp: '^mirrorlist='
+        replace: '#mirrorlist='
+      with_items: "{{ repo_files.files | map(attribute='path') | list }}"
 
-    when: ansible_os_family == "RedHat" and (cloud_type is not defined or cloud_type != "onprem")
-
-  - name: Install epel-release repo on centos if not present
-    become: yes
-    become_method: sudo
-    yum:
-      name: epel-release
-      state: latest
-      update_cache: yes
-    register: result
-    until: result.rc == 0
-    retries: "{{ yum_retry_count }}"
-    when: >
-      ansible_os_family == 'RedHat' and "epel-release not in ansible_facts.packages" and
-      ansible_distribution != 'OracleLinux'
-    tags: yb-prebuilt-ami
-
-  - name: Install oracle-epel-release repo on Oracle Linux if not present
-    become: yes
-    become_method: sudo
-    package:
-      name: "oracle-epel-release-el{{ ansible_distribution_major_version }}"
-      state: latest
-      update_cache: yes
-    register: result
-    until: result.rc == 0
-    retries: "{{ yum_retry_count }}"
-    when: ansible_distribution == 'OracleLinux'
-    tags: yb-prebuilt-ami
+    - name: Uncomment and set baseurl to vault in CentOS 7 repo files
+      become: yes
+      become_method: sudo
+      replace:
+        dest: "{{ item }}"
+        regexp: '^#?baseurl=http://mirror.centos.org'
+        replace: 'baseurl=http://vault.centos.org'
+      with_items: "{{ repo_files.files | map(attribute='path') | list }}"
+    when: ansible_distribution == 'CentOS' and ansible_distribution_major_version == '7'
 
   - name: Gather package facts
     package_facts:
@@ -166,12 +154,14 @@
       name: "{{ item }}"
       state: latest
       update_cache: yes
+      lock_timeout: 600
     with_items:
       - "{{ linux_packages }}"
     register: result
     until: result is succeeded
     retries: "{{ yum_retry_count }}"
     when: ansible_os_family == 'RedHat' and "item not in ansible_facts.packages"
+    tags: yb-prebuilt-ami
 
   - name: Install linux packages we need on our YugaByte clusters
     become: yes
@@ -185,16 +175,15 @@
     until: result is succeeded
     retries: "{{ yum_retry_count }}"
     when: ansible_os_family != 'RedHat' and "item not in ansible_facts.packages"
+    tags: yb-prebuilt-ami
 
   - name: Install linux packages we need on our YugaByte clusters on RedHat aarch64 architecture
     become: yes
     become_method: sudo
-    module_defaults:
-      yum:
-        lock_timeout: 600
     package:
       name: "{{ item }}"
       state: latest
+      lock_timeout: 600
     with_items:
       - "{{ linux_packages + aarch64_packages }}"
     register: result
@@ -204,13 +193,11 @@
       ansible_architecture == 'aarch64' and
       "item not in ansible_facts.packages" and
       ansible_os_family == 'RedHat'
+    tags: yb-prebuilt-ami
 
   - name: Install linux packages we need on our YugaByte clusters on Debian aarch64 architecture
     become: yes
     become_method: sudo
-    module_defaults:
-      yum:
-        lock_timeout: 600
     package:
       name: "{{ item }}"
       state: latest
@@ -223,4 +210,5 @@
       ansible_architecture == 'aarch64' and
       "item not in ansible_facts.packages" and
       ansible_os_family == 'Debian'
+    tags: yb-prebuilt-ami
   when: not air_gap

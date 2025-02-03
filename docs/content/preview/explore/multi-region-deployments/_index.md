@@ -2,9 +2,8 @@
 title: Multi-Region Deployments
 headerTitle: Multi-Region Deployments
 linkTitle: Multi-region deployments
-description: Multi-Region Deployments in YugabyteDB.
+description: Explore different Multi-Region deployment topologies in YugabyteDB.
 headcontent: Multi-Region Deployments in YugabyteDB.
-image: /images/section_icons/secure/authorization.png
 menu:
   preview:
     identifier: explore-multi-region-deployments
@@ -21,7 +20,7 @@ YugabyteDB supports a rich set of multi-region deployment topologies. This secti
 
 The following table summarizes these different multi-region deployments in YugabyteDB along with some of their key characteristics.
 
-|     | [Default](synchronous-replication-ysql/) | [Geo-partitioning](row-level-geo-partitioning/) | [xCluster](asynchronous-replication-ysql/) | [Read replicas](read-replicas/) |
+|     | [Default](synchronous-replication-ysql/) | [Geo-partitioning](row-level-geo-partitioning/) | [xCluster](../going-beyond-sql/asynchronous-replication-ysql/) | [Read replicas](read-replicas-ysql/) |
 | :-- | :--------------------------------------- | :---------------------------------------------- | :----------------------------------------- | :------------ |
 | **Replication** | Synchronous | Synchronous  | Asynchronous <br/> *(unidirectional and bidirectional)* | Asynchronous <br/> *(unidirectional only)* |
 | **Data residency** | All data replicated across regions | Data partitioned across regions. <br/>Partitions replicated inside region. | All data replicated inside region. <br/>Configure per-table cross-region replication. | All data replicated in primary region. <br/>Cluster-wide asynchronous replication to read replicas. |
@@ -39,7 +38,7 @@ The deployment types are explained in the following sections.
     <a class="section-link icon-offset" href="synchronous-replication-ysql/">
       <div class="head">
         <img class="icon" src="/images/section_icons/secure/rbac-model.png" aria-hidden="true" />
-        <div class="title">Synchronous Replication</div>
+        <div class="title">Synchronous multi region</div>
       </div>
       <div class="body">
           Achieve synchronous replication across three or more regions in YugabyteDB.
@@ -48,7 +47,7 @@ The deployment types are explained in the following sections.
   </div>
 
   <div class="col-12 col-md-6 col-lg-12 col-xl-6">
-    <a class="section-link icon-offset" href="asynchronous-replication-ysql/">
+    <a class="section-link icon-offset" href="../going-beyond-sql/asynchronous-replication-ysql/">
       <div class="head">
         <img class="icon" src="/images/section_icons/secure/rbac-model.png" aria-hidden="true" />
         <div class="title">xCluster</div>
@@ -63,7 +62,7 @@ The deployment types are explained in the following sections.
     <a class="section-link icon-offset" href="row-level-geo-partitioning/">
       <div class="head">
         <img class="icon" src="/images/section_icons/secure/rbac-model.png" aria-hidden="true" />
-        <div class="title">Row-Level Geo-Partitioning</div>
+        <div class="title">Row-level geo-partitioning</div>
       </div>
       <div class="body">
           Use row-level geo-partitioning in YugabyteDB.
@@ -72,10 +71,10 @@ The deployment types are explained in the following sections.
   </div>
 
    <div class="col-12 col-md-6 col-lg-12 col-xl-6">
-    <a class="section-link icon-offset" href="read-replicas/">
+    <a class="section-link icon-offset" href="read-replicas-ysql/">
       <div class="head">
         <img class="icon" src="/images/section_icons/secure/rbac-model.png" aria-hidden="true" />
-        <div class="title">Read Replicas</div>
+        <div class="title">Read replicas</div>
       </div>
       <div class="body">
           Use read replicas to lower latency and improve performance.

@@ -20,12 +20,17 @@
 
 #include "yb/common/transaction.h"
 
+#include "yb/dockv/doc_key.h"
+#include "yb/dockv/value_type.h"
+
 #include "yb/docdb/bounded_rocksdb_iterator.h"
 #include "yb/docdb/consensus_frontier.h"
-#include "yb/docdb/doc_key.h"
+#include "yb/docdb/doc_ql_filefilter.h"
+#include "yb/docdb/docdb_filter_policy.h"
+#include "yb/docdb/docdb_statistics.h"
 #include "yb/docdb/intent_aware_iterator.h"
 #include "yb/docdb/key_bounds.h"
-#include "yb/docdb/value_type.h"
+#include "yb/docdb/read_operation_data.h"
 
 #include "yb/gutil/casts.h"
 #include "yb/gutil/sysinfo.h"
@@ -36,9 +41,12 @@
 #include "yb/rocksdb/db/version_set.h"
 #include "yb/rocksdb/db/writebuffer.h"
 #include "yb/rocksdb/memtablerep.h"
+#include "yb/rocksdb/metadata.h"
 #include "yb/rocksdb/options.h"
 #include "yb/rocksdb/rate_limiter.h"
+#include "yb/rocksdb/statistics.h"
 #include "yb/rocksdb/table.h"
+#include "yb/rocksdb/table/block_based_table_reader.h"
 #include "yb/rocksdb/table/filtering_iterator.h"
 #include "yb/rocksdb/types.h"
 #include "yb/rocksdb/util/compression.h"
@@ -46,7 +54,7 @@
 #include "yb/rocksutil/yb_rocksdb_logger.h"
 
 #include "yb/util/flags.h"
-#include "yb/util/bytes_formatter.h"
+#include "yb/util/flag_validators.h"
 #include "yb/util/priority_thread_pool.h"
 #include "yb/util/result.h"
 #include "yb/util/size_literals.h"
@@ -68,99 +76,116 @@ constexpr int32_t kMaxBlockRestartInterval = 256;
 
 } // namespace
 
-DEFINE_int32(rocksdb_max_background_flushes, -1, "Number threads to do background flushes.");
-DEFINE_bool(rocksdb_disable_compactions, false, "Disable rocksdb compactions.");
-DEFINE_bool(rocksdb_compaction_measure_io_stats, false, "Measure stats for rocksdb compactions.");
-DEFINE_int32(rocksdb_base_background_compactions, -1,
+DEFINE_UNKNOWN_int32(rocksdb_max_background_flushes, -1,
+    "Number threads to do background flushes.");
+DEFINE_UNKNOWN_bool(rocksdb_disable_compactions, false, "Disable rocksdb compactions.");
+DEFINE_UNKNOWN_bool(rocksdb_compaction_measure_io_stats, false,
+    "Measure stats for rocksdb compactions.");
+DEFINE_UNKNOWN_int32(rocksdb_base_background_compactions, -1,
              "Number threads to do background compactions.");
-DEFINE_int32(rocksdb_max_background_compactions, -1,
+DEFINE_UNKNOWN_int32(rocksdb_max_background_compactions, -1,
              "Increased number of threads to do background compactions (used when compactions need "
              "to catch up.) Unless rocksdb_disable_compactions=true, this cannot be set to zero.");
-DEFINE_int32(rocksdb_level0_file_num_compaction_trigger, 5,
+DEFINE_UNKNOWN_int32(rocksdb_level0_file_num_compaction_trigger, 5,
              "Number of files to trigger level-0 compaction. -1 if compaction should not be "
              "triggered by number of files at all.");
 
-DEFINE_int32(rocksdb_level0_slowdown_writes_trigger, -1,
+DEFINE_UNKNOWN_int32(rocksdb_level0_slowdown_writes_trigger, -1,
              "The number of files above which writes are slowed down.");
-DEFINE_int32(rocksdb_level0_stop_writes_trigger, -1,
+DEFINE_UNKNOWN_int32(rocksdb_level0_stop_writes_trigger, -1,
              "The number of files above which compactions are stopped.");
-DEFINE_int32(rocksdb_universal_compaction_size_ratio, 20,
+DEFINE_UNKNOWN_int32(rocksdb_universal_compaction_size_ratio, 20,
              "The percentage upto which files that are larger are include in a compaction.");
-DEFINE_uint64(rocksdb_universal_compaction_always_include_size_threshold, 64_MB,
+DEFINE_UNKNOWN_uint64(rocksdb_universal_compaction_always_include_size_threshold, 64_MB,
              "Always include files of smaller or equal size in a compaction.");
-DEFINE_int32(rocksdb_universal_compaction_min_merge_width, 4,
+DEFINE_UNKNOWN_int32(rocksdb_universal_compaction_min_merge_width, 4,
              "The minimum number of files in a single compaction run.");
-DEFINE_int64(rocksdb_compact_flush_rate_limit_bytes_per_sec, 1_GB,
+DEFINE_UNKNOWN_int64(rocksdb_compact_flush_rate_limit_bytes_per_sec, 1_GB,
              "Use to control write rate of flush and compaction.");
-DEFINE_string(rocksdb_compact_flush_rate_limit_sharing_mode, "tserver",
+DEFINE_UNKNOWN_string(rocksdb_compact_flush_rate_limit_sharing_mode, "tserver",
               "Allows to control rate limit sharing/calculation across RocksDB instances\n"
               "  tserver - rate limit is shared across all RocksDB instances"
               " at tabset server level\n"
               "  none - rate limit is calculated independently for every RocksDB instance");
-DEFINE_uint64(rocksdb_compaction_size_threshold_bytes, 2ULL * 1024 * 1024 * 1024,
+DEFINE_UNKNOWN_uint64(rocksdb_compaction_size_threshold_bytes, 2ULL * 1024 * 1024 * 1024,
              "Threshold beyond which compaction is considered large.");
-DEFINE_uint64(rocksdb_max_file_size_for_compaction, 0,
+DEFINE_UNKNOWN_uint64(rocksdb_max_file_size_for_compaction, 0,
              "Maximal allowed file size to participate in RocksDB compaction. 0 - unlimited.");
-DEFINE_int32(rocksdb_max_write_buffer_number, 2,
+
+// Use big enough default value for rocksdb_max_write_buffer_number, so behavior defined by
+// db_max_flushing_bytes will be actual default.
+DEFINE_NON_RUNTIME_int32(rocksdb_max_write_buffer_number, 100500,
              "Maximum number of write buffers that are built up in memory.");
 
-DEFINE_int64(db_block_size_bytes, 32_KB,
-             "Size of RocksDB data block (in bytes).");
+// The manifest file persists min/max schema versions in flushed frontiers. A default 10MB limit
+// enables us to support a ~200k colocated tables/1500 databases in the syscatalog tablet
+DEFINE_NON_RUNTIME_uint64(rocksdb_max_manifest_file_size, 10_MB,
+             "Maximum size of manifest file before which it is consolidated");
 
-DEFINE_int64(db_filter_block_size_bytes, 64_KB,
+DEFINE_RUNTIME_bool(
+    rocksdb_advise_random_on_open, true,
+    "If set to true, will hint the underlying file system that the file access pattern is random, "
+    "when a sst file is opened.");
+
+DECLARE_int64(db_block_size_bytes);
+
+DEFINE_UNKNOWN_int64(db_filter_block_size_bytes, 64_KB,
              "Size of RocksDB filter block (in bytes).");
 
-DEFINE_int64(db_index_block_size_bytes, 32_KB,
+DEFINE_UNKNOWN_int64(db_index_block_size_bytes, 32_KB,
              "Size of RocksDB index block (in bytes).");
 
-DEFINE_int64(db_min_keys_per_index_block, 100,
+DEFINE_UNKNOWN_int64(db_min_keys_per_index_block, 100,
              "Minimum number of keys per index block.");
 
-DEFINE_int64(db_write_buffer_size, -1,
+DEFINE_UNKNOWN_int64(db_write_buffer_size, -1,
              "Size of RocksDB write buffer (in bytes). -1 to use default.");
 
-DEFINE_int32(memstore_size_mb, 128,
+DEFINE_UNKNOWN_int32(memstore_size_mb, 128,
              "Max size (in mb) of the memstore, before needing to flush.");
 
-DEFINE_bool(use_docdb_aware_bloom_filter, true,
-            "Whether to use the DocDbAwareFilterPolicy for both bloom storage and seeks.");
-// Empirically 2 is a minimal value that provides best performance on sequential scan.
-DEFINE_int32(max_nexts_to_avoid_seek, 2,
-             "The number of next calls to try before doing resorting to do a rocksdb seek.");
+// Use a value slightly less than 2 default mem store sizes.
+DEFINE_NON_RUNTIME_uint64(db_max_flushing_bytes, 250_MB,
+    "The limit for the number of bytes in immutable mem tables. "
+    "After reaching this limit new writes are blocked. 0 - unlimited.");
 
-DEFINE_bool(use_multi_level_index, true, "Whether to use multi-level data index.");
+DEFINE_UNKNOWN_bool(use_docdb_aware_bloom_filter, true,
+            "Whether to use the DocDbAwareFilterPolicy for both bloom storage and seeks.");
+
+DEFINE_UNKNOWN_bool(use_multi_level_index, true, "Whether to use multi-level data index.");
 
 // Using class kExternal as this change affects the format of data in the SST files which are sent
 // to xClusters during bootstrap.
-DEFINE_AUTO_string(regular_tablets_data_block_key_value_encoding,
-    kExternal, "shared_prefix", "three_shared_parts",
+DEFINE_RUNTIME_AUTO_string(regular_tablets_data_block_key_value_encoding, kExternal,
+    "shared_prefix", "three_shared_parts",
     "Key-value encoding to use for regular data blocks in RocksDB. Possible options: "
     "shared_prefix, three_shared_parts");
 
-DEFINE_uint64(initial_seqno, 1ULL << 50, "Initial seqno for new RocksDB instances.");
+DEFINE_UNKNOWN_uint64(initial_seqno, 1ULL << 50, "Initial seqno for new RocksDB instances.");
 
-DEFINE_int32(num_reserved_small_compaction_threads, -1, "Number of reserved small compaction "
-             "threads. It allows splitting small vs. large compactions.");
+DEFINE_UNKNOWN_int32(num_reserved_small_compaction_threads, -1,
+    "Number of reserved small compaction "
+    "threads. It allows splitting small vs. large compactions.");
 
-DEFINE_bool(enable_ondisk_compression, true,
+DEFINE_UNKNOWN_bool(enable_ondisk_compression, true,
             "Determines whether SSTable compression is enabled or not.");
 
-DEFINE_int32(priority_thread_pool_size, -1,
+DEFINE_UNKNOWN_int32(priority_thread_pool_size, -1,
              "Max running workers in compaction thread pool. "
              "If -1 and max_background_compactions is specified - use max_background_compactions. "
              "If -1 and max_background_compactions is not specified - use sqrt(num_cpus).");
 
-DEFINE_string(compression_type, "Snappy",
+DEFINE_UNKNOWN_string(compression_type, "Snappy",
               "On-disk compression type to use in RocksDB."
               "By default, Snappy is used if supported.");
 
-DEFINE_int32(block_restart_interval, kDefaultDataBlockRestartInterval,
+DEFINE_UNKNOWN_int32(block_restart_interval, kDefaultDataBlockRestartInterval,
              "Controls the number of keys to look at for computing the diff encoding.");
 
-DEFINE_int32(index_block_restart_interval, kDefaultIndexBlockRestartInterval,
+DEFINE_UNKNOWN_int32(index_block_restart_interval, kDefaultIndexBlockRestartInterval,
              "Controls the number of data blocks to be indexed inside an index block.");
 
-DEFINE_bool(prioritize_tasks_by_disk, false,
+DEFINE_UNKNOWN_bool(prioritize_tasks_by_disk, false,
             "Consider disk load when considering compaction and flush priorities.");
 
 namespace yb {
@@ -208,32 +233,11 @@ namespace docdb {
 
 } // namespace yb
 
-namespace {
+DEFINE_validator(compression_type,
+    FLAG_OK_VALIDATOR(yb::GetConfiguredCompressionType(_value)));
 
-bool CompressionTypeValidator(const char* flagname, const std::string& flag_compression_type) {
-  auto res = yb::GetConfiguredCompressionType(flag_compression_type);
-  if (!res.ok()) {
-    // Below we CHECK_RESULT on the same value returned here, and validating the result here ensures
-    // that CHECK_RESULT will never fail once the process is running.
-    LOG(ERROR) << res.status().ToString();
-    return false;
-  }
-  return true;
-}
-
-bool KeyValueEncodingFormatValidator(const char* flag_name, const std::string& flag_value) {
-  auto res = yb::docdb::GetConfiguredKeyValueEncodingFormat(flag_value);
-  bool ok = res.ok();
-  if (!ok) {
-    LOG(ERROR) << flag_name << ": " << res.status();
-  }
-  return ok;
-}
-
-} // namespace
-
-DEFINE_validator(compression_type, &CompressionTypeValidator);
-DEFINE_validator(regular_tablets_data_block_key_value_encoding, &KeyValueEncodingFormatValidator);
+DEFINE_validator(regular_tablets_data_block_key_value_encoding,
+    FLAG_OK_VALIDATOR(yb::docdb::GetConfiguredKeyValueEncodingFormat(_value)));
 
 using std::shared_ptr;
 using std::string;
@@ -243,109 +247,59 @@ using strings::Substitute;
 namespace yb {
 namespace docdb {
 
+using dockv::KeyBytes;
+
 std::shared_ptr<rocksdb::BoundaryValuesExtractor> DocBoundaryValuesExtractorInstance();
 
-void SeekForward(const rocksdb::Slice& slice, rocksdb::Iterator *iter) {
-  if (!iter->Valid() || iter->key().compare(slice) >= 0) {
-    return;
-  }
-  ROCKSDB_SEEK(iter, slice);
-}
-
-void SeekForward(const KeyBytes& key_bytes, rocksdb::Iterator *iter) {
-  SeekForward(key_bytes.AsSlice(), iter);
-}
-
-KeyBytes AppendDocHt(const Slice& key, const DocHybridTime& doc_ht) {
+KeyBytes AppendDocHt(Slice key, const DocHybridTime& doc_ht) {
   char buf[kMaxBytesPerEncodedHybridTime + 1];
-  buf[0] = KeyEntryTypeAsChar::kHybridTime;
+  buf[0] = dockv::KeyEntryTypeAsChar::kHybridTime;
   auto end = doc_ht.EncodedInDocDbFormat(buf + 1);
   return KeyBytes(key, Slice(buf, end));
 }
 
-void SeekPastSubKey(const Slice& key, rocksdb::Iterator* iter) {
-  SeekForward(AppendDocHt(key, DocHybridTime::kMin), iter);
-}
-
-void SeekOutOfSubKey(KeyBytes* key_bytes, rocksdb::Iterator* iter) {
-  key_bytes->AppendKeyEntryType(KeyEntryType::kMaxByte);
-  SeekForward(*key_bytes, iter);
-  key_bytes->RemoveKeyEntryTypeSuffix(KeyEntryType::kMaxByte);
-}
-
-void SeekPossiblyUsingNext(rocksdb::Iterator* iter, const Slice& seek_key,
-                           int* next_count, int* seek_count) {
-  for (int nexts = FLAGS_max_nexts_to_avoid_seek; nexts-- > 0;) {
-    if (!iter->Valid() || iter->key().compare(seek_key) >= 0) {
-      VTRACE(3, "Did $0 Next(s) instead of a Seek", nexts);
-      return;
-    }
-    VLOG(4) << "Skipping: " << SubDocKey::DebugSliceToString(iter->key());
-
-    iter->Next();
-    ++*next_count;
-  }
-
-  VTRACE(3, "Forced to do an actual Seek after $0 Next(s)", FLAGS_max_nexts_to_avoid_seek);
-  iter->Seek(seek_key);
-  ++*seek_count;
-}
-
-void PerformRocksDBSeek(
-    rocksdb::Iterator *iter,
-    const rocksdb::Slice &seek_key,
-    const char* file_name,
-    int line) {
-  int next_count = 0;
-  int seek_count = 0;
-  if (seek_key.size() == 0) {
-    iter->SeekToFirst();
-    ++seek_count;
-  } else if (!iter->Valid() || iter->key().compare(seek_key) > 0) {
-    iter->Seek(seek_key);
-    ++seek_count;
-  } else {
-    SeekPossiblyUsingNext(iter, seek_key, &next_count, &seek_count);
-  }
-  VLOG(4) << Substitute(
-      "PerformRocksDBSeek at $0:$1:\n"
-      "    Seek key:         $2\n"
-      "    Seek key (raw):   $3\n"
-      "    Actual key:       $4\n"
-      "    Actual key (raw): $5\n"
-      "    Actual value:     $6\n"
-      "    Next() calls:     $7\n"
-      "    Seek() calls:     $8\n",
-      file_name, line,
-      BestEffortDocDBKeyToStr(seek_key),
-      FormatSliceAsStr(seek_key),
-      iter->Valid() ? BestEffortDocDBKeyToStr(KeyBytes(iter->key())) : "N/A",
-      iter->Valid() ? FormatSliceAsStr(iter->key()) : "N/A",
-      iter->Valid() ? FormatSliceAsStr(iter->value()) : "N/A",
-      next_count,
-      seek_count);
-}
-
 namespace {
+
+void SetupBloomFilter(rocksdb::ReadOptions& read_options, const BloomFilterOptions& bloom_filter) {
+  if (!FLAGS_use_docdb_aware_bloom_filter) {
+    return;
+  }
+  static const rocksdb::BloomFilterAwareFileFilter bloom_filter_aware_file_filter;
+  switch (bloom_filter.mode()) {
+    case BloomFilterMode::kInactive:
+      return;
+    case BloomFilterMode::kFixed:
+      read_options.iterator_filter = &bloom_filter_aware_file_filter;
+      read_options.user_key_for_filter = bloom_filter.key();
+      return;
+    case BloomFilterMode::kVariable:
+      read_options.iterator_filter = &bloom_filter_aware_file_filter;
+      read_options.defer_iterator_filter = true;
+      return;
+  }
+  FATAL_INVALID_ENUM_VALUE(BloomFilterMode, bloom_filter.mode());
+}
 
 rocksdb::ReadOptions PrepareReadOptions(
     rocksdb::DB* rocksdb,
-    BloomFilterMode bloom_filter_mode,
-    const boost::optional<const Slice>& user_key_for_filter,
+    const BloomFilterOptions& bloom_filter,
     const rocksdb::QueryId query_id,
     std::shared_ptr<rocksdb::ReadFileFilter> file_filter,
-    const Slice* iterate_upper_bound) {
+    const Slice* iterate_upper_bound,
+    rocksdb::CacheRestartBlockKeys cache_restart_block_keys,
+    rocksdb::Statistics* statistics) {
   rocksdb::ReadOptions read_opts;
   read_opts.query_id = query_id;
-  if (FLAGS_use_docdb_aware_bloom_filter &&
-    bloom_filter_mode == BloomFilterMode::USE_BLOOM_FILTER) {
-    DCHECK(user_key_for_filter);
-    read_opts.table_aware_file_filter = rocksdb->GetOptions().table_factory->
-        NewTableAwareReadFileFilter(read_opts, user_key_for_filter.get());
-  }
+  read_opts.statistics = statistics;
+  SetupBloomFilter(read_opts, bloom_filter);
   read_opts.file_filter = std::move(file_filter);
   read_opts.iterate_upper_bound = iterate_upper_bound;
+  read_opts.cache_restart_block_keys = cache_restart_block_keys;
   return read_opts;
+}
+
+rocksdb::Statistics* GetRegularDBStatistics(DocDBStatistics* statistics) {
+  return statistics ? statistics->RegularDBStatistics() : nullptr;
 }
 
 } // namespace
@@ -353,31 +307,59 @@ rocksdb::ReadOptions PrepareReadOptions(
 BoundedRocksDbIterator CreateRocksDBIterator(
     rocksdb::DB* rocksdb,
     const KeyBounds* docdb_key_bounds,
-    BloomFilterMode bloom_filter_mode,
-    const boost::optional<const Slice>& user_key_for_filter,
+    const BloomFilterOptions& bloom_filter,
     const rocksdb::QueryId query_id,
     std::shared_ptr<rocksdb::ReadFileFilter> file_filter,
-    const Slice* iterate_upper_bound) {
-  rocksdb::ReadOptions read_opts = PrepareReadOptions(rocksdb, bloom_filter_mode,
-      user_key_for_filter, query_id, std::move(file_filter), iterate_upper_bound);
+    const Slice* iterate_upper_bound,
+    const rocksdb::CacheRestartBlockKeys cache_restart_block_keys,
+    rocksdb::Statistics* statistics) {
+  rocksdb::ReadOptions read_opts = PrepareReadOptions(
+      rocksdb, bloom_filter, query_id, std::move(file_filter), iterate_upper_bound,
+      cache_restart_block_keys, statistics);
   return BoundedRocksDbIterator(rocksdb, read_opts, docdb_key_bounds);
 }
 
 unique_ptr<IntentAwareIterator> CreateIntentAwareIterator(
     const DocDB& doc_db,
-    BloomFilterMode bloom_filter_mode,
-    const boost::optional<const Slice>& user_key_for_filter,
+    const BloomFilterOptions& bloom_filter,
     const rocksdb::QueryId query_id,
     const TransactionOperationContext& txn_op_context,
-    CoarseTimePoint deadline,
-    const ReadHybridTime& read_time,
+    const ReadOperationData& read_operation_data,
     std::shared_ptr<rocksdb::ReadFileFilter> file_filter,
-    const Slice* iterate_upper_bound) {
+    const Slice* iterate_upper_bound,
+    const FastBackwardScan use_fast_backward_scan) {
+  // Current policy is to enable restart block keys caching only when fast backward scan is enabled.
+  const auto cache_restart_block_keys = rocksdb::CacheRestartBlockKeys { use_fast_backward_scan };
+
   // TODO(dtxn) do we need separate options for intents db?
-  rocksdb::ReadOptions read_opts = PrepareReadOptions(doc_db.regular, bloom_filter_mode,
-      user_key_for_filter, query_id, std::move(file_filter), iterate_upper_bound);
+  rocksdb::ReadOptions read_opts = PrepareReadOptions(
+      doc_db.regular, bloom_filter, query_id, std::move(file_filter), iterate_upper_bound,
+      cache_restart_block_keys, GetRegularDBStatistics(read_operation_data.statistics));
   return std::make_unique<IntentAwareIterator>(
-      doc_db, read_opts, deadline, read_time, txn_op_context);
+      doc_db, read_opts, read_operation_data, txn_op_context, use_fast_backward_scan);
+}
+
+BoundedRocksDbIterator CreateIntentsIteratorWithHybridTimeFilter(
+    rocksdb::DB* intentsdb,
+    const TransactionStatusManager* status_manager,
+    const KeyBounds* docdb_key_bounds,
+    const Slice* iterate_upper_bound,
+    const rocksdb::CacheRestartBlockKeys cache_restart_block_keys,
+    rocksdb::Statistics* statistics) {
+  auto min_running_ht = status_manager->MinRunningHybridTime();
+  if (min_running_ht == HybridTime::kMax) {
+    VLOG(4) << "No transactions running";
+    return {};
+  }
+  return CreateRocksDBIterator(
+      intentsdb,
+      docdb_key_bounds,
+      docdb::BloomFilterOptions::Inactive(),
+      rocksdb::kDefaultQueryId,
+      CreateIntentHybridTimeFileFilter(min_running_ht),
+      iterate_upper_bound,
+      cache_restart_block_keys,
+      statistics);
 }
 
 namespace {
@@ -498,22 +480,76 @@ void AutoInitFromBlockBasedTableOptions(rocksdb::BlockBasedTableOptions* table_o
 class HybridTimeFilteringIterator : public rocksdb::FilteringIterator {
  public:
   HybridTimeFilteringIterator(
-      rocksdb::InternalIterator* iterator, bool arena_mode, HybridTime hybrid_time_filter)
-      : rocksdb::FilteringIterator(iterator, arena_mode), hybrid_time_filter_(hybrid_time_filter) {}
+      rocksdb::InternalIterator* iterator, bool arena_mode, Slice hybrid_time_filter)
+      : rocksdb::FilteringIterator(iterator, arena_mode) {
+    uint64_t ht = ExtractGlobalFilter(hybrid_time_filter);
+    if (HybridTime::FromPB(ht).is_valid()) {
+      global_ht_filter_ = HybridTime::FromPB(ht);
+    }
+    Slice cotables_filter = hybrid_time_filter.WithoutPrefix(sizeof(ht));
+    if (!cotables_filter.empty()) {
+      num_filters_ = cotables_filter.size() / kSizePerDbFilter;
+      db_oid_ptr_ = pointer_cast<const uint32_t*>(cotables_filter.data());
+      cotables_ht_ptr_ = pointer_cast<const uint64_t*>(
+          cotables_filter.data() + (num_filters_ * kSizeDbOid));
+    }
+  }
 
  private:
-  bool Satisfied(Slice key) override {
-    auto user_key = rocksdb::ExtractUserKey(key);
+  std::string CoTablesFilterToString() {
+    std::string res = "[ ";
+    for (size_t i = 0; i < num_filters_; i++) {
+      res += Format("$0:$1, ", db_oid_ptr_[i], HybridTime(cotables_ht_ptr_[i]));
+    }
+    res += " ]";
+    return res;
+  }
+
+  bool Satisfied(Slice user_key) override {
     auto doc_ht = DocHybridTime::DecodeFromEnd(&user_key);
     if (!doc_ht.ok()) {
-      LOG(DFATAL) << "Unable to decode doc ht " << rocksdb::ExtractUserKey(key) << ": "
+      LOG(DFATAL) << "Unable to decode doc ht " << user_key << ": "
                   << doc_ht.status();
       return true;
     }
-    return doc_ht->hybrid_time() <= hybrid_time_filter_;
+    VLOG(5) << "Key: " << user_key.ToDebugHexString() << ", filter details: "
+            << "{ Cotables filter: " << CoTablesFilterToString() << " }"
+            << "{ All keys filter: " << global_ht_filter_.ToDebugString() << " }";
+    // Logical AND of both the filters.
+    if (global_ht_filter_.is_valid() && doc_ht->hybrid_time() > global_ht_filter_) {
+      return false;
+    }
+    if (num_filters_ == 0) {
+      return true;
+    }
+    // Should only reach here in case of ysql catalog tables on the master.
+    bool cotable_uuid_present = user_key.TryConsumeByte(dockv::KeyEntryTypeAsChar::kTableId);
+    if (!cotable_uuid_present) {
+      return true;
+    }
+    Slice cotable_slice(user_key.cdata(), kUuidSize);
+    auto decoded_cotable_uuid_res = Uuid::FromComparable(cotable_slice);
+    if (!decoded_cotable_uuid_res.ok()) {
+      return true;
+    }
+    uint32_t key_db_oid = LittleEndian::Load32(decoded_cotable_uuid_res->data() + 12);
+
+    VLOG(5) << "DB Oid of key " << key_db_oid;
+    auto it = std::lower_bound(db_oid_ptr_, db_oid_ptr_ + num_filters_, key_db_oid);
+    if (it != db_oid_ptr_ + num_filters_ && *it == key_db_oid) {
+      auto idx = it - db_oid_ptr_;
+      HybridTime ht(cotables_ht_ptr_[idx]);
+      VLOG(5) << "Found db oid " << key_db_oid << " at index " << idx
+              << " with hybrid time " << ht;
+      return doc_ht->hybrid_time() <= ht;
+    }
+    return true;
   }
 
-  HybridTime hybrid_time_filter_;
+  HybridTime global_ht_filter_;
+  const uint32_t* db_oid_ptr_ = nullptr; // owned externally.
+  const uint64_t* cotables_ht_ptr_ = nullptr; // owned externally.
+  size_t num_filters_ = 0;
 };
 
 template <class T, class... Args>
@@ -526,14 +562,12 @@ T* CreateOnArena(rocksdb::Arena* arena, Args&&... args) {
 }
 
 rocksdb::InternalIterator* WrapIterator(
-    rocksdb::InternalIterator* iterator, rocksdb::Arena* arena, const Slice& filter) {
-  if (!filter.empty()) {
-    HybridTime hybrid_time_filter;
-    memcpy(&hybrid_time_filter, filter.data(), sizeof(hybrid_time_filter));
-    return CreateOnArena<HybridTimeFilteringIterator>(
-        arena, iterator, arena != nullptr, hybrid_time_filter);
+    rocksdb::InternalIterator* iterator, rocksdb::Arena* arena, Slice filter) {
+  if (filter.empty()) {
+    return iterator;
   }
-  return iterator;
+  return CreateOnArena<HybridTimeFilteringIterator>(
+      arena, iterator, arena != nullptr, filter);
 }
 
 void AddSupportedFilterPolicy(
@@ -608,12 +642,14 @@ int32_t GetGlobalRocksDBPriorityThreadPoolSize() {
 
 void InitRocksDBOptions(
     rocksdb::Options* options, const string& log_prefix,
+    const TabletId& tablet_id,
     const shared_ptr<rocksdb::Statistics>& statistics,
     const tablet::TabletOptions& tablet_options,
     rocksdb::BlockBasedTableOptions table_options,
     const uint64_t group_no) {
   AutoInitFromRocksDBFlags(options);
   SetLogPrefix(options, log_prefix);
+  options->tablet_id = tablet_id;
   options->create_if_missing = true;
   // We should always sync data to ensure we can recover rocksdb from crash.
   options->disableDataSync = false;
@@ -629,6 +665,7 @@ void InitRocksDBOptions(
   } else {
     options->write_buffer_size = FLAGS_memstore_size_mb * 1_MB;
   }
+  LOG(INFO) << log_prefix << "Write buffer size: " << options->write_buffer_size;
   options->env = tablet_options.rocksdb_env;
   options->checkpoint_env = rocksdb::Env::Default();
   options->priority_thread_pool_for_compactions_and_flushes = GetGlobalPriorityThreadPool();
@@ -636,6 +673,8 @@ void InitRocksDBOptions(
   if (FLAGS_num_reserved_small_compaction_threads != -1) {
     options->num_reserved_small_compaction_threads = FLAGS_num_reserved_small_compaction_threads;
   }
+
+  options->max_manifest_file_size = FLAGS_rocksdb_max_manifest_file_size;
 
   // Since the flag validator for FLAGS_compression_type will fail if the result of this call is not
   // OK, this CHECK_RESULT should never fail and is safe.
@@ -713,6 +752,11 @@ void InitRocksDBOptions(
   }
 
   options->max_write_buffer_number = FLAGS_rocksdb_max_write_buffer_number;
+  if (FLAGS_db_max_flushing_bytes != 0) {
+    options->max_flushing_bytes = FLAGS_db_max_flushing_bytes;
+  }
+
+  options->advise_random_on_open = FLAGS_rocksdb_advise_random_on_open;
 
   options->memtable_factory = std::make_shared<rocksdb::SkipListFactory>(
       0 /* lookahead */, rocksdb::ConcurrentWrites::kFalse);
@@ -853,35 +897,71 @@ class RocksDBPatcher::Impl {
     return version_set_.Recover(column_families);
   }
 
-  Status SetHybridTimeFilter(HybridTime value) {
+  Status SetHybridTimeFilter(std::optional<uint32_t> db_oid, HybridTime value) {
     RocksDBPatcherHelper helper(&version_set_);
 
-    helper.IterateFiles([&helper, value](int level, const rocksdb::FileMetaData& file) {
+    helper.IterateFiles([&helper, db_oid, value](
+        int level, const rocksdb::FileMetaData& file) {
       if (!file.largest.user_frontier) {
         return;
       }
       auto& consensus_frontier = down_cast<ConsensusFrontier&>(*file.largest.user_frontier);
-      if (consensus_frontier.hybrid_time() <= value ||
-          consensus_frontier.hybrid_time_filter() <= value) {
+      // If all the data in the file is already as of old time, no need to set any filter.
+      if (consensus_frontier.hybrid_time() <= value) {
+        LOG(INFO) << "No need to set hybrid time filter since the largest frontier is already"
+                  << " older. Largest frontier HT " << consensus_frontier.hybrid_time()
+                  << ", filter HT " << value;
+        return;
+      }
+      if (db_oid) {
+        std::vector<std::pair<uint32_t, HybridTime>> new_filter;
+        consensus_frontier.CotablesFilter(&new_filter);
+        // Since existing filter is sorted, we can perform binary search to find the db oid.
+        auto it = std::lower_bound(new_filter.begin(), new_filter.end(), *db_oid,
+            [](const std::pair<uint32_t, HybridTime>& a, const uint32_t& b) {
+              return a.first < b;
+            });
+        // Simply append if not found.
+        if (it == new_filter.end() || it->first != *db_oid) {
+          new_filter.insert(it, { *db_oid, value });
+        } else {
+          // Update if found.
+          it->second = std::min(it->second, value);
+        }
+        rocksdb::FileMetaData fmd = file;
+        down_cast<ConsensusFrontier&>(*fmd.largest.user_frontier).SetCoTablesFilter(
+            std::move(new_filter));
+        LOG(INFO) << "Largest frontier post restore " << fmd.FrontiersToString();
+        helper.ModifyFile(level, fmd);
+        return;
+      } /* if (db_oid) */
+      if (HybridTime(consensus_frontier.GlobalFilter()) <= value) {
+        LOG(INFO) << "No need to set hybrid time filter since the largest frontier already"
+                  << " has an older filter. Largest frontier HT "
+                  << consensus_frontier.GlobalFilter()
+                  << ", filter " << value;
         return;
       }
       rocksdb::FileMetaData fmd = file;
-      down_cast<ConsensusFrontier&>(*fmd.largest.user_frontier).set_hybrid_time_filter(value);
+      down_cast<ConsensusFrontier&>(*fmd.largest.user_frontier).SetGlobalFilter(value);
+      LOG(INFO) << "Largest frontier post restore " << fmd.FrontiersToString();
       helper.ModifyFile(level, fmd);
     });
 
     return helper.Apply(options_, imm_cf_options_);
   }
 
-  Status ModifyFlushedFrontier(const ConsensusFrontier& frontier) {
+  Status ModifyFlushedFrontier(
+      const ConsensusFrontier& frontier, const CotableIdsMap& cotable_ids_map) {
     RocksDBPatcherHelper helper(&version_set_);
 
     docdb::ConsensusFrontier final_frontier = frontier;
 
     auto* existing_frontier = down_cast<docdb::ConsensusFrontier*>(version_set_.FlushedFrontier());
     if (existing_frontier) {
-      if (!frontier.history_cutoff()) {
-        final_frontier.set_history_cutoff(existing_frontier->history_cutoff());
+      if (!frontier.history_cutoff_valid()) {
+        final_frontier.set_history_cutoff_information(
+            existing_frontier->history_cutoff());
       }
       if (!frontier.op_id()) {
         // Update op id only if it was specified in frontier.
@@ -892,7 +972,8 @@ class RocksDBPatcher::Impl {
     helper.Edit().ModifyFlushedFrontier(
         final_frontier.Clone(), rocksdb::FrontierModificationMode::kForce);
 
-    helper.IterateFiles([&helper, &frontier](int level, rocksdb::FileMetaData fmd) {
+    helper.IterateFiles([&helper, &frontier, &cotable_ids_map](
+        int level, rocksdb::FileMetaData fmd) {
       bool modified = false;
       for (auto* user_frontier : {&fmd.smallest.user_frontier, &fmd.largest.user_frontier}) {
         if (!*user_frontier) {
@@ -903,9 +984,14 @@ class RocksDBPatcher::Impl {
           consensus_frontier.set_op_id(OpId());
           modified = true;
         }
-        if (frontier.history_cutoff()) {
-          consensus_frontier.set_history_cutoff(frontier.history_cutoff());
+        if (frontier.history_cutoff_valid()) {
+          consensus_frontier.set_history_cutoff_information(frontier.history_cutoff());
           modified = true;
+        }
+        for (const auto& [table_id, new_table_id] : cotable_ids_map) {
+          if (consensus_frontier.UpdateCoTableId(table_id, new_table_id)) {
+            modified = true;
+          }
         }
       }
       if (modified) {
@@ -940,6 +1026,22 @@ class RocksDBPatcher::Impl {
     return helper.Apply(options_, imm_cf_options_);
   }
 
+  bool TEST_ContainsHybridTimeFilter() {
+    RocksDBPatcherHelper helper(&version_set_);
+    bool contains_filter = false;
+    helper.IterateFiles([&contains_filter](
+        int level, const rocksdb::FileMetaData& file) {
+      if (!file.largest.user_frontier) {
+        return;
+      }
+      auto& consensus_frontier = down_cast<ConsensusFrontier&>(*file.largest.user_frontier);
+      if (consensus_frontier.HasFilter()) {
+        contains_filter = true;
+      }
+    });
+    return contains_filter;
+  }
+
  private:
   const rocksdb::InternalKeyComparator comparator_{rocksdb::BytewiseComparator()};
   rocksdb::WriteBuffer write_buffer_{1_KB};
@@ -963,21 +1065,25 @@ Status RocksDBPatcher::Load() {
   return impl_->Load();
 }
 
-Status RocksDBPatcher::SetHybridTimeFilter(HybridTime value) {
-  return impl_->SetHybridTimeFilter(value);
+Status RocksDBPatcher::SetHybridTimeFilter(std::optional<uint32_t> db_oid, HybridTime value) {
+  return impl_->SetHybridTimeFilter(db_oid, value);
 }
 
-Status RocksDBPatcher::ModifyFlushedFrontier(const ConsensusFrontier& frontier) {
-  return impl_->ModifyFlushedFrontier(frontier);
+Status RocksDBPatcher::ModifyFlushedFrontier(
+    const ConsensusFrontier& frontier, const CotableIdsMap& cotable_ids_map) {
+  return impl_->ModifyFlushedFrontier(frontier, cotable_ids_map);
 }
 
 Status RocksDBPatcher::UpdateFileSizes() {
   return impl_->UpdateFileSizes();
 }
 
-Status ForceRocksDBCompact(rocksdb::DB* db, SkipFlush skip_flush) {
-  rocksdb::CompactRangeOptions options;
-  options.skip_flush = skip_flush;
+bool RocksDBPatcher::TEST_ContainsHybridTimeFilter() {
+  return impl_->TEST_ContainsHybridTimeFilter();
+}
+
+Status ForceRocksDBCompact(rocksdb::DB* db,
+    const rocksdb::CompactRangeOptions& options) {
   RETURN_NOT_OK_PREPEND(
       db->CompactRange(options, /* begin = */ nullptr, /* end = */ nullptr),
       "Compact range failed");

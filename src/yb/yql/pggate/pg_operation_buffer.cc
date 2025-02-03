@@ -24,13 +24,13 @@
 
 #include "yb/common/constants.h"
 #include "yb/common/pgsql_protocol.pb.h"
-#include "yb/common/ql_expr.h"
+#include "yb/qlexpr/ql_expr.h"
 #include "yb/common/ql_value.h"
 #include "yb/common/schema.h"
 
-#include "yb/docdb/doc_key.h"
-#include "yb/docdb/primitive_value.h"
-#include "yb/docdb/value_type.h"
+#include "yb/dockv/doc_key.h"
+#include "yb/dockv/primitive_value.h"
+#include "yb/dockv/value_type.h"
 
 #include "yb/gutil/casts.h"
 #include "yb/gutil/port.h"
@@ -38,28 +38,28 @@
 #include "yb/util/lw_function.h"
 #include "yb/util/status.h"
 
+#include "yb/yql/pggate/pg_doc_metrics.h"
+#include "yb/yql/pggate/pg_session.h"
 #include "yb/yql/pggate/pg_op.h"
 #include "yb/yql/pggate/pg_tabledesc.h"
 
-namespace yb {
-namespace pggate {
-
+namespace yb::pggate {
 namespace {
 
-docdb::KeyEntryValue NullValue(SortingType sorting) {
+dockv::KeyEntryValue NullValue(SortingType sorting) {
   using SortingType = SortingType;
 
-  return docdb::KeyEntryValue(
+  return dockv::KeyEntryValue(
       sorting == SortingType::kAscendingNullsLast || sorting == SortingType::kDescendingNullsLast
-          ? docdb::KeyEntryType::kNullHigh
-          : docdb::KeyEntryType::kNullLow);
+          ? dockv::KeyEntryType::kNullHigh
+          : dockv::KeyEntryType::kNullLow);
 }
 
-std::vector<docdb::KeyEntryValue> InitKeyColumnPrimitiveValues(
+dockv::KeyEntryValues InitKeyColumnPrimitiveValues(
     const ArenaList<LWPgsqlExpressionPB> &column_values,
     const Schema &schema,
     size_t start_idx) {
-  std::vector<docdb::KeyEntryValue> result;
+  dockv::KeyEntryValues result;
   size_t column_idx = start_idx;
   for (const auto& column_value : column_values) {
     const auto sorting_type = schema.column(column_idx).sorting_type();
@@ -68,18 +68,14 @@ std::vector<docdb::KeyEntryValue> InitKeyColumnPrimitiveValues(
       result.push_back(
           IsNull(value)
           ? NullValue(sorting_type)
-          : docdb::KeyEntryValue::FromQLValuePB(value, sorting_type));
+          : dockv::KeyEntryValue::FromQLValuePB(value, sorting_type));
     } else {
       // TODO(neil) The current setup only works for CQL as it assumes primary key value must not
       // be dependent on any column values. This needs to be fixed as PostgreSQL expression might
       // require a read from a table.
       //
       // Use regular executor for now.
-      QLExprExecutor executor;
-      LWExprResult expr_result(&column_value.arena());
-      auto s = executor.EvalExpr(column_value, nullptr, expr_result.Writer());
-
-      result.push_back(docdb::KeyEntryValue::FromQLValuePB(expr_result.Value(), sorting_type));
+      LOG(FATAL) << "Expression instead of value";
     }
     ++column_idx;
   }
@@ -100,15 +96,19 @@ class RowIdentifier {
       auto range_components = InitKeyColumnPrimitiveValues(
           request.range_column_values(), schema, schema.num_hash_key_columns());
       if (hashed_components.empty()) {
-        ybctid_holder_ = docdb::DocKey(std::move(range_components)).Encode().ToStringBuffer();
+        ybctid_holder_ = dockv::DocKey(std::move(range_components)).Encode().ToStringBuffer();
       } else {
-        ybctid_holder_ = docdb::DocKey(request.hash_code(),
+        ybctid_holder_ = dockv::DocKey(request.hash_code(),
                                        std::move(hashed_components),
                                        std::move(range_components)).Encode().ToStringBuffer();
       }
       ybctid_ = Slice(static_cast<const char*>(nullptr), static_cast<size_t>(0));
     }
   }
+
+  RowIdentifier(const PgObjectId& table_id, Slice ybctid) : table_id_(table_id), ybctid_(ybctid) {
+  }
+
 
   Slice ybctid() const {
     return ybctid_.data() ? ybctid_ : ybctid_holder_;
@@ -145,11 +145,52 @@ inline bool IsTableUsedByRequest(const LWPgsqlReadRequestPB& request, const Slic
 
 using RowKeys = std::unordered_set<RowIdentifier, boost::hash<RowIdentifier>>;
 
+class FlushFuture {
+ public:
+  FlushFuture(PgOperationBuffer::PerformFutureEx&& future, PgDocMetrics* metrics)
+      : future_(std::move(future.first)), session_(future.second), metrics_(metrics) {}
+
+  bool Ready() const {
+    return future_.Ready();
+  }
+
+  Status EnsureCompleted() {
+    uint64_t duration = 0;
+    {
+      auto watcher = session_->StartWaitEvent(ash::WaitStateCode::kStorageFlush);
+      RETURN_NOT_OK(metrics_->CallWithDuration(
+          [this] { return future_.Get(*session_); }, &duration));
+    }
+    metrics_->FlushRequest(duration);
+    return Status::OK();
+  }
+
+ private:
+  PerformFuture future_;
+  PgSession* session_;
+  PgDocMetrics* metrics_;
+};
+
+class Flusher {
+ public:
+  Flusher(
+      PgOperationBuffer::OperationsFlusher&& ops_flusher, PgDocMetrics& metrics)
+      : ops_flusher_(std::move(ops_flusher)), metrics_(metrics) {}
+
+  Result<FlushFuture> Flush(BufferableOperations&& ops, bool transactional) {
+    return FlushFuture{VERIFY_RESULT(ops_flusher_(std::move(ops), transactional)), &metrics_};
+  }
+
+ private:
+  PgOperationBuffer::OperationsFlusher ops_flusher_;
+  PgDocMetrics& metrics_;
+};
+
 struct InFlightOperation {
   RowKeys keys;
-  PerformFuture future;
+  FlushFuture future;
 
-  explicit InFlightOperation(PerformFuture future_)
+  explicit InFlightOperation(FlushFuture&& future_)
       : future(std::move(future_)) {}
 };
 
@@ -171,40 +212,46 @@ void EnsureCapacity(InFlightOps* in_flight_ops, BufferingSettings buffering_sett
 
 } // namespace
 
-void BufferableOperations::Add(PgsqlOpPtr op, const PgObjectId& relation) {
-  operations.push_back(std::move(op));
-  relations.push_back(relation);
+void BufferableOperations::Add(PgsqlOpPtr&& op, const PgTableDesc& table) {
+  operations_.push_back(std::move(op));
+  relations_.push_back(table.pg_table_id());
 }
 
 void BufferableOperations::Swap(BufferableOperations* rhs) {
-  operations.swap(rhs->operations);
-  relations.swap(rhs->relations);
+  operations_.swap(rhs->operations_);
+  relations_.swap(rhs->relations_);
 }
 
 void BufferableOperations::Clear() {
-  operations.clear();
-  relations.clear();
+  operations_.clear();
+  relations_.clear();
 }
 
 void BufferableOperations::Reserve(size_t capacity) {
-  operations.reserve(capacity);
-  relations.reserve(capacity);
+  operations_.reserve(capacity);
+  relations_.reserve(capacity);
 }
 
-bool BufferableOperations::empty() const {
-  return operations.empty();
+bool BufferableOperations::Empty() const {
+  return operations_.empty();
 }
 
-size_t BufferableOperations::size() const {
-  return operations.size();
+size_t BufferableOperations::Size() const {
+  return operations_.size();
+}
+
+void BufferableOperations::MoveTo(PgsqlOps& operations, PgObjectIds& relations) && {
+  operations = std::move(operations_);
+  relations = std::move(relations_);
 }
 
 class PgOperationBuffer::Impl {
  public:
-  Impl(const Flusher& flusher, const BufferingSettings& buffering_settings)
-      : flusher_(flusher),
-        buffering_settings_(buffering_settings) {
-  }
+  Impl(
+      OperationsFlusher&& ops_flusher, PgDocMetrics& metrics,
+      const BufferingSettings& buffering_settings)
+      : flusher_(std::move(ops_flusher), metrics),
+        buffering_settings_(buffering_settings) {}
 
   Status Add(const PgTableDesc& table, PgsqlWriteOpPtr op, bool transactional) {
     return ClearOnError(DoAdd(table, std::move(op), transactional));
@@ -256,27 +303,52 @@ class PgOperationBuffer::Impl {
     // see the results of first operation on DocDB side.
     // Multiple operations on same row must be performed in context of different RPC.
     // Flush is required in this case.
-    RowIdentifier row_id(table.id(), table.schema(), op->write_request());
-    if (PREDICT_FALSE(!keys_.insert(row_id).second)) {
-      RETURN_NOT_OK(Flush());
-      keys_.insert(row_id);
-    } else {
-      // Prevent conflicts on in-flight operations which use current row_id.
-      for (auto i = in_flight_ops_.begin(); i != in_flight_ops_.end(); ++i) {
-        if (i->keys.find(row_id) != i->keys.end()) {
-          RETURN_NOT_OK(EnsureCompleted(i - in_flight_ops_.begin() + 1));
+    auto& target = transactional ? txn_ops_ : ops_;
+    if (target.Empty()) {
+      target.Reserve(buffering_settings_.max_batch_size);
+    }
+
+    const auto& write_request = op->write_request();
+    const auto& packed_rows = write_request.packed_rows();
+    const auto& table_relfilenode_id = table.relfilenode_id();
+    if (!packed_rows.empty()) {
+      // Optimistically assume that we don't have conflicts with existing operations.
+      bool has_conflict = false;
+      for (auto it = packed_rows.begin(); it != packed_rows.end(); it += 2) {
+        if (PREDICT_FALSE(!keys_.insert(RowIdentifier(table_relfilenode_id, *it)).second)) {
+          while (it != packed_rows.begin()) {
+            it -= 2;
+            keys_.erase(RowIdentifier(table_relfilenode_id, *it));
+          }
+          // Have to flush because already have operations for the same key.
+          has_conflict = true;
           break;
         }
       }
+      if (has_conflict) {
+        RETURN_NOT_OK(Flush());
+        for (auto it = packed_rows.begin(); it != packed_rows.end(); it += 2) {
+          SCHECK(keys_.insert(RowIdentifier(table_relfilenode_id, *it)).second, IllegalState,
+                 "Unable to insert key: $0", packed_rows);
+        }
+      }
+    } else {
+      RowIdentifier row_id(table_relfilenode_id, table.schema(), write_request);
+      if (PREDICT_FALSE(!keys_.insert(row_id).second)) {
+        RETURN_NOT_OK(Flush());
+        keys_.insert(row_id);
+      } else {
+        // Prevent conflicts on in-flight operations which use current row_id.
+        for (auto i = in_flight_ops_.begin(); i != in_flight_ops_.end(); ++i) {
+          if (i->keys.find(row_id) != i->keys.end()) {
+            RETURN_NOT_OK(EnsureCompleted(i - in_flight_ops_.begin() + 1));
+            break;
+          }
+        }
+      }
     }
-    auto& target = (transactional ? txn_ops_ : ops_);
-    if (target.empty()) {
-      target.Reserve(buffering_settings_.max_batch_size);
-    }
-    target.Add(std::move(op), table.id());
-    return keys_.size() >= buffering_settings_.max_batch_size
-      ? SendBuffer()
-      : Status::OK();
+    target.Add(std::move(op), table);
+    return keys_.size() >= buffering_settings_.max_batch_size ? SendBuffer() : Status::OK();
   }
 
   Status DoFlush() {
@@ -316,8 +388,8 @@ class PgOperationBuffer::Impl {
   }
 
   Status EnsureCompleted(size_t count) {
-    for(; count && !in_flight_ops_.empty(); --count) {
-      RETURN_NOT_OK(in_flight_ops_.front().future.Get());
+    for (; count && !in_flight_ops_.empty(); --count) {
+      RETURN_NOT_OK(in_flight_ops_.front().future.EnsureCompleted());
       in_flight_ops_.pop_front();
     }
     return Status::OK();
@@ -360,7 +432,7 @@ class PgOperationBuffer::Impl {
                               BufferableOperations ops,
                               bool transactional,
                               size_t ops_count) {
-    if (!ops.empty() && !(interceptor && (*interceptor)(&ops, transactional))) {
+    if (!ops.Empty() && !(interceptor && (*interceptor)(&ops, transactional))) {
       EnsureCapacity(&in_flight_ops_, buffering_settings_);
       // In case max_in_flight_operations < max_batch_size, the number of in-flight operations will
       // be equal to max_batch_size after sending single buffer. So use max of these values for
@@ -375,7 +447,7 @@ class PgOperationBuffer::Impl {
         RETURN_NOT_OK(EnsureCompleted(1));
       }
       in_flight_ops_.push_back(
-        InFlightOperation(VERIFY_RESULT(flusher_(std::move(ops), transactional))));
+        InFlightOperation(VERIFY_RESULT(flusher_.Flush(std::move(ops), transactional))));
       return true;
     }
     return false;
@@ -385,7 +457,7 @@ class PgOperationBuffer::Impl {
     return op.is_read()
         ? IsSameTableUsedByBufferedOperations(down_cast<const PgsqlReadOp&>(op).read_request())
         : keys_.find(RowIdentifier(
-              table.id(), table.schema(),
+              table.relfilenode_id(), table.schema(),
               down_cast<const PgsqlWriteOp&>(op).write_request())) != keys_.end();
   }
 
@@ -398,7 +470,7 @@ class PgOperationBuffer::Impl {
     return false;
   }
 
-  const Flusher flusher_;
+  Flusher flusher_;
   const BufferingSettings& buffering_settings_;
   BufferableOperations ops_;
   BufferableOperations txn_ops_;
@@ -406,10 +478,10 @@ class PgOperationBuffer::Impl {
   InFlightOps in_flight_ops_;
 };
 
-PgOperationBuffer::PgOperationBuffer(const Flusher& flusher,
-                                     const BufferingSettings& buffering_settings)
-    : impl_(new Impl(flusher, buffering_settings)) {
-}
+PgOperationBuffer::PgOperationBuffer(
+    OperationsFlusher&& ops_flusher, PgDocMetrics& metrics,
+    const BufferingSettings& buffering_settings)
+    : impl_(new Impl(std::move(ops_flusher), metrics, buffering_settings)) {}
 
 PgOperationBuffer::~PgOperationBuffer() = default;
 
@@ -434,5 +506,4 @@ void PgOperationBuffer::Clear() {
     impl_->Clear();
 }
 
-} // namespace pggate
-} // namespace yb
+} // namespace yb::pggate

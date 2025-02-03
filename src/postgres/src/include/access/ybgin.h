@@ -22,8 +22,7 @@
  *--------------------------------------------------------------------------
  */
 
-#ifndef YBGIN_H
-#define YBGIN_H
+#pragma once
 
 #include "access/amapi.h"
 #include "nodes/execnodes.h"
@@ -49,6 +48,10 @@ extern void ybgincostestimate(struct PlannerInfo *root,
 							  double *indexPages);
 extern bytea *ybginoptions(Datum reloptions, bool validate);
 extern bool ybginvalidate(Oid opclassoid);
+extern void ybginbindschema(YbcPgStatement handle,
+							struct IndexInfo *indexInfo,
+							TupleDesc indexTupleDesc,
+							int16 *coloptions);
 extern IndexScanDesc ybginbeginscan(Relation rel, int nkeys, int norderbys);
 extern void ybginrescan(IndexScanDesc scan, ScanKey scankey, int nscankeys,
 						ScanKey orderbys, int norderbys);
@@ -65,5 +68,5 @@ extern IndexBuildResult *ybginbackfill(Relation heap, Relation index,
 									   struct IndexInfo *indexInfo,
 									   struct YbBackfillInfo *bfinfo,
 									   struct YbPgExecOutParam *bfresult);
-
-#endif							/* YBGIN_H */
+extern bool ybginmightrecheck(Relation heapRelation, Relation indexRelation,
+							  bool xs_want_itup, ScanKey keys, int nkeys);

@@ -21,8 +21,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
-#ifndef YB_ROCKSDB_TABLE_TABLE_READER_H
-#define YB_ROCKSDB_TABLE_TABLE_READER_H
+#pragma once
 
 #include <memory>
 
@@ -32,13 +31,15 @@
 
 namespace rocksdb {
 
-class Iterator;
 struct ParsedInternalKey;
-class Arena;
 struct ReadOptions;
 struct TableProperties;
+
+class Arena;
+class DataBlockAwareIndexInternalIterator;
 class GetContext;
 class InternalIterator;
+class Iterator;
 class RandomAccessFileReader;
 class WritableFile;
 
@@ -67,6 +68,12 @@ class TableReader {
   virtual InternalIterator* NewIterator(const ReadOptions&,
                                         Arena* arena = nullptr,
                                         bool skip_filters = false) = 0;
+
+  // TODO(index_iter): consider allocating index iterator on arena, try and measure potential
+  // performance improvements.
+  virtual InternalIterator* NewIndexIterator(const ReadOptions& read_options) = 0;
+  virtual DataBlockAwareIndexInternalIterator* NewDataBlockAwareIndexIterator(
+      const ReadOptions& read_options) = 0;
 
   // Given a key, return an approximate byte offset in the file where
   // the data for that key begins (or would begin if the key were
@@ -99,7 +106,7 @@ class TableReader {
   // internal_key is the internal key (encoded representation of InternalKey) to search for
   // skip_filters: disables checking the bloom filters even if they exist. This
   //               option is effective only for block-based table format.
-  virtual Status Get(const ReadOptions& readOptions, const Slice& internal_key,
+  virtual Status Get(const ReadOptions& read_options, const Slice& internal_key,
                      GetContext* get_context, bool skip_filters = false) = 0;
 
   // Prefetch data corresponding to a give range of keys
@@ -127,5 +134,3 @@ class TableReader {
 };
 
 }  // namespace rocksdb
-
-#endif  // YB_ROCKSDB_TABLE_TABLE_READER_H

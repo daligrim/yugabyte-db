@@ -20,28 +20,46 @@
 
 #include "yb/consensus/metadata.pb.h"
 
-#include "yb/master/master_client.pb.h"
 #include "yb/master/master_cluster.proxy.h"
+#include "yb/master/master_client.pb.h"
 #include "yb/master/master_defaults.h"
 #include "yb/master/master_error.h"
 
 #include "yb/rpc/rpc_controller.h"
 
 #include "yb/util/countdown_latch.h"
+#include "yb/util/format.h"
 #include "yb/util/net/net_util.h"
 #include "yb/util/result.h"
 #include "yb/util/status_format.h"
 #include "yb/util/string_util.h"
 
 namespace yb {
+
+const char* DatabasePrefix(YQLDatabase db) {
+  switch(db) {
+    case YQL_DATABASE_UNKNOWN: break;
+    case YQL_DATABASE_CQL: return kDBTypePrefixCql;
+    case YQL_DATABASE_PGSQL: return kDBTypePrefixYsql;
+    case YQL_DATABASE_REDIS: return kDBTypePrefixRedis;
+  }
+  CHECK(false) << "Unexpected db type " << db;
+  return kDBTypePrefixUnknown;
+}
+
+std::string ShortDatabaseType(YQLDatabase db_type) {
+  switch(db_type) {
+    case YQL_DATABASE_UNKNOWN: return "UNKNOWN";
+    case YQL_DATABASE_CQL: return "YCQL";
+    case YQL_DATABASE_PGSQL: return "YSQL";
+    case YQL_DATABASE_REDIS: return "YEDIS";
+  }
+  return Format("<invalid database type $0>", to_underlying(db_type));
+}
+
 namespace master {
 
 namespace {
-
-static constexpr const char* kColocatedDbParentTableIdSuffix = ".colocated.parent.uuid";
-static constexpr const char* kColocatedDbParentTableNameSuffix = ".colocated.parent.tablename";
-static constexpr const char* kTablegroupParentTableIdSuffix = ".tablegroup.parent.uuid";
-static constexpr const char* kTablegroupParentTableNameSuffix = ".tablegroup.parent.tablename";
 
 struct GetMasterRegistrationData {
   GetMasterRegistrationRequestPB req;
@@ -217,49 +235,14 @@ Result<bool> TableMatchesIdentifier(
     InvalidArgument, "Wrong table identifier format: $0", table_identifier);
 }
 
-Status SetupError(MasterErrorPB* error, const Status& s) {
+Status SetupError(MasterErrorPB* error, MasterErrorPB::Code code, const Status& s) {
   StatusToPB(s, error->mutable_status());
-  error->set_code(MasterError::ValueFromStatus(s).get_value_or(MasterErrorPB::UNKNOWN_ERROR));
+  error->set_code(MasterError::ValueFromStatus(s).get_value_or(code));
   return s;
 }
 
-bool IsColocationParentTableId(const TableId& table_id) {
-  return IsColocatedDbParentTableId(table_id) || IsTablegroupParentTableId(table_id);
-}
-
-bool IsColocatedDbParentTableId(const TableId& table_id) {
-  return table_id.find(kColocatedDbParentTableIdSuffix) == 32 &&
-      boost::algorithm::ends_with(table_id, kColocatedDbParentTableIdSuffix);
-}
-
-TableId GetColocatedDbParentTableId(const NamespaceId& database_id) {
-  DCHECK(IsIdLikeUuid(database_id)) << database_id;
-  return database_id + kColocatedDbParentTableIdSuffix;
-}
-
-TableName GetColocatedDbParentTableName(const NamespaceId& database_id) {
-  DCHECK(IsIdLikeUuid(database_id)) << database_id;
-  return database_id + kColocatedDbParentTableNameSuffix;
-}
-
-bool IsTablegroupParentTableId(const TableId& table_id) {
-  return table_id.find(kTablegroupParentTableIdSuffix) == 32 &&
-      boost::algorithm::ends_with(table_id, kTablegroupParentTableIdSuffix);
-}
-
-TableId GetTablegroupParentTableId(const TablegroupId& tablegroup_id) {
-  DCHECK(IsIdLikeUuid(tablegroup_id)) << tablegroup_id;
-  return tablegroup_id + kTablegroupParentTableIdSuffix;
-}
-
-TableName GetTablegroupParentTableName(const TablegroupId& tablegroup_id) {
-  DCHECK(IsIdLikeUuid(tablegroup_id)) << tablegroup_id;
-  return tablegroup_id + kTablegroupParentTableNameSuffix;
-}
-
-TablegroupId GetTablegroupIdFromParentTableId(const TableId& table_id) {
-  DCHECK(IsTablegroupParentTableId(table_id)) << table_id;
-  return table_id.substr(0, 32);
+Status SetupError(MasterErrorPB* error, const Status& s) {
+  return SetupError(error, MasterErrorPB::UNKNOWN_ERROR, s);
 }
 
 bool IsBlacklisted(const ServerRegistrationPB& registration, const BlacklistSet& blacklist) {

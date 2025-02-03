@@ -29,30 +29,40 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_TSERVER_TABLET_SERVER_H_
-#define YB_TSERVER_TABLET_SERVER_H_
+#pragma once
 
+#include <atomic>
 #include <future>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
+#include <utility>
 #include <vector>
 
+#include "yb/common/common_util.h"
+#include "yb/common/pg_catversions.h"
 #include "yb/consensus/metadata.pb.h"
+#include "yb/cdc/xrepl_types.h"
 #include "yb/cdc/cdc_consumer.fwd.h"
 #include "yb/client/client_fwd.h"
+#include "yb/rpc/rpc_fwd.h"
 
 #include "yb/encryption/encryption_fwd.h"
 
 #include "yb/gutil/atomicops.h"
 #include "yb/gutil/macros.h"
 #include "yb/master/master_fwd.h"
+#include "yb/master/master_heartbeat.pb.h"
 #include "yb/server/webserver_options.h"
 #include "yb/tserver/db_server_base.h"
+#include "yb/tserver/pg_mutation_counter.h"
+#include "yb/tserver/remote_bootstrap_service.h"
 #include "yb/tserver/tserver_shared_mem.h"
 #include "yb/tserver/tablet_server_interface.h"
 #include "yb/tserver/tablet_server_options.h"
-#include "yb/tserver/xcluster_safe_time_map.h"
 
 #include "yb/util/locks.h"
 #include "yb/util/net/net_util.h"
@@ -67,9 +77,30 @@ namespace yb {
 
 class Env;
 class MaintenanceManager;
-class AutoFlagsManager;
+
+namespace cdc {
+
+class CDCServiceImpl;
+
+}
+
+namespace cdc {
+
+class CDCServiceImpl;
+
+}
+
+namespace stateful_service {
+class PgCronLeaderService;
+}  // namespace stateful_service
 
 namespace tserver {
+
+class TserverAutoFlagsManager;
+class TserverXClusterContext;
+class TserverXClusterContextIf;
+class PgClientServiceImpl;
+class XClusterConsumerIf;
 
 class TabletServer : public DbServerBase, public TabletServerIf {
  public:
@@ -91,7 +122,11 @@ class TabletServer : public DbServerBase, public TabletServerIf {
   // complete by calling WaitInited().
   Status Init() override;
 
-  virtual Status InitAutoFlags() override;
+  virtual Status InitFlags(rpc::Messenger* messenger) override;
+
+  virtual bool ShouldExportLocalCalls() override {
+    return true;
+  }
 
   Status GetRegistration(ServerRegistrationPB* reg,
     server::RpcOnly rpc_only = server::RpcOnly::kFalse) const override;
@@ -105,10 +140,18 @@ class TabletServer : public DbServerBase, public TabletServerIf {
   std::string ToString() const override;
 
   uint32_t GetAutoFlagConfigVersion() const override;
+  void HandleMasterHeartbeatResponse(
+      HybridTime heartbeat_sent_time, std::optional<AutoFlagsConfigPB> new_config);
+
+  Result<uint32> ValidateAndGetAutoFlagsConfigVersion() const;
+
   AutoFlagsConfigPB TEST_GetAutoFlagConfig() const;
 
   TSTabletManager* tablet_manager() override { return tablet_manager_.get(); }
   TabletPeerLookupIf* tablet_peer_lookup() override;
+  tablet::TSLocalLockManager* ts_local_lock_manager() const override {
+    return ts_local_lock_manager_.get();
+  }
 
   Heartbeater* heartbeater() { return heartbeater_.get(); }
 
@@ -134,7 +177,7 @@ class TabletServer : public DbServerBase, public TabletServerIf {
   // If the update is from master leader, we use that list directly. If not, we
   // merge the existing in-memory master list with the provided config list.
   Status UpdateMasterAddresses(const consensus::RaftConfigPB& new_config,
-                                       bool is_master_leader);
+                               bool is_master_leader);
 
   server::Clock* Clock() override { return clock(); }
 
@@ -146,13 +189,24 @@ class TabletServer : public DbServerBase, public TabletServerIf {
     return shared_object();
   }
 
-  Status PopulateLiveTServers(const master::TSHeartbeatResponsePB& heartbeat_resp);
+  Status PopulateLiveTServers(const master::TSHeartbeatResponsePB& heartbeat_resp) EXCLUDES(lock_);
+  Status BootstrapDdlObjectLocks(const master::ClientOperationLeaseUpdatePB& lease_update);
 
   Status GetLiveTServers(
-      std::vector<master::TSInformationPB> *live_tservers) const override;
+      std::vector<master::TSInformationPB> *live_tservers) const EXCLUDES(lock_) override;
+
+  // Returns connection info of all live tservers available at this tserver. The information about
+  // live tservers is refreshed by the master heartbeat.
+  virtual Result<std::vector<client::internal::RemoteTabletServerPtr>>
+      GetRemoteTabletServers() const EXCLUDES(lock_) override;
+
+  // Returns connection info for the passed in 'ts_uuids', if available. If unavailable,
+  // returns a bad status. The information about live tservers is refreshed by the master heartbeat.
+  virtual Result<std::vector<client::internal::RemoteTabletServerPtr>> GetRemoteTabletServers(
+      const std::unordered_set<std::string>& ts_uuids) const EXCLUDES(lock_) override;
 
   Status GetTabletStatus(const GetTabletStatusRequestPB* req,
-                                 GetTabletStatusResponsePB* resp) const override;
+                         GetTabletStatusResponsePB* resp) const override;
 
   bool LeaderAndReady(const TabletId& tablet_id, bool allow_stale = false) const override;
 
@@ -169,8 +223,6 @@ class TabletServer : public DbServerBase, public TabletServerIf {
 
   std::string cluster_uuid() const;
 
-  TabletServiceImpl* tablet_server_service();
-
   scoped_refptr<Histogram> GetMetricsHistogram(TabletServerServiceRpcMethodIndexes metric);
 
   const std::shared_ptr<MemTracker>& mem_tracker() const override;
@@ -181,12 +233,13 @@ class TabletServer : public DbServerBase, public TabletServerIf {
     return publish_service_ptr_.get();
   }
 
-  void SetYsqlCatalogVersion(uint64_t new_version, uint64_t new_breaking_version);
-  void SetYsqlDBCatalogVersions(const master::DBCatalogVersionDataPB& db_catalog_version_data);
+  void SetYsqlCatalogVersion(uint64_t new_version, uint64_t new_breaking_version) EXCLUDES(lock_);
+  void SetYsqlDBCatalogVersions(const master::DBCatalogVersionDataPB& db_catalog_version_data)
+      EXCLUDES(lock_);
 
   void get_ysql_catalog_version(uint64_t* current_version,
-                                uint64_t* last_breaking_version) const override {
-    std::lock_guard<simple_spinlock> l(lock_);
+                                uint64_t* last_breaking_version) const EXCLUDES(lock_) override {
+    std::lock_guard l(lock_);
     if (current_version) {
       *current_version = ysql_catalog_version_;
     }
@@ -195,28 +248,62 @@ class TabletServer : public DbServerBase, public TabletServerIf {
     }
   }
 
+  void get_ysql_db_catalog_version(
+      uint32_t db_oid,
+      uint64_t* current_version,
+      uint64_t* last_breaking_version) const EXCLUDES(lock_) override {
+    std::lock_guard l(lock_);
+    auto it = ysql_db_catalog_version_map_.find(db_oid);
+    bool not_found = it == ysql_db_catalog_version_map_.end();
+    // If db_oid represents a newly created database, it may not yet exist in
+    // ysql_db_catalog_version_map_ because the latter is updated via tserver to master
+    // heartbeat response which has a delay. Return 0 as if it were a stale version.
+    // Note that even if db_oid is found in ysql_db_catalog_version_map_ the catalog version
+    // can also be stale due to the heartbeat delay.
+    if (current_version) {
+      *current_version = not_found ? 0UL : it->second.current_version;
+    }
+    if (last_breaking_version) {
+      *last_breaking_version = not_found ? 0UL : it->second.last_breaking_version;
+    }
+  }
+
+  std::optional<bool> catalog_version_table_in_perdb_mode() const EXCLUDES(lock_) {
+    std::lock_guard l(lock_);
+    return catalog_version_table_in_perdb_mode_;
+  }
+
   Status get_ysql_db_oid_to_cat_version_info_map(
-      tserver::GetTserverCatalogVersionInfoResponsePB* resp) const override;
+      const tserver::GetTserverCatalogVersionInfoRequestPB& req,
+      tserver::GetTserverCatalogVersionInfoResponsePB* resp) const EXCLUDES(lock_) override;
 
   void UpdateTransactionTablesVersion(uint64_t new_version);
+
+  rpc::Messenger* GetMessenger(ash::Component component) const override;
+
+  void SetCQLServer(yb::server::RpcAndWebServerBase* server,
+      server::YCQLStatementStatsProvider* stmt_provider) override;
 
   virtual Env* GetEnv();
 
   virtual rocksdb::Env* GetRocksDBEnv();
 
-  void SetUniverseKeys(const encryption::UniverseKeysPB& universe_keys);
-
   virtual Status SetUniverseKeyRegistry(
       const encryption::UniverseKeyRegistryPB& universe_key_registry);
 
-  void GetUniverseKeyRegistrySync();
-
   uint64_t GetSharedMemoryPostgresAuthKey();
 
+  SchemaVersion GetMinXClusterSchemaVersion(const TableId& table_id,
+      const ColocationId& colocation_id) const;
+
   // Currently only used by cdc.
-  virtual int32_t cluster_config_version() const {
-    return std::numeric_limits<int32_t>::max();
-  }
+  virtual int32_t cluster_config_version() const;
+
+  Result<uint32_t> XClusterConfigVersion() const;
+
+  Status SetPausedXClusterProducerStreams(
+      const ::google::protobuf::Map<::std::string, bool>& paused_producer_stream_ids,
+      uint32_t xcluster_config_version);
 
   client::TransactionPool& TransactionPool() override;
 
@@ -230,14 +317,68 @@ class TabletServer : public DbServerBase, public TabletServerIf {
 
   client::LocalTabletFilter CreateLocalTabletFilter() override;
 
-  void RegisterCertificateReloader(CertificateReloader reloader) override {}
+  void RegisterCertificateReloader(CertificateReloader reloader) override;
 
-  std::shared_ptr<XClusterSafeTimeMap> GetXClusterSafeTimeMap() const;
+  TserverXClusterContextIf& GetXClusterContext() const;
 
-  void UpdateXClusterSafeTime(const XClusterNamespaceToSafeTimePBMap& safe_time_map);
+  PgMutationCounter& GetPgNodeLevelMutationCounter();
 
-  Result<bool> XClusterSafeTimeCaughtUpToCommitHt(
-      const NamespaceId& namespace_id, HybridTime commit_ht);
+  Status ListMasterServers(const ListMasterServersRequestPB* req,
+                           ListMasterServersResponsePB* resp) const;
+
+  encryption::UniverseKeyManager* GetUniverseKeyManager();
+
+  Status XClusterPopulateMasterHeartbeatRequest(
+      master::TSHeartbeatRequestPB& req, bool needs_full_tablet_report);
+  Status XClusterHandleMasterHeartbeatResponse(const master::TSHeartbeatResponsePB& resp);
+
+  Status ValidateAndMaybeSetUniverseUuid(const UniverseUuid& universe_uuid);
+
+  Status ClearUniverseUuid();
+
+  XClusterConsumerIf* GetXClusterConsumer() const;
+
+  // Mark the CDC service as enabled via heartbeat.
+  Status SetCDCServiceEnabled();
+
+  Status ReloadKeysAndCertificates() override;
+  std::string GetCertificateDetails() override;
+
+  PgClientServiceImpl* TEST_GetPgClientService();
+
+  PgClientServiceMockImpl* TEST_GetPgClientServiceMock();
+
+  RemoteBootstrapServiceImpl* GetRemoteBootstrapService() {
+    if (auto service_ptr = remote_bootstrap_service_.lock()) {
+      return service_ptr.get();
+    }
+    return nullptr;
+  }
+
+  std::optional<uint64_t> GetCatalogVersionsFingerprint() const {
+    return catalog_versions_fingerprint_.load(std::memory_order_acquire);
+  }
+
+  std::shared_ptr<cdc::CDCServiceImpl> GetCDCService() const override { return cdc_service_; }
+
+  key_t GetYsqlConnMgrStatsShmemKey() { return ysql_conn_mgr_stats_shmem_key_; }
+  void SetYsqlConnMgrStatsShmemKey(key_t shmem_key) { ysql_conn_mgr_stats_shmem_key_ = shmem_key; }
+  Status YCQLStatementStats(const tserver::PgYCQLStatementStatsRequestPB& req,
+      tserver::PgYCQLStatementStatsResponsePB* resp) const override;
+
+  void WriteServerMetaCacheAsJson(JsonWriter* writer) override;
+
+  void ClearAllMetaCachesOnServer() override;
+
+  Status ClearMetacache(const std::string& namespace_id) override;
+
+  Result<std::vector<tablet::TabletStatusPB>> GetLocalTabletsMetadata() const override;
+
+  Result<std::vector<TserverMetricsInfoPB>> GetMetrics() const override;
+
+  Result<PgTxnSnapshot> GetLocalPgTxnSnapshot(const PgTxnSnapshotLocalId& snapshot_id) override;
+
+  void TEST_SetIsCronLeader(bool is_cron_leader);
 
  protected:
   virtual Status RegisterServices();
@@ -249,7 +390,18 @@ class TabletServer : public DbServerBase, public TabletServerIf {
   Status ValidateMasterAddressResolution() const;
 
   MonoDelta default_client_timeout() override;
-  void SetupAsyncClientInit(client::AsyncClientInitialiser* async_client_init) override;
+  void SetupAsyncClientInit(client::AsyncClientInitializer* async_client_init) override;
+
+  Status SetupMessengerBuilder(rpc::MessengerBuilder* builder) override;
+
+  Result<std::unordered_set<std::string>> GetAvailableAutoFlagsForServer() const override;
+
+  Result<std::unordered_set<std::string>> GetFlagsForServer() const override;
+
+  void SetCronLeaderLease(MonoTime cron_leader_lease_end);
+
+  Result<pgwrapper::PGConn> CreateInternalPGConn(
+      const std::string& database_name, const std::optional<CoarseTimePoint>& deadline) override;
 
   std::atomic<bool> initted_{false};
 
@@ -259,15 +411,13 @@ class TabletServer : public DbServerBase, public TabletServerIf {
   // The options passed at construction time, and will be updated if master config changes.
   TabletServerOptions opts_;
 
-  std::unique_ptr<AutoFlagsManager> auto_flags_manager_;
+  std::unique_ptr<TserverAutoFlagsManager> auto_flags_manager_;
 
   // Manager for tablets which are available on this server.
   std::unique_ptr<TSTabletManager> tablet_manager_;
 
   // Used to forward redis pub/sub messages to the redis pub/sub handler
   yb::AtomicUniquePtr<rpc::Publisher> publish_service_ptr_;
-
-  std::thread fetch_universe_key_thread_;
 
   // Thread responsible for heartbeating to the master.
   std::unique_ptr<Heartbeater> heartbeater_;
@@ -276,6 +426,9 @@ class TabletServer : public DbServerBase, public TabletServerIf {
 
   // Thread responsible for collecting metrics snapshots for native storage.
   std::unique_ptr<MetricsSnapshotter> metrics_snapshotter_;
+
+  // Thread responsible for sending aggregated table mutations to the auto analyzer service
+  std::unique_ptr<TableMutationCountSender> pg_table_mutation_count_sender_;
 
   // Webserver path handlers
   std::unique_ptr<TabletServerPathHandlers> path_handlers_;
@@ -286,11 +439,19 @@ class TabletServer : public DbServerBase, public TabletServerIf {
   // Index at which master sent us the last config
   int64_t master_config_index_;
 
-  // List of tservers that are alive from the master's perspective.
-  std::vector<master::TSInformationPB> live_tservers_;
+  // Map of tserver connection info, keyed by the tserver uuid, that are alive from the master's
+  // perspective. It is refreshed on every successfull heartbeat exchange between the current
+  // tserver and the master leader.
+  std::unordered_map<std::string, master::TSInformationPB> live_tservers_ GUARDED_BY(lock_);
+
+  // Map of 'RemoteTablerServer' shared ptrs keyed by the corresponding tsever uuid. This is used
+  // to obtain a proxy handle to the local/remote tserver. It is updated synchronously with
+  // 'live_tservers_'.
+  std::unordered_map<std::string, client::internal::RemoteTabletServerPtr>
+      remote_tservers_ GUARDED_BY(lock_);
 
   // Lock to protect live_tservers_, cluster_uuid_.
-  mutable simple_spinlock lock_;
+  mutable rw_spinlock lock_;
 
   // Proxy to call this tablet server locally.
   std::shared_ptr<TabletServerServiceProxy> proxy_;
@@ -301,7 +462,12 @@ class TabletServer : public DbServerBase, public TabletServerIf {
   // Latest known version from the YSQL catalog (as reported by last heartbeat response).
   uint64_t ysql_catalog_version_ = 0;
   uint64_t ysql_last_breaking_catalog_version_ = 0;
-  tserver::DbOidToCatalogVersionInfoMap ysql_db_catalog_version_map_;
+  tserver::DbOidToCatalogVersionInfoMap ysql_db_catalog_version_map_ GUARDED_BY(lock_);
+  // See same variable comments in CatalogManager.
+  std::optional<bool> catalog_version_table_in_perdb_mode_{std::nullopt};
+
+  // Fingerprint of the catalog versions map.
+  std::atomic<std::optional<uint64_t>> catalog_versions_fingerprint_;
 
   // If shared memory array db_catalog_versions_ slot is used by a database OID, the
   // corresponding slot in this boolean array is set to true.
@@ -314,24 +480,63 @@ class TabletServer : public DbServerBase, public TabletServerIf {
 
   // An instance to tablet server service. This pointer is no longer valid after RpcAndWebServerBase
   // is shut down.
-  TabletServiceImpl* tablet_server_service_;
+  std::weak_ptr<TabletServiceImpl> tablet_server_service_;
+
+  // An instance to remote bootstrap service. This pointer is no longer valid after
+  // RpcAndWebServerBase is shut down.
+  std::weak_ptr<RemoteBootstrapServiceImpl> remote_bootstrap_service_;
+
+  struct PgClientServiceHolder;
+
+  // An instance to pg client service. This pointer is no longer valid after RpcAndWebServerBase
+  // is shut down.
+  std::weak_ptr<PgClientServiceHolder> pg_client_service_;
+
+  // Key to shared memory for ysql connection manager stats
+  key_t ysql_conn_mgr_stats_shmem_key_ = 0;
 
  private:
   // Auto initialize some of the service flags that are defaulted to -1.
   void AutoInitServiceFlags();
+
+  void InvalidatePgTableCache();
+  void InvalidatePgTableCache(const std::unordered_set<uint32_t>& db_oids_updated,
+                              const std::unordered_set<uint32_t>& db_oids_deleted);
 
   std::string log_prefix_;
 
   // Bind address of postgres proxy under this tserver.
   HostPort pgsql_proxy_bind_address_;
 
-  std::shared_ptr<XClusterSafeTimeMap> xcluster_safe_time_map_;
+  std::unique_ptr<TserverXClusterContext> xcluster_context_;
+
+  PgMutationCounter pg_node_level_mutation_counter_;
 
   PgConfigReloader pg_config_reloader_;
+
+  Status CreateXClusterConsumer() EXCLUDES(xcluster_consumer_mutex_);
+
+  std::unique_ptr<rpc::SecureContext> secure_context_;
+  std::vector<CertificateReloader> certificate_reloaders_;
+
+  // xCluster consumer.
+  mutable std::mutex xcluster_consumer_mutex_;
+  std::unique_ptr<XClusterConsumerIf> xcluster_consumer_ GUARDED_BY(xcluster_consumer_mutex_);
+
+  // CDC service.
+  std::shared_ptr<cdc::CDCServiceImpl> cdc_service_;
+
+  std::unique_ptr<rocksdb::Env> rocksdb_env_;
+  std::unique_ptr<encryption::UniverseKeyManager> universe_key_manager_;
+
+  std::atomic<yb::server::RpcAndWebServerBase*> cql_server_{nullptr};
+  std::atomic<yb::server::YCQLStatementStatsProvider*> cql_stmt_provider_{nullptr};
+
+  // Lock Manager to maintain table/object locking activity in memory.
+  std::unique_ptr<tablet::TSLocalLockManager> ts_local_lock_manager_;
 
   DISALLOW_COPY_AND_ASSIGN(TabletServer);
 };
 
 } // namespace tserver
 } // namespace yb
-#endif // YB_TSERVER_TABLET_SERVER_H_

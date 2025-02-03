@@ -20,14 +20,7 @@
 
 using namespace yb::size_literals;
 
-// Maximum size of RPC should be larger than size of consensus batch
-// At each layer, we embed the "message" from the previous layer.
-// In order to send three strings of 64, the request from cql/redis will be larger
-// than that because we will have overheads from that layer.
-// Hence, we have a limit of 254MB at the consensus layer.
-// The rpc layer adds its own headers, so we limit the rpc message size to 255MB.
-DEFINE_uint64(rpc_max_message_size, 255_MB,
-              "The maximum size of a message of any RPC that the server will accept.");
+DECLARE_uint32(protobuf_message_total_bytes_limit);
 
 using google::protobuf::internal::WireFormatLite;
 using google::protobuf::io::CodedOutputStream;
@@ -78,6 +71,13 @@ std::string LightweightMessage::SerializeAsString() const {
   result.resize(size);
   SerializeToArray(pointer_cast<uint8_t*>(const_cast<char*>(result.data())));
   return result;
+}
+
+void LightweightMessage::AppendToString(std::string* out) const {
+  auto size = SerializedSize();
+  auto old_size = out->size();
+  out->resize(old_size + size);
+  SerializeToArray(pointer_cast<uint8_t*>(out->data()) + old_size);
 }
 
 std::string LightweightMessage::ShortDebugString() const {
@@ -369,12 +369,11 @@ Status ParseFailed(const char* field_name) {
 }
 
 void SetupLimit(google::protobuf::io::CodedInputStream* in) {
-  in->SetTotalBytesLimit(narrow_cast<int>(FLAGS_rpc_max_message_size),
-                         narrow_cast<int>(FLAGS_rpc_max_message_size * 3 / 4));
+  in->SetTotalBytesLimit(FLAGS_protobuf_message_total_bytes_limit, 0 /* unused */);
 }
 
-Arena& empty_arena() {
-  static Arena arena(static_cast<size_t>(0), 0);
+ThreadSafeArena& empty_arena() {
+  static ThreadSafeArena arena(static_cast<size_t>(0), 0);
   return arena;
 }
 

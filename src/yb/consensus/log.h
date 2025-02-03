@@ -30,8 +30,7 @@
 // under the License.
 //
 
-#ifndef YB_CONSENSUS_LOG_H_
-#define YB_CONSENSUS_LOG_H_
+#pragma once
 
 #include <pthread.h>
 #include <sys/types.h>
@@ -45,9 +44,12 @@
 #include <vector>
 
 #include <boost/atomic.hpp>
-#include <glog/logging.h>
+
+#include "yb/ash/wait_state_fwd.h"
 
 #include "yb/common/common_fwd.h"
+#include "yb/common/hybrid_time.h"
+#include "yb/common/opid.h"
 
 #include "yb/consensus/consensus_fwd.h"
 #include "yb/consensus/log_util.h"
@@ -60,9 +62,9 @@
 
 #include "yb/util/status_fwd.h"
 #include "yb/util/locks.h"
+#include "yb/util/logging.h"
 #include "yb/util/monotime.h"
 #include "yb/util/mutex.h"
-#include "yb/util/opid.h"
 #include "yb/util/promise.h"
 #include "yb/util/shared_lock.h"
 #include "yb/util/status_callback.h"
@@ -109,6 +111,10 @@ YB_DEFINE_ENUM(
     (kOpIdAfterSegment)
 );
 
+YB_STRONGLY_TYPED_BOOL(SkipWalWrite);
+
+using NewSegmentAllocationCallback = std::function<Status(void)>;
+
 // Log interface, inspired by Raft's (logcabin) Log. Provides durability to YugaByte as a normal
 // Write Ahead Log and also plays the role of persistent storage for the consensus state machine.
 //
@@ -137,52 +143,43 @@ class Log : public RefCountedThreadSafe<Log> {
 
   // Opens or continues a log and sets 'log' to the newly built Log.
   // After a successful Open() the Log is ready to receive entries, if create_new_segment is true.
-  static Status Open(const LogOptions &options,
-                             const std::string& tablet_id,
-                             const std::string& wal_dir,
-                             const std::string& peer_uuid,
-                             const Schema& schema,
-                             uint32_t schema_version,
-                             const scoped_refptr<MetricEntity>& table_metric_entity,
-                             const scoped_refptr<MetricEntity>& tablet_metric_entity,
-                             ThreadPool *append_thread_pool,
-                             ThreadPool* allocation_thread_pool,
-                             ThreadPool* background_sync_threadpool,
-                             int64_t cdc_min_replicated_index,
-                             scoped_refptr<Log> *log,
-                             CreateNewSegment create_new_segment = CreateNewSegment::kTrue);
+  static Status Open(
+      const LogOptions& options,
+      const std::string& tablet_id,
+      const std::string& wal_dir,
+      const std::string& peer_uuid,
+      const Schema& schema,
+      uint32_t schema_version,
+      const scoped_refptr<MetricEntity>& table_metric_entity,
+      const scoped_refptr<MetricEntity>& tablet_metric_entity,
+      ThreadPool* append_thread_pool,
+      ThreadPool* allocation_thread_pool,
+      ThreadPool* background_sync_threadpool,
+      scoped_refptr<Log>* log,
+      const PreLogRolloverCallback& pre_log_rollover_callback = {},
+      NewSegmentAllocationCallback callback = {},
+      CreateNewSegment create_new_segment = CreateNewSegment::kTrue,
+      MinStartHTRunningTxnsCallback min_start_ht_running_txns_callback = {});
 
   ~Log();
 
-  // Reserves a spot in the log's queue for 'entry_batch'.
-  //
-  // 'reserved_entry' is initialized by this method and any resources associated with it will be
-  // released in AsyncAppend().  In order to ensure correct ordering of operations across multiple
-  // threads, calls to this method must be externally synchronized.
-  //
-  // WARNING: the caller _must_ call AsyncAppend() or else the log will "stall" and will never be
-  // able to make forward progress.
-  void Reserve(LogEntryTypePB type, LogEntryBatchPB* entry_batch, LogEntryBatch** reserved_entry);
-
-  // Asynchronously appends 'entry' to the log. Once the append completes and is synced, 'callback'
-  // will be invoked.
-  Status AsyncAppend(LogEntryBatch* entry,
-                             const StatusCallback& callback);
-
-  Status TEST_AsyncAppendWithReplicates(
-      LogEntryBatch* entry, const ReplicateMsgs& replicates, const StatusCallback& callback);
+  Status TEST_ReserveAndAppend(
+      std::shared_ptr<LWLogEntryBatchPB> batch, const ReplicateMsgs& replicates,
+      const StatusCallback& callback);
 
   // Synchronously append a new entry to the log.  Log does not take ownership of the passed
   // 'entry'. If skip_wal_write is true, only update consensus metadata and LogIndex, skip write
   // to wal.
   // TODO get rid of this method, transition to the asynchronous API.
-  Status Append(LogEntryPB* entry, LogEntryMetadata entry_metadata, bool skip_wal_write = false);
+  Status Append(
+      const std::shared_ptr<LWLogEntryPB>& entry, LogEntryMetadata entry_metadata,
+      SkipWalWrite skip_wal_write = SkipWalWrite::kFalse);
 
   // Append the given set of replicate messages, asynchronously.  This requires that the replicates
   // have already been assigned OpIds.
   Status AsyncAppendReplicates(const ReplicateMsgs& replicates, const OpId& committed_op_id,
-                                       RestartSafeCoarseTimePoint batch_mono_time,
-                                       const StatusCallback& callback);
+                               RestartSafeCoarseTimePoint batch_mono_time,
+                               const StatusCallback& callback);
 
   // Blocks the current thread until all the entries in the log queue are flushed and fsynced (if
   // fsync of log entries is enabled).
@@ -232,7 +229,7 @@ class Log : public RefCountedThreadSafe<Log> {
 
   // Gets the last-used OpId written to the log.  If no entry has ever been written to the log,
   // returns (0, 0)
-  yb::OpId GetLatestEntryOpId() const;
+  OpId GetLatestEntryOpId() const;
 
   int64_t GetMinReplicateIndex() const;
 
@@ -258,9 +255,23 @@ class Log : public RefCountedThreadSafe<Log> {
   // readable segments. Note that this assumes there is already a valid active_segment_.
   Status AllocateSegmentAndRollOver();
 
+  // If active segment is not empty, forces the Log to allocate a new segment and roll over
+  // asynchronously and won't wait for wal rotation is actually done.
+  Status AsyncAllocateSegmentAndRollover();
+
+  // When WAL restarts from a crash, instead of allocating a new segment, we try to reuse the
+  // left in-progress segment as writable active_segment_. If return value is false, it means
+  // we fail to reuse the segment because the size of the segment is too large.
+  // If true, this function restored footer_builder_, log_index_, and other attributes of WAl,
+  // then reopen the file as writable active_segment_.
+  Result<bool>  ReuseAsActiveSegment(
+      const scoped_refptr<ReadableLogSegment>& recover_segment) EXCLUDES(active_segment_mutex_);
+
   // For a log created with CreateNewSegment::kFalse, this is used to finish log initialization by
-  // allocating a new segment.
-  Status EnsureInitialNewSegmentAllocated();
+  // either allocating a new segment or reused left in-progress segment that doesn't have footer.
+  Status EnsureSegmentInitialized();
+
+  Status EnsureSegmentInitializedUnlocked() REQUIRES(state_lock_);
 
   // Returns the total size of the current segments, in bytes.
   // Returns 0 if the log is shut down.
@@ -279,7 +290,7 @@ class Log : public RefCountedThreadSafe<Log> {
   // Returns current op id after waiting, which could be greater than or equal to specified op id.
   //
   // On timeout returns default constructed OpId.
-  yb::OpId WaitForSafeOpIdToApply(const yb::OpId& op_id, MonoDelta duration = MonoDelta());
+  OpId WaitForSafeOpIdToApply(const OpId& op_id, MonoDelta duration = MonoDelta());
 
   // Return a readable segment with the given sequence number, or NotFound error if it
   // cannot be found (e.g. if it has already been GCed).
@@ -326,6 +337,20 @@ class Log : public RefCountedThreadSafe<Log> {
   // Waits until all entries flushed, then reset last received op id to specified one.
   Status ResetLastSyncedEntryOpId(const OpId& op_id);
 
+  Status TEST_WriteCorruptedEntryBatchAndSync();
+
+  bool HasSufficientDiskSpaceForWrite();
+
+  void SetGetXClusterMinIndexToRetainFunc(
+      std::function<int64_t(const std::string&)> get_xcluster_required_index_func) {
+    std::lock_guard l(get_xcluster_index_lock_);
+    if (get_xcluster_min_index_to_retain_ == nullptr) {
+      get_xcluster_min_index_to_retain_ = std::move(get_xcluster_required_index_func);
+    }
+  }
+
+  HybridTime GetMinStartHTOfRunningTxnsFromGCSegments() const;
+
  private:
   friend class LogTest;
   friend class LogTestBase;
@@ -334,11 +359,13 @@ class Log : public RefCountedThreadSafe<Log> {
   FRIEND_TEST(LogTest, TestReadLogWithReplacedReplicates);
   FRIEND_TEST(LogTest, TestWriteAndReadToAndFromInProgressSegment);
   FRIEND_TEST(LogTest, TestLogMetrics);
+  FRIEND_TEST(LogTest, AsyncRolloverMarker);
 
   FRIEND_TEST(cdc::CDCServiceTestMaxRentionTime, TestLogRetentionByOpId_MaxRentionTime);
   FRIEND_TEST(cdc::CDCServiceTestMinSpace, TestLogRetentionByOpId_MinSpace);
 
   class Appender;
+  class LogEntryBatch;
 
   // Log state.
   enum LogState {
@@ -358,7 +385,10 @@ class Log : public RefCountedThreadSafe<Log> {
       ThreadPool* append_thread_pool,
       ThreadPool* allocation_thread_pool,
       ThreadPool* background_sync_threadpool,
-      CreateNewSegment create_new_segment = CreateNewSegment::kTrue);
+      NewSegmentAllocationCallback callback,
+      const PreLogRolloverCallback& pre_log_rollover_callback,
+      CreateNewSegment create_new_segment = CreateNewSegment::kTrue,
+      MinStartHTRunningTxnsCallback min_start_ht_running_txns_callback = {});
 
   Env* get_env() {
     return options_.env;
@@ -378,8 +408,8 @@ class Log : public RefCountedThreadSafe<Log> {
   // segment. Sets 'result_path' to the fully qualified path to the unique filename created for the
   // segment.
   Status CreatePlaceholderSegment(const WritableFileOptions& opts,
-                                          std::string* result_path,
-                                          std::shared_ptr<WritableFile>* out);
+                                  std::string* result_path,
+                                  std::shared_ptr<WritableFile>* out);
 
   // Creates a new WAL segment on disk, writes the next_segment_header_ to disk as the header, and
   // sets active_segment_ to point to this new segment.
@@ -389,6 +419,7 @@ class Log : public RefCountedThreadSafe<Log> {
   Status PreAllocateNewSegment();
 
   // Returns the desired size for the next log segment to be created.
+  // If next_max_segment_size_ is specified, return it directly.
   uint64_t NextSegmentDesiredSize();
 
   // Writes serialized contents of 'entry' to the log. Called inside AppenderThread. If
@@ -398,8 +429,7 @@ class Log : public RefCountedThreadSafe<Log> {
   //
   // TODO once Append() is removed, 'caller_owns_operation' and associated logic will no longer be
   // needed.
-  Status DoAppend(
-      LogEntryBatch* entry, bool caller_owns_operation = true, bool skip_wal_write = false);
+  Status DoAppend(LogEntryBatch* entry, SkipWalWrite skip_wal_write = SkipWalWrite::kFalse);
 
   // Update footer_builder_ to reflect the log indexes seen in 'batch'.
   void UpdateFooterForBatch(LogEntryBatch* batch);
@@ -439,7 +469,13 @@ class Log : public RefCountedThreadSafe<Log> {
   Status UpdateSegmentReadableOffset() EXCLUDES(active_segment_mutex_);
 
   // Helper method to get the segment sequence to GC based on the provided min_op_idx.
-  Status GetSegmentsToGCUnlocked(int64_t min_op_idx, SegmentSequence* segments_to_gc) const;
+  Status GetSegmentsToGCUnlocked(int64_t min_op_idx, SegmentSequence* segments_to_gc) const
+      REQUIRES_SHARED(state_lock_);
+  Status GetSegmentsToGC(int64_t min_op_idx, SegmentSequence* segments_to_gc) const
+      EXCLUDES(state_lock_);
+
+  // Discards segments from 'segments_to_gc' if they have not yet met the minimim retention time.
+  void ApplyTimeRetentionPolicy(SegmentSequence* segments_to_gc) const;
 
   // Kick off an asynchronous task that pre-allocates a new log-segment, setting
   // 'allocation_status_'. To wait for the result of the task, use allocation_status_.Get().
@@ -449,7 +485,7 @@ class Log : public RefCountedThreadSafe<Log> {
     return allocation_state_.load(std::memory_order_acquire);
   }
 
-  LogEntryBatch* ReserveMarker(LogEntryTypePB type);
+  Result<std::unique_ptr<LogEntryBatch>> ReserveMarker(LogEntryTypePB type);
 
   // Returns WritableFileOptions for a new segment writable file.
   WritableFileOptions GetNewSegmentWritableFileOptions();
@@ -470,6 +506,26 @@ class Log : public RefCountedThreadSafe<Log> {
   Result<bool> CopySegmentUpTo(
       ReadableLogSegment* segment, const std::string& dest_wal_dir,
       const OpId& max_included_op_id);
+
+  // Asynchronously appends 'entry' to the log. Once the append completes and is synced, 'callback'
+  // will be invoked.
+  Status AsyncAppend(std::unique_ptr<LogEntryBatch> entry, const StatusCallback& callback);
+
+  // Reserves a spot in the log's queue for 'entry_batch'.
+  //
+  // 'reserved_entry' is initialized by this method and any resources associated with it will be
+  // released in AsyncAppend().  In order to ensure correct ordering of operations across multiple
+  // threads, calls to this method must be externally synchronized.
+  //
+  // WARNING: the caller _must_ call AsyncAppend() or else the log will "stall" and will never be
+  // able to make forward progress.
+  Result<std::unique_ptr<LogEntryBatch>> Reserve(
+      LogEntryTypePB type, std::shared_ptr<LWLogEntryBatchPB> entry_batch);
+
+  void WriteLatestMinStartTimeRunningTxnsInFooterBuilder();
+
+  // Updates 'min_start_time_running_txns_from_gc_segments_' from the available segments for GC.
+  void UpdateMinStartTimeRunningTxnsFromGCSegments(const SegmentSequence& segments) const;
 
   LogOptions options_;
 
@@ -513,7 +569,7 @@ class Log : public RefCountedThreadSafe<Log> {
   std::string next_segment_path_;
 
   // Lock to protect mutations to log_state_ and other shared state variables.
-  mutable percpu_rwlock state_lock_;
+  mutable PerCpuRwMutex state_lock_;
 
   LogState log_state_;
 
@@ -529,13 +585,13 @@ class Log : public RefCountedThreadSafe<Log> {
 
   // The last known OpId for a REPLICATE message appended and synced to this log (any segment).
   // NOTE: this op is not necessarily durable unless gflag durable_wal_write is true.
-  boost::atomic<yb::OpId> last_synced_entry_op_id_{yb::OpId()};
+  boost::atomic<OpId> last_synced_entry_op_id_{OpId()};
 
   // The last know OpId for a REPLICATE message appended to this log (any segment).
   // This variable is not accessed concurrently.
-  yb::OpId last_appended_entry_op_id_;
+  OpId last_appended_entry_op_id_;
 
-  yb::OpId last_submitted_op_id_;
+  OpId last_submitted_op_id_;
 
   // A footer being prepared for the current segment.  When the segment is closed, it will be
   // written.
@@ -547,6 +603,10 @@ class Log : public RefCountedThreadSafe<Log> {
   // The maximum segment size we want for the current WAL segment, in bytes.  This value keeps
   // doubling (for each subsequent WAL segment) till it gets to max_segment_size_.
   uint64_t cur_max_segment_size_;
+
+  // The maximum segment size we want for the next WAL segment, in bytes. Use this value instead of
+  // doubling cur_max_segment_size_ if it's specifed.
+  std::optional<uint64_t> next_max_segment_size_;
 
   // Appender manages a TaskStream writing to the log. We will use one taskstream per tablet.
   std::unique_ptr<Appender> appender_;
@@ -612,6 +672,11 @@ class Log : public RefCountedThreadSafe<Log> {
   // Minimum replicate index for the current log being written. Used for CDC read initialization.
   std::atomic<int64_t> min_replicate_index_{-1};
 
+  // Stores the min_start_time_running_txns from WAL segments that are available for GC based on
+  // index.
+  mutable std::atomic<HybridTime> min_start_time_running_txns_from_gc_segments_ =
+      HybridTime::kInvalid;
+
   // The current replicated index that CDC has read.  Used for CDC read cache optimization.
   std::atomic<int64_t> cdc_min_replicated_index_{std::numeric_limits<int64_t>::max()};
 
@@ -622,9 +687,31 @@ class Log : public RefCountedThreadSafe<Log> {
 
   CreateNewSegment create_new_segment_at_start_;
 
+  NewSegmentAllocationCallback new_segment_allocation_callback_;
+
+  PreLogRolloverCallback pre_log_rollover_callback_;
+
+  const yb::ash::WaitStateInfoPtr background_synchronizer_wait_state_;
+
+  // Initialised during tablet bootstrap to TabletPeer::GetMinStartHTRunningTxnsOrLeaderSafeTime.
+  // The callback guarantees that value returned would be a 'valid' Hybrid time.
+  MinStartHTRunningTxnsCallback min_start_ht_running_txns_callback_;
+
+  std::atomic<CoarseTimePoint> last_disk_space_check_time_{CoarseTimePoint::min()};
+  std::atomic<bool> has_free_disk_space_{false};
+  std::atomic<uint32> disk_space_frequent_check_interval_sec_{0};
+  std::shared_timed_mutex disk_space_mutex_;
+
+  // Protect access to the get_xcluster_min_index_to_retain_.
+  mutable PerCpuRwMutex get_xcluster_index_lock_;
+
+  // Function pointer to CDCServiceImpl::GetXClusterMinRequiredIndex.
+  // This function retrieves the xCluster minimum required index for a given tablet.
+  std::function<int64_t(const std::string&)> get_xcluster_min_index_to_retain_
+      GUARDED_BY(get_xcluster_index_lock_);
+
   DISALLOW_COPY_AND_ASSIGN(Log);
 };
 
 }  // namespace log
 }  // namespace yb
-#endif /* YB_CONSENSUS_LOG_H_ */

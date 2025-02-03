@@ -20,110 +20,94 @@
 #include "yb/common/pg_system_attr.h"
 
 #include "yb/util/atomic.h"
+#include "yb/util/logging.h"
 #include "yb/util/status_format.h"
 
+#include "yb/yql/pggate/pg_select.h"
 #include "yb/yql/pggate/pg_select_index.h"
-#include "yb/yql/pggate/pggate_flags.h"
 #include "yb/yql/pggate/util/pg_doc_data.h"
 #include "yb/yql/pggate/ybc_pggate.h"
 
-namespace yb {
-namespace pggate {
+namespace yb::pggate {
+namespace {
 
-//--------------------------------------------------------------------------------------------------
-// PgDml
-//--------------------------------------------------------------------------------------------------
+class IndexYbctidProvider : public YbctidProvider {
+ public:
+  explicit IndexYbctidProvider(PgSelectIndex& index)
+      : index_(index) {}
 
-PgDml::PgDml(PgSession::ScopedRefPtr pg_session,
-             const PgObjectId& table_id,
-             bool is_region_local)
-    : PgStatement(std::move(pg_session)), table_id_(table_id), is_region_local_(is_region_local) {
-}
-
-PgDml::PgDml(PgSession::ScopedRefPtr pg_session,
-             const PgObjectId& table_id,
-             const PgObjectId& index_id,
-             const PgPrepareParameters *prepare_params,
-             bool is_region_local)
-    : PgDml(pg_session, table_id, is_region_local) {
-
-  if (prepare_params) {
-    prepare_params_ = *prepare_params;
-    // Primary index does not have its own data table.
-    if (prepare_params_.use_secondary_index) {
-      index_id_ = index_id;
-    }
+ private:
+  Result<std::optional<YbctidBatch>> Fetch() override {
+    return index_.FetchYbctidBatch();
   }
+
+  void Reset() override {}
+
+  PgSelectIndex& index_;
+};
+
+} // namespace
+
+PgDml::SecondaryIndexQueryWrapper::SecondaryIndexQueryWrapper(
+    std::unique_ptr<PgDmlRead>&& query, std::reference_wrapper<const YbcPgExecParameters*> params)
+    : query_(std::move(query)), params_(params), is_executed_(false) {
+  DCHECK(query_);
 }
 
-PgDml::~PgDml() {
+Status PgDml::SecondaryIndexQueryWrapper::Execute() {
+  if (is_executed_) {
+    return Status::OK();
+  }
+  is_executed_ = true;
+  return query_->Exec(params_);
 }
 
-//--------------------------------------------------------------------------------------------------
+PgDml::PgDml(const PgSession::ScopedRefPtr& pg_session)
+    : PgStatement(pg_session) {}
 
-Status PgDml::AppendTarget(PgExpr *target) {
+PgDml::~PgDml() = default;
+
+Status PgDml::AppendTarget(PgExpr* target) {
   // Except for base_ctid, all targets should be appended to this DML.
-  if (target_ && (prepare_params_.index_only_scan || !target->is_ybbasetid())) {
-    RETURN_NOT_OK(AppendTargetPB(target));
-  } else {
-    // Append base_ctid to the index_query.
-    RETURN_NOT_OK(secondary_index_query_->AppendTargetPB(target));
-  }
-
-  return Status::OK();
+  // base_ctid goes to the index_query.
+  auto* secondary_index_query = SecondaryIndexQuery();
+  return target_ && (!secondary_index_query || !target->is_ybbasetid())
+      ? AppendTargetPB(target) : secondary_index_query->AppendTargetPB(target);
 }
 
-Status PgDml::AppendTargetPB(PgExpr *target) {
+Status PgDml::AppendTargetPB(PgExpr* target) {
   // Append to targets_.
-  targets_.push_back(target);
+  bool is_aggregate = target->is_aggregate();
+  if (targets_.empty()) {
+    has_aggregate_targets_ = is_aggregate;
+  } else {
+    RSTATUS_DCHECK_EQ(has_aggregate_targets_, is_aggregate,
+                      IllegalState, "Combining aggregate and non aggregate targets");
+  }
 
-  // Allocate associated protobuf.
-  auto* expr_pb = AllocTargetPB();
+  if (is_aggregate) {
+    auto aggregate = down_cast<PgAggregateOperator*>(target);
+    aggregate->set_index(narrow_cast<int>(targets_.size()));
+    targets_.push_back(aggregate);
+  } else {
+    targets_.push_back(down_cast<PgColumnRef*>(target));
+  }
 
   // Prepare expression. Except for constants and place_holders, all other expressions can be
-  // evaluate just one time during prepare.
-  RETURN_NOT_OK(target->PrepareForRead(this, expr_pb));
-
-  // Link the given expression "attr_value" with the allocated protobuf. Note that except for
-  // constants and place_holders, all other expressions can be setup just one time during prepare.
-  // Example:
-  // - Bind values for a target of SELECT
-  //   SELECT AVG(col + ?) FROM a_table;
-  expr_binds_[expr_pb] = target;
-  return Status::OK();
+  // evaluated just one time during prepare.
+  return target->PrepareForRead(this, AllocTargetPB());
 }
 
-Status PgDml::AppendQual(PgExpr *qual, bool is_primary) {
-  if (!is_primary) {
-    DCHECK(secondary_index_query_) << "The secondary index query is expected";
-    return secondary_index_query_->AppendQual(qual, true);
+Status PgDml::AppendColumnRef(PgColumnRef* colref, bool is_for_secondary_index) {
+  if (is_for_secondary_index) {
+    return DCHECK_NOTNULL(SecondaryIndexQuery())->AppendColumnRef(
+        colref, /* is_for_secondary_index= */ false);
   }
 
-  // Append to quals_.
-  quals_.push_back(qual);
-
-  // Allocate associated protobuf.
-  auto* expr_pb = AllocQualPB();
-
-  // Populate the expr_pb with data from the qual expression.
-  // Side effect of PrepareForRead is to call PrepareColumnForRead on "this" being passed in
-  // for any column reference found in the expression. However, the serialized Postgres expressions,
-  // the only kind of Postgres expressions supported as quals, can not be searched.
-  // Their column references should be explicitly appended with AppendColumnRef()
-  return qual->PrepareForRead(this, expr_pb);
-}
-
-Status PgDml::AppendColumnRef(PgExpr *colref, bool is_primary) {
-  if (!is_primary) {
-    DCHECK(secondary_index_query_) << "The secondary index query is expected";
-    return secondary_index_query_->AppendColumnRef(colref, true);
-  }
-
-  DCHECK(colref->is_colref()) << "Colref is expected";
   // Postgres attribute number, this is column id to refer the column from Postgres code
-  int attr_num = static_cast<PgColumnRef *>(colref)->attr_num();
+  int attr_num = colref->attr_num();
   // Retrieve column metadata from the target relation metadata
-  PgColumn& col = VERIFY_RESULT(target_.ColumnForAttr(attr_num));
+  auto& col = VERIFY_RESULT_REF(target_.ColumnForAttr(attr_num));
   if (!col.is_virtual_column()) {
     // Do not overwrite Postgres
     if (!col.has_pg_type_info()) {
@@ -144,9 +128,9 @@ Status PgDml::AppendColumnRef(PgExpr *colref, bool is_primary) {
   return Status::OK();
 }
 
-Result<const PgColumn&> PgDml::PrepareColumnForRead(int attr_num, LWPgsqlExpressionPB *target_pb) {
+Result<const PgColumn&> PgDml::PrepareColumnForRead(int attr_num, LWPgsqlExpressionPB* target_pb) {
   // Find column from targeted table.
-  PgColumn& col = VERIFY_RESULT(target_.ColumnForAttr(attr_num));
+  auto& col = VERIFY_RESULT_REF(target_.ColumnForAttr(attr_num));
 
   // Prepare protobuf to send to DocDB.
   if (target_pb) {
@@ -161,7 +145,24 @@ Result<const PgColumn&> PgDml::PrepareColumnForRead(int attr_num, LWPgsqlExpress
   return const_cast<const PgColumn&>(col);
 }
 
-Status PgDml::PrepareColumnForWrite(PgColumn *pg_col, LWPgsqlExpressionPB *assign_pb) {
+Result<const PgColumn&> PgDml::PrepareColumnForRead(int attr_num, LWQLExpressionPB* target_pb) {
+  // Find column from targeted table.
+  auto& col = VERIFY_RESULT_REF(target_.ColumnForAttr(attr_num));
+
+  // Prepare protobuf to send to DocDB.
+  if (target_pb) {
+    target_pb->set_column_id(col.id());
+  }
+
+  // Mark non-virtual column reference for DocDB.
+  if (!col.is_virtual_column()) {
+    col.set_read_requested(true);
+  }
+
+  return const_cast<const PgColumn&>(col);
+}
+
+Status PgDml::PrepareColumnForWrite(PgColumn* pg_col, LWPgsqlExpressionPB* assign_pb) {
   // Prepare protobuf to send to DocDB.
   assign_pb->set_column_id(pg_col->id());
 
@@ -173,7 +174,7 @@ Status PgDml::PrepareColumnForWrite(PgColumn *pg_col, LWPgsqlExpressionPB *assig
   return Status::OK();
 }
 
-void PgDml::ColumnRefsToPB(LWPgsqlColumnRefsPB *column_refs) {
+void PgDml::ColumnRefsToPB(LWPgsqlColumnRefsPB* column_refs) {
   column_refs->Clear();
   for (const PgColumn& col : target_.columns()) {
     if (col.read_requested() || col.write_requested()) {
@@ -184,61 +185,49 @@ void PgDml::ColumnRefsToPB(LWPgsqlColumnRefsPB *column_refs) {
 
 void PgDml::ColRefsToPB() {
   // Remove previously set column references in case if the statement is being reexecuted
-  ClearColRefPBs();
-  for (const PgColumn& col : target_.columns()) {
+  auto& col_refs = ColRefPBs();
+  col_refs.clear();
+  for (const auto& col : target_.columns()) {
     // Only used columns are added to the request
     if (col.read_requested() || col.write_requested()) {
       // Allocate a protobuf entry
-      auto* col_ref = AllocColRefPB();
+      auto& col_ref = col_refs.emplace_back();
       // Add DocDB identifier
-      col_ref->set_column_id(col.id());
+      col_ref.set_column_id(col.id());
       // Add Postgres identifier
-      col_ref->set_attno(col.attr_num());
+      col_ref.set_attno(col.attr_num());
       // Add Postgres type information, if defined
       if (col.has_pg_type_info()) {
-        col_ref->set_typid(col.pg_typid());
-        col_ref->set_typmod(col.pg_typmod());
-        col_ref->set_collid(col.pg_collid());
+        col_ref.set_typid(col.pg_typid());
+        col_ref.set_typmod(col.pg_typmod());
+        col_ref.set_collid(col.pg_collid());
       }
     }
   }
 }
 
-//--------------------------------------------------------------------------------------------------
+Status PgDml::BindColumn(int attr_num, PgExpr* attr_value) {
+  // Convert to wire protocol. See explanation in pg_system_attr.h.
+  if (attr_num == static_cast<int>(PgSystemAttrNum::kPGInternalYBTupleId)) {
+    attr_num = static_cast<int>(PgSystemAttrNum::kYBTupleId);
+  }
 
-Status PgDml::BindColumn(int attr_num, PgExpr *attr_value) {
-  if (secondary_index_query_) {
-    // Bind by secondary key.
-    return secondary_index_query_->BindColumn(attr_num, attr_value);
+  if (auto* secondary_index = SecondaryIndexQuery(); secondary_index) {
+    return secondary_index->BindColumn(attr_num, attr_value);
   }
 
   // Find column to bind.
-  PgColumn& column = VERIFY_RESULT(bind_.ColumnForAttr(attr_num));
+  auto& column = VERIFY_RESULT_REF(bind_.ColumnForAttr(attr_num));
 
   // Check datatype.
-  if (attr_value->internal_type() != InternalType::kGinNullValue) {
-    SCHECK_EQ(column.internal_type(), attr_value->internal_type(), Corruption,
+  const auto attr_internal_type = attr_value->internal_type();
+  if (attr_internal_type != InternalType::kGinNullValue) {
+    SCHECK_EQ(column.internal_type(), attr_internal_type, Corruption,
               "Attribute value type does not match column type");
   }
 
-  // Alloc the protobuf.
-  auto* bind_pb = column.bind_pb();
-  if (bind_pb == nullptr) {
-    bind_pb = AllocColumnBindPB(&column);
-  } else {
-    if (expr_binds_.count(bind_pb)) {
-      LOG(WARNING) << strings::Substitute("Column $0 is already bound to another value.", attr_num);
-    }
-  }
+  RETURN_NOT_OK(AllocColumnBindPB(&column, attr_value));
 
-  // Link the given expression "attr_value" with the allocated protobuf. Note that except for
-  // constants and place_holders, all other expressions can be setup just one time during prepare.
-  // Examples:
-  // - Bind values for primary columns in where clause.
-  //     WHERE hash = ?
-  // - Bind values for a column in INSERT statement.
-  //     INSERT INTO a_table(hash, key, col) VALUES(?, ?, ?)
-  expr_binds_[bind_pb] = attr_value;
   if (attr_num == static_cast<int>(PgSystemAttrNum::kYBTupleId)) {
     CHECK(attr_value->is_constant()) << "Column ybctid must be bound to constant";
     ybctid_bind_ = true;
@@ -246,28 +235,30 @@ Status PgDml::BindColumn(int attr_num, PgExpr *attr_value) {
   return Status::OK();
 }
 
-Status PgDml::UpdateBindPBs() {
-  for (const auto &entry : expr_binds_) {
-    auto* expr_pb = entry.first;
-    PgExpr *attr_value = entry.second;
-    RETURN_NOT_OK(attr_value->EvalTo(expr_pb));
+Status PgDml::ANNBindVector(PgExpr *query_vec) {
+  if (auto* secondary_index = SecondaryIndexQuery(); secondary_index) {
+    return secondary_index->ANNBindVector(query_vec);
   }
 
-  return Status::OK();
+  return down_cast<PgDmlRead*>(this)->ANNBindVector(query_vec);
 }
 
-//--------------------------------------------------------------------------------------------------
+Status PgDml::ANNSetPrefetchSize(int32_t prefetch_size) {
+  if (auto* secondary_index = SecondaryIndexQuery(); secondary_index) {
+    return secondary_index->ANNSetPrefetchSize(prefetch_size);
+  }
+
+  return down_cast<PgDmlRead*>(this)->ANNSetPrefetchSize(prefetch_size);
+}
 
 Status PgDml::BindTable() {
   bind_table_ = true;
   return Status::OK();
 }
 
-//--------------------------------------------------------------------------------------------------
-
-Status PgDml::AssignColumn(int attr_num, PgExpr *attr_value) {
+Status PgDml::AssignColumn(int attr_num, PgExpr* attr_value) {
   // Find column from targeted table.
-  PgColumn& column = VERIFY_RESULT(target_.ColumnForAttr(attr_num));
+  auto& column = VERIFY_RESULT_REF(target_.ColumnForAttr(attr_num));
 
   // Check datatype.
   SCHECK_EQ(column.internal_type(), attr_value->internal_type(), Corruption,
@@ -312,60 +303,38 @@ Status PgDml::UpdateAssignPBs() {
   return Status::OK();
 }
 
-//--------------------------------------------------------------------------------------------------
-
-Result<bool> PgDml::ProcessSecondaryIndexRequest(const PgExecParameters *exec_params) {
-  if (!secondary_index_query_) {
-    // Secondary INDEX is not used in this request.
-    return false;
+Result<bool> PgDml::ProcessProvidedYbctids() {
+  if (secondary_index_) {
+    RETURN_NOT_OK(secondary_index_->Execute());
   }
 
-  // Execute query in PgGate.
-  // If index query is not yet executed, run it.
-  if (!secondary_index_query_->is_executed()) {
-    secondary_index_query_->set_is_executed(true);
-    RETURN_NOT_OK(secondary_index_query_->Exec(exec_params));
-  }
-
-  // Not processing index request if it does not require its own doc operator.
-  //
-  // When INDEX is used for system catalog (colocated table), the index subquery does not have its
-  // own operator. The request is combined with 'this' outer SELECT using 'index_request' attribute.
-  //   (PgDocOp)doc_op_->(YBPgsqlReadOp)read_op_->(PgsqlReadRequestPB)read_request_::index_request
-  if (!secondary_index_query_->has_doc_op()) {
-    return false;
-  }
-
-  // When INDEX has its own doc_op, execute it to fetch next batch of ybctids which is then used
-  // to read data from the main table.
-  const vector<Slice> *ybctids;
-  if (!VERIFY_RESULT(secondary_index_query_->FetchYbctidBatch(&ybctids))) {
-    // No more rows of ybctids.
+  auto* provider = ybctid_provider();
+  const auto data =  provider ? VERIFY_RESULT(provider->Fetch()) : std::nullopt;
+  if (!data) {
     return false;
   }
 
   // Update request with the new batch of ybctids to fetch the next batch of rows.
-  auto i = ybctids->begin();
-  RETURN_NOT_OK(doc_op_->PopulateDmlByYbctidOps({make_lw_function(
-      [&i, end = ybctids->end()] {
-        return i != end ? *i++ : Slice();
-      }), ybctids->size()}));
-  AtomicFlagSleepMs(&FLAGS_TEST_inject_delay_between_prepare_ybctid_execute_batch_ybctid_ms);
-  return true;
+  return UpdateRequestWithYbctids(data->ybctids, KeepOrder(data->keep_order));
 }
 
-Status PgDml::Fetch(int32_t natts,
-                    uint64_t *values,
-                    bool *isnulls,
-                    PgSysColumns *syscols,
-                    bool *has_data) {
+Result<bool> PgDml::UpdateRequestWithYbctids(
+    const std::vector<Slice>& ybctids, KeepOrder keep_order) {
+  auto i = ybctids.begin();
+  return doc_op_->PopulateByYbctidOps({make_lw_function([&i, end = ybctids.end()] {
+    return i != end ? *i++ : Slice();
+  }), ybctids.size()}, keep_order);
+}
+
+Status PgDml::Fetch(
+    int32_t natts, uint64_t* values, bool* isnulls, YbcPgSysColumns* syscols, bool* has_data) {
   // Each isnulls and values correspond (in order) to columns from the table schema.
   // Initialize to nulls for any columns not present in result.
   if (isnulls) {
     memset(isnulls, true, natts * sizeof(bool));
   }
   if (syscols) {
-    memset(syscols, 0, sizeof(PgSysColumns));
+    memset(syscols, 0, sizeof(YbcPgSysColumns));
   }
 
   // Keep reading until we either reach the end or get some rows.
@@ -391,7 +360,7 @@ Result<bool> PgDml::FetchDataFromServer() {
     // Process the secondary index to find the next WHERE condition.
     //   DML(Table) WHERE ybctid IN (SELECT base_ybctid FROM IndexTable),
     //   The nested query would return many rows each of which yields different result-set.
-    if (!VERIFY_RESULT(ProcessSecondaryIndexRequest(nullptr))) {
+    if (!VERIFY_RESULT(ProcessProvidedYbctids())) {
       // Return EOF as the nested subquery does not have any more data.
       return false;
     }
@@ -406,7 +375,7 @@ Result<bool> PgDml::FetchDataFromServer() {
 
   // Return the output parameter back to Postgres if server wants.
   if (doc_op_->has_out_param_backfill_spec() && pg_exec_params_) {
-    PgExecOutParamValue value;
+    YbcPgExecOutParamValue value;
     value.bfoutput = doc_op_->out_param_backfill_spec();
     YBCGetPgCallbacks()->WriteExecOutParam(pg_exec_params_->out_param, &value);
   }
@@ -414,7 +383,7 @@ Result<bool> PgDml::FetchDataFromServer() {
   return true;
 }
 
-Result<bool> PgDml::GetNextRow(PgTuple *pg_tuple) {
+Result<bool> PgDml::GetNextRow(PgTuple* pg_tuple) {
   for (;;) {
     for (auto rowset_iter = rowsets_.begin(); rowset_iter != rowsets_.end();) {
       // Check if the rowset has any data.
@@ -459,26 +428,23 @@ Result<bool> PgDml::GetNextRow(PgTuple *pg_tuple) {
   return false;
 }
 
-bool PgDml::has_aggregate_targets() {
-  size_t num_aggregate_targets = 0;
-  for (const auto& target : targets_) {
-    if (target->is_aggregate()) {
-      num_aggregate_targets++;
-    }
-  }
-
-  CHECK(num_aggregate_targets == 0 || num_aggregate_targets == targets_.size())
-    << "Some, but not all, targets are aggregate expressions.";
-
-  return num_aggregate_targets > 0;
+Result<YbcPgColumnInfo> PgDml::GetColumnInfo(int attr_num) const {
+  auto* secondary_index = SecondaryIndexQuery();
+  return secondary_index
+      ? secondary_index->GetColumnInfo(attr_num) : bind_->GetColumnInfo(attr_num);
 }
 
-Result<YBCPgColumnInfo> PgDml::GetColumnInfo(int attr_num) const {
-  if (secondary_index_query_) {
-    return secondary_index_query_->GetColumnInfo(attr_num);
-  }
-  return bind_->GetColumnInfo(attr_num);
+void PgDml::SetYbctidProvider(std::unique_ptr<YbctidProvider>&& provider) {
+  DCHECK(!secondary_index_);
+  ybctid_provider_ = std::move(provider);
 }
 
-}  // namespace pggate
-}  // namespace yb
+void PgDml::SetSecondaryIndex(std::unique_ptr<PgSelectIndex>&& index_query) {
+  DCHECK(!secondary_index_ && !ybctid_provider_);
+  if (index_query->doc_op_) {
+    ybctid_provider_ = std::make_unique<IndexYbctidProvider>(*index_query);
+  }
+  secondary_index_.emplace(std::move(index_query), pg_exec_params_);
+}
+
+}  // namespace yb::pggate

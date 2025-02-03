@@ -40,9 +40,10 @@
 
 #include "yb/gutil/stringprintf.h"
 
+#include "yb/util/callsite_profiling.h"
 #include "yb/util/debug/trace_event.h"
 #include "yb/util/debug/trace_logging.h"
-#include "yb/util/flag_tags.h"
+#include "yb/util/flags.h"
 #include "yb/util/logging.h"
 #include "yb/util/mem_tracker.h"
 #include "yb/util/metrics.h"
@@ -51,28 +52,30 @@
 #include "yb/util/thread.h"
 #include "yb/util/unique_lock.h"
 
-using std::pair;
+#include "yb/server/total_mem_watcher.h"
+
 using std::shared_ptr;
+using std::string;
 using strings::Substitute;
 
 using namespace std::literals;
 
-DEFINE_int32(maintenance_manager_num_threads, 1,
+DEFINE_UNKNOWN_int32(maintenance_manager_num_threads, 1,
        "Size of the maintenance manager thread pool. Beyond a value of '1', one thread is "
        "reserved for emergency flushes. For spinning disks, the number of threads should "
        "not be above the number of devices.");
 TAG_FLAG(maintenance_manager_num_threads, stable);
 
-DEFINE_int32(maintenance_manager_polling_interval_ms, 250,
+DEFINE_UNKNOWN_int32(maintenance_manager_polling_interval_ms, 250,
        "Polling interval for the maintenance manager scheduler, "
        "in milliseconds.");
 TAG_FLAG(maintenance_manager_polling_interval_ms, hidden);
 
-DEFINE_int32(maintenance_manager_history_size, 8,
+DEFINE_UNKNOWN_int32(maintenance_manager_history_size, 8,
        "Number of completed operations the manager is keeping track of.");
 TAG_FLAG(maintenance_manager_history_size, hidden);
 
-DEFINE_bool(enable_maintenance_manager, true,
+DEFINE_UNKNOWN_bool(enable_maintenance_manager, true,
        "Enable the maintenance manager, runs compaction and tablet cleaning tasks.");
 TAG_FLAG(enable_maintenance_manager, unsafe);
 
@@ -144,12 +147,12 @@ Status MaintenanceManager::Init() {
 
 void MaintenanceManager::Shutdown() {
   {
-    std::lock_guard<std::mutex> guard(mutex_);
+    std::lock_guard guard(mutex_);
     if (shutdown_) {
       return;
     }
     shutdown_ = true;
-    cond_.notify_all();
+    YB_PROFILE(cond_.notify_all());
   }
   if (monitor_thread_.get()) {
     CHECK_OK(ThreadJoiner(monitor_thread_.get()).Join());
@@ -159,7 +162,7 @@ void MaintenanceManager::Shutdown() {
 }
 
 void MaintenanceManager::RegisterOp(MaintenanceOp* op) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard lock(mutex_);
   CHECK(!op->manager_.get()) << "Tried to register " << op->name()
           << ", but it was already registered.";
   auto inserted = ops_.emplace(op, MaintenanceOpStats()).second;
@@ -172,7 +175,7 @@ void MaintenanceManager::RegisterOp(MaintenanceOp* op) {
 
 void MaintenanceManager::UnregisterOp(MaintenanceOp* op) {
   {
-    UNIQUE_LOCK(lock, mutex_);
+    UniqueLock lock(mutex_);
 
     CHECK(op->manager_.get() == this) << "Tried to unregister " << op->name()
           << ", but it is not currently registered with this maintenance manager.";
@@ -181,7 +184,7 @@ void MaintenanceManager::UnregisterOp(MaintenanceOp* op) {
       VLOG_AND_TRACE("maintenance", 1) << "Waiting for op " << op->name() << " to finish so "
             << "we can unregister it.";
       for (;;) {
-        auto wait_status = op->cond_.wait_for(GetLockForCondition(&lock), 15s);
+        auto wait_status = op->cond_.wait_for(GetLockForCondition(lock), 15s);
         if (op->running_ == 0) {
           break;
         }
@@ -203,10 +206,10 @@ void MaintenanceManager::UnregisterOp(MaintenanceOp* op) {
 void MaintenanceManager::RunSchedulerThread() {
   auto polling_interval = polling_interval_ms_ * 1ms;
 
-  UNIQUE_LOCK(lock, mutex_);
+  UniqueLock lock(mutex_);
   for (;;) {
     // Loop until we are shutting down or it is time to run another op.
-    cond_.wait_for(GetLockForCondition(&lock), polling_interval);
+    cond_.wait_for(GetLockForCondition(lock), polling_interval);
     if (shutdown_) {
       VLOG_AND_TRACE("maintenance", 1) << "Shutting down maintenance manager.";
       return;
@@ -379,7 +382,7 @@ void MaintenanceManager::LaunchOp(const ScopedMaintenanceOpRun& run) {
   op->RunningGauge()->Decrement();
   MonoTime end_time(MonoTime::Now());
   MonoDelta delta(end_time.GetDeltaSince(start_time));
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard lock(mutex_);
 
   CompletedOp& completed_op = completed_ops_[completed_ops_count_ % completed_ops_.size()];
   completed_op.name = op->name();
@@ -392,7 +395,7 @@ void MaintenanceManager::LaunchOp(const ScopedMaintenanceOpRun& run) {
 
 void MaintenanceManager::GetMaintenanceManagerStatusDump(MaintenanceManagerStatusPB* out_pb) {
   DCHECK(out_pb != nullptr);
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard lock(mutex_);
   MaintenanceOp* best_op = FindBestOp();
   for (MaintenanceManager::OpMapTy::value_type& val : ops_) {
     MaintenanceManagerStatusPB_MaintenanceOpPB* op_pb = out_pb->add_registered_operations();
@@ -462,9 +465,9 @@ void ScopedMaintenanceOpRun::Reset() {
   if (!op_) {
     return;
   }
-  std::lock_guard<std::mutex> lock(op_->manager_->mutex_);
+  std::lock_guard lock(op_->manager_->mutex_);
   if (--op_->running_ == 0) {
-    op_->cond_.notify_all();
+    YB_PROFILE(op_->cond_.notify_all());
   }
   --op_->manager_->running_ops_;
   op_ = nullptr;
@@ -476,7 +479,7 @@ MaintenanceOp* ScopedMaintenanceOpRun::get() const {
 
 void ScopedMaintenanceOpRun::Assign(MaintenanceOp* op) {
   op_ = op;
-  std::lock_guard<std::mutex> lock(op_->manager_->mutex_);
+  std::lock_guard lock(op_->manager_->mutex_);
   ++op->running_;
   ++op->manager_->running_ops_;
 }

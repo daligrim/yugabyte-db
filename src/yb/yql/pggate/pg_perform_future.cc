@@ -20,27 +20,31 @@
 
 #include "yb/yql/pggate/pg_session.h"
 
-using namespace std::literals;
-
-namespace yb {
-namespace pggate {
+namespace yb::pggate {
 namespace {
 
 Status PatchStatus(const Status& status, const PgObjectIds& relations) {
-  auto op_index = PgsqlRequestStatus(status) == PgsqlResponsePB::PGSQL_STATUS_DUPLICATE_KEY_ERROR
-      ? OpIndex::ValueFromStatus(status) : boost::none;
-  if (op_index && *op_index < relations.size()) {
-    return STATUS(AlreadyPresent, PgsqlError(YBPgErrorCode::YB_PG_UNIQUE_VIOLATION))
-        .CloneAndAddErrorCode(RelationOid(relations[*op_index].object_oid));
+  if (status.ok()) {
+    return status;
+  }
+
+  const auto max_relation_index = relations.size();
+  const auto op_index = OpIndex::ValueFromStatus(status).get_value_or(max_relation_index);
+  if (op_index < max_relation_index) {
+    static const auto duplicate_key_status =
+        STATUS(AlreadyPresent, PgsqlError(YBPgErrorCode::YB_PG_UNIQUE_VIOLATION));
+    const auto& actual_status =
+        PgsqlRequestStatus(status) == PgsqlResponsePB::PGSQL_STATUS_DUPLICATE_KEY_ERROR
+          ? duplicate_key_status : status;
+    return  actual_status.CloneAndAddErrorCode(RelationOid(relations[op_index].object_oid));
   }
   return status;
 }
 
 } // namespace
 
-PerformFuture::PerformFuture(
-    std::future<PerformResult> future, PgSession* session, PgObjectIds&& relations)
-    : future_(std::move(future)), session_(session), relations_(std::move(relations)) {
+PerformFuture::PerformFuture(PerformResultFuture&& future, PgObjectIds&& relations)
+    : future_(std::move(future)), relations_(std::move(relations)) {
 }
 
 PerformFuture::~PerformFuture() {
@@ -48,27 +52,28 @@ PerformFuture::~PerformFuture() {
     // In case object is valid nobody got the result from it.
     // This is possible in case of error handling. Transaction will be rolled back in this case.
     // We have to be sure that all requests are completed before performing rollback.
-    future_.wait();
+    Wait(future_);
   }
 }
 
 bool PerformFuture::Valid() const {
-  return future_.valid();
+  return pggate::Valid(future_);
 }
 
 bool PerformFuture::Ready() const {
-  return Valid() && future_.wait_for(0ms) == std::future_status::ready;
+  return Valid() && pggate::Ready(future_);
 }
 
-Result<rpc::CallResponsePtr> PerformFuture::Get() {
+Result<PerformFuture::Data> PerformFuture::Get(PgSession& session) {
   // Make sure Valid method will return false before thread will be blocked on call future.get()
   // This requirement is not necessary after fixing of #12884.
   auto future = std::move(future_);
-  auto result = future.get();
+  auto result = pggate::Get(&future);
   RETURN_NOT_OK(PatchStatus(result.status, relations_));
-  session_->TrySetCatalogReadPoint(result.catalog_read_time);
-  return result.response;
+  session.TrySetCatalogReadPoint(result.catalog_read_time);
+  return Data{
+      .response = std::move(result.response),
+      .used_in_txn_limit = result.used_in_txn_limit};
 }
 
-} // namespace pggate
-} // namespace yb
+} // namespace yb::pggate

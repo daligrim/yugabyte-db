@@ -15,25 +15,49 @@
 #include "yb/yql/pggate/pggate_thread_local_vars.h"
 
 #include <stddef.h>
+#include <optional>
+#include <vector>
 
-namespace yb {
-namespace pggate {
+#include "yb/yql/pggate/ybc_pg_typedefs.h"
+#include "yb/util/logging.h"
+
+class CachedRegexpHolder {
+ public:
+  CachedRegexpHolder(size_t buffer_size,
+                     YbcPgThreadLocalRegexpCacheCleanup cleanup)
+      : buffer_(buffer_size, 0), cleanup_(cleanup), cache_{.num = 0, .array = buffer_.data()} {}
+
+  ~CachedRegexpHolder() {
+    cleanup_(&cache_);
+  }
+
+  YbcPgThreadLocalRegexpCache& cache() { return cache_; }
+
+ private:
+  std::vector<char> buffer_;
+  const YbcPgThreadLocalRegexpCacheCleanup cleanup_;
+  YbcPgThreadLocalRegexpCache cache_ = {};
+};
+
+namespace yb::pggate {
 
 /*
  * This code does not need to know anything about the value internals.
  * TODO we could use opaque types instead of void* for additional type safety.
  */
-thread_local void *thread_local_memory_context_ = NULL;
-thread_local void *pg_strtok_ptr = NULL;
-thread_local void *jump_buffer = NULL;
-thread_local const void *err_msg = NULL;
+thread_local void* thread_local_memory_context_ = nullptr;
+thread_local void* pg_strtok_ptr = nullptr;
+thread_local void* jump_buffer = nullptr;
+thread_local void* err_status = nullptr;
+thread_local std::optional<CachedRegexpHolder> re_cache;
+thread_local YbcPgThreadLocalRegexpMetadata re_metadata;
 
 //-----------------------------------------------------------------------------
 // Memory context.
 //-----------------------------------------------------------------------------
 
 void* PgSetThreadLocalCurrentMemoryContext(void *memctx) {
-  void *old = thread_local_memory_context_;
+  void* old = thread_local_memory_context_;
   thread_local_memory_context_ = memctx;
   return old;
 }
@@ -43,9 +67,9 @@ void* PgGetThreadLocalCurrentMemoryContext() {
 }
 
 void PgResetCurrentMemCtxThreadLocalVars() {
-  pg_strtok_ptr = NULL;
-  jump_buffer = NULL;
-  err_msg = NULL;
+  pg_strtok_ptr = nullptr;
+  jump_buffer = nullptr;
+  err_status = nullptr;
 }
 
 //-----------------------------------------------------------------------------
@@ -53,7 +77,7 @@ void PgResetCurrentMemCtxThreadLocalVars() {
 //-----------------------------------------------------------------------------
 
 void* PgSetThreadLocalJumpBuffer(void* new_buffer) {
-    void *old_buffer = jump_buffer;
+    void* old_buffer = jump_buffer;
     jump_buffer = new_buffer;
     return old_buffer;
 }
@@ -62,12 +86,14 @@ void* PgGetThreadLocalJumpBuffer() {
     return jump_buffer;
 }
 
-void PgSetThreadLocalErrMsg(const void* new_msg) {
-    err_msg = new_msg;
+void* PgSetThreadLocalErrStatus(void* new_status) {
+  void* old_status = err_status;
+  err_status = new_status;
+  return old_status;
 }
 
-const void* PgGetThreadLocalErrMsg() {
-    return err_msg;
+void* PgGetThreadLocalErrStatus() {
+  return err_status;
 }
 
 //-----------------------------------------------------------------------------
@@ -82,5 +108,19 @@ void PgSetThreadLocalStrTokPtr(char *new_pg_strtok_ptr) {
   pg_strtok_ptr = new_pg_strtok_ptr;
 }
 
-}  // namespace pggate
-}  // namespace yb
+YbcPgThreadLocalRegexpCache* PgGetThreadLocalRegexpCache() {
+  return re_cache ? &re_cache->cache() : nullptr;
+}
+
+YbcPgThreadLocalRegexpCache* PgInitThreadLocalRegexpCache(
+    size_t buffer_size, YbcPgThreadLocalRegexpCacheCleanup cleanup) {
+  DCHECK(!re_cache);
+  re_cache.emplace(buffer_size, cleanup);
+  return &re_cache->cache();
+}
+
+YbcPgThreadLocalRegexpMetadata* PgGetThreadLocalRegexpMetadata() {
+  return &re_metadata;
+}
+
+}  // namespace yb::pggate

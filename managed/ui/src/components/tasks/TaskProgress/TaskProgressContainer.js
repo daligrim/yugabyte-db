@@ -22,9 +22,10 @@ const mapDispatchToProps = (dispatch) => {
   };
 };
 
-function mapStateToProps(state, ownProps) {
+function mapStateToProps(state) {
   return {
-    taskProgressData: state.tasks.taskProgressData
+    taskProgressData: state.tasks.taskProgressData,
+    featureFlags: state.featureFlags,
   };
 }
 

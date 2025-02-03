@@ -11,8 +11,7 @@
 // under the License.
 //
 
-#ifndef YB_COMMON_COLUMN_ID_H
-#define YB_COMMON_COLUMN_ID_H
+#pragma once
 
 #include <stdint.h>
 
@@ -20,9 +19,13 @@
 #include <limits>
 #include <string>
 
+#include "boost/functional/hash.hpp"
+
 #include "yb/util/status_fwd.h"
 
 namespace yb {
+
+class Slice;
 
 template<char digit1, char... digits>
 struct ColumnIdHelper {
@@ -57,10 +60,21 @@ class ColumnId {
   operator ColumnIdRep() const { return t_; }
   ColumnIdRep rep() const { return t_; }
 
-  bool operator==(const ColumnId& rhs) const { return t_ == rhs.t_; }
-  bool operator!=(const ColumnId& rhs) const { return t_ != rhs.t_; }
-  bool operator<(const ColumnId& rhs) const { return t_ < rhs.t_; }
-  bool operator>(const ColumnId& rhs) const { return t_ > rhs.t_; }
+  friend bool operator==(const ColumnId& lhs, const ColumnId& rhs) noexcept {
+    return lhs.t_ == rhs.t_;
+  }
+
+  friend bool operator!=(const ColumnId& lhs, const ColumnId& rhs) noexcept {
+    return !(lhs.t_ == rhs.t_);
+  }
+
+  friend bool operator<(const ColumnId& lhs, const ColumnId& rhs) noexcept {
+    return lhs.t_ < rhs.t_;
+  }
+
+  friend bool operator>(const ColumnId& lhs, const ColumnId& rhs) noexcept {
+    return rhs < lhs;
+  }
 
   std::string ToString() const {
     return std::to_string(t_);
@@ -68,7 +82,9 @@ class ColumnId {
 
   uint64_t ToUint64() const;
 
-  static Status FromInt64(int64_t value, ColumnId *column_id);
+  static Result<ColumnId> FromInt64(int64_t value);
+  static Result<ColumnId> Decode(Slice* slice);
+  static Result<ColumnId> FullyDecode(Slice slice);
 
   size_t hash() const {
     return t_;
@@ -90,13 +106,13 @@ static const ColumnId kInvalidColumnId = ColumnId(std::numeric_limits<ColumnIdRe
 // In a new schema, we typically would start assigning column IDs at 0. However, this
 // makes it likely that in many test cases, the column IDs and the column indexes are
 // equal to each other, and it's easy to accidentally pass an index where we meant to pass
-// an ID, without having any issues. So, in DEBUG builds, we start assigning columns at ID
+// an ID, without having any issues. So, in ASAN/TSAN builds, we start assigning columns at ID
 // 10, ensuring that if we accidentally mix up IDs and indexes, we're likely to fire an
 // assertion or bad memory access.
-#ifdef NDEBUG
-constexpr ColumnIdRep kFirstColumnIdRep = 0;
-#else
+#if defined ADDRESS_SANITIZER || defined THREAD_SANITIZER
 constexpr ColumnIdRep kFirstColumnIdRep = 10;
+#else
+constexpr ColumnIdRep kFirstColumnIdRep = 0;
 #endif
 const ColumnId kFirstColumnId(kFirstColumnIdRep);
 
@@ -107,4 +123,6 @@ ColumnId operator"" _ColId() {
 
 }  // namespace yb
 
-#endif  // YB_COMMON_COLUMN_ID_H
+// Specialize std::hash for ColumnId
+template <>
+struct std::hash<yb::ColumnId> : public boost::hash<yb::ColumnId> {};

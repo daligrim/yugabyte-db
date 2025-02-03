@@ -13,8 +13,7 @@
 //
 //
 
-#ifndef YB_UTIL_MULTI_DRIVE_TEST_ENV_H
-#define YB_UTIL_MULTI_DRIVE_TEST_ENV_H
+#pragma once
 
 #include <shared_mutex>
 #include <set>
@@ -34,6 +33,8 @@ namespace yb {
 class MultiDriveTestEnvBase {
  public:
   void AddFailedPath(const std::string& path);
+
+  void RemoveFailedPath(const std::string& path);
 
  protected:
   Status FailureStatus(const std::string& filename) const;
@@ -63,5 +64,3 @@ class MultiDriveTestEnv : public EnvWrapper, public MultiDriveTestEnvBase {
 };
 
 } // namespace yb
-
-#endif // YB_UTIL_MULTI_DRIVE_TEST_ENV_H

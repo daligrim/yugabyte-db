@@ -2,9 +2,7 @@
 title: Deployment checklist for YugabyteDB clusters
 headerTitle: Deployment checklist
 linkTitle: Deployment checklist
-description: Deployment checklist for multi-node YugabyteDB clusters used for production and performance testing
-aliases:
-  - /deploy/checklist/
+description: Checklist to review system requirements, configuration details, and so on, when deploying the YugabyteDB database to production or for performance testing.
 menu:
   preview:
     identifier: checklist
@@ -13,26 +11,29 @@ menu:
 type: docs
 ---
 
-A YugabyteDB cluster consists of two distributed services - the [YB-TServer](../../architecture/concepts/yb-tserver/) service and the [YB-Master](../../architecture/concepts/yb-master/) service. Because the YB-Master service serves the role of the cluster metadata manager, it should be brought up first, followed by the YB-TServer service. To bring up these distributed services, the respective servers (YB-Master or YB-TServer) need to be started across different nodes. There is a number of topics to consider and recommendations to follow when starting these services.
+A YugabyteDB cluster consists of two distributed services - the [YB-TServer](../../architecture/yb-tserver/) service and the [YB-Master](../../architecture/yb-master/) service. Because the YB-Master service serves the role of the cluster metadata manager, it should be brought up first, followed by the YB-TServer service. To bring up these distributed services, the respective servers (YB-Master or YB-TServer) need to be started across different nodes. There is a number of topics to consider and recommendations to follow when starting these services.
 
 ## Basics
 
-- YugabyteDB works on a variety of operating systems. For production workloads, the recommended operating systems are CentOS 7.*n* and RHEL 7.*n*.
-- The appropriate system limits should be set using [`ulimit`](../manual-deployment/system-config/#ulimits) on each node running a YugabyteDB server.
-- [NTP or chrony](../manual-deployment/system-config/#ntp) should be used to synchronize time among the machines.
+- YugabyteDB supports both x86 and ARM (aarch64) CPU architectures.
+- YugabyteDB is supported on a variety of [operating systems](../../reference/configuration/operating-systems/). For production workloads, the recommended operating systems are AlmaLinux 8 and RHEL 8.
+- The appropriate system limits should be set using [`ulimit`](../manual-deployment/system-config/#set-ulimits) on each node running a YugabyteDB server.
+- [chrony](../manual-deployment/system-config#set-up-time-synchronization) should be used to synchronize time among the machines.
 
 ## Replication
 
 YugabyteDB internally replicates data in a consistent manner using the Raft consensus protocol to survive node failure without compromising data correctness. This distributed consensus replication is applied at a per-shard (also known as tablet) level similar to Google Spanner.
 
-The replication factor (RF) corresponds to the number of copies of the data. You need at least as many nodes as the RF, which means one node for RF1, three nodes for RF3, and so on. With a RF of 3, your cluster can tolerate one node failure. With a RF of 5, it can tolerate two node failures. More generally, if RF is n, YugabyteDB can survive (n - 1) / 2 failures without compromising correctness or availability of data.
+The replication factor (RF) corresponds to the number of copies of the data. You need at least as many nodes as the RF, which means one node for RF 1, three nodes for RF 3, and so on. With a RF of 3, your cluster can tolerate one node failure. With a RF of 5, it can tolerate two node failures. More generally, if RF is n, YugabyteDB can survive floor((n - 1) / 2) failures without compromising correctness or availability of data.
+
+See [Fault tolerance](../../architecture/docdb-replication/replication/#fault-tolerance) for more information.
 
 When deploying a cluster, keep in mind the following:
 
-- The RF should be an odd number to ensure majority consensus can be established during failures.
 - The default replication factor is 3.
 - The number of YB-Master servers running in a cluster should match RF. Run each server on a separate machine to prevent losing availability on failures. You need to specify the RF using the `--replication_factor` flag when bringing up the YB-Master servers.
 - The number of YB-TServer servers running in the cluster should not be less than the RF. Run each server on a separate machine to prevent losing availability on failures.
+- An even RF number offers the same fault tolerance as its preceding odd number. For example, both RF 4 and RF 3 can only tolerate the loss of 1 node. So to keep costs low, it's preferable to use an odd RF number.
 
 Note that YugabyteDB works with both hostnames or IP addresses. The latter are preferred at this point, as they are more extensively tested.
 
@@ -53,9 +54,10 @@ You should allocate adequate CPU and RAM. YugabyteDB has adequate defaults for r
 
 **Production requirement**
 
-- 16+ cores
-- 32GB+ RAM
-- Add more CPU (compared to adding more RAM) to improve performance.
+- YCQL - 16+ cores and 32GB+ RAM
+- YSQL - 16+ cores and 64GB+ RAM
+
+Add more CPU (compared to adding more RAM) to improve performance.
 
 **Additional considerations**
 
@@ -96,21 +98,21 @@ cat /proc/cpuinfo | grep sse4.2
 
   - XFS is the recommended filesystem.
   - Use the `noatime` setting when mounting the data drives.
-  - ZFS is not currently supported. It is in the [roadmap](https://github.com/yugabyte/yugabyte-db/issues/4157).
-  - NFS is not currently supported. It is in the [roadmap](https://github.com/yugabyte/yugabyte-db/issues/4388).
+  - ZFS is not currently supported.
+  - NFS is not currently supported.
 
 YugabyteDB does not require any form of RAID, but runs optimally on a JBOD (just a bunch of disks) setup.
 YugabyteDB can also leverage multiple disks per node and has been tested beyond 10 TB of storage per node.
 
 Write-heavy applications usually require more disk IOPS (especially if the size of each record is larger), therefore in this case the total IOPS that a disk can support matters. On the read side, if the data does not fit into the cache and data needs to be read from the disk in order to satisfy queries, the disk performance (latency and IOPS) will start to matter.
 
-YugabyteDB uses per-tablet [size tiered compaction](../../architecture/concepts/yb-tserver/). Therefore the typical space amplification in YugabyteDB tends to be in the 10-20% range.
+YugabyteDB uses per-tablet [size tiered compaction](../../architecture/yb-tserver/). Therefore the typical space amplification in YugabyteDB tends to be in the 10-20% range.
 
 YugabyteDB stores data compressed by default. The effectiveness of compression depends on the data set. For example, if the data has already been compressed, then the additional compression at the storage layer of YugabyteDB will not be very effective.
 
 It is recommended to plan for about 20% headroom on each node to allow space for miscellaneous overheads such as temporary additional space needed for compactions, metadata overheads, and so on.
 
-### Network
+## Network
 
 The following is a list of default ports along with the network access required for using YugabyteDB:
 
@@ -123,15 +125,14 @@ The following is a list of default ports along with the network access required 
 
   - 7000 for viewing the YB-Master Admin UI.
 
-- To use the database from the app, the following ports need to be accessible from the app or CLI:
+- To access the database from applications or clients, the following ports need to be accessible from the applications or CLI:
 
   - 5433 for YSQL
   - 9042 for YCQL
-  - 6379 for YEDIS
 
 This deployment uses YugabyteDB [default ports](../../reference/configuration/default-ports/).
 
-Note that for YugabyteDB Anywhere, the SSH port is changed for added security.
+YugabyteDB Anywhere has its own port requirements. Refer to [Networking](../../yugabyte-platform/prepare/networking/).
 
 ## Clock synchronization
 
@@ -141,7 +142,7 @@ For YugabyteDB to preserve data consistency, the clock drift and clock skew acro
 
 Set a safe value for the maximum clock skew flag (`--max_clock_skew_usec`) for YB-TServers and YB-Masters when starting the YugabyteDB servers. The recommended value is two times the expected maximum clock skew between any two nodes in your deployment.
 
-For example, if the maximum clock skew across nodes is expected to be no more than 250 microseconds, then set the parameter to 500 microseconds (`--max_clock_skew_usec=500000`).
+For example, if the maximum clock skew across nodes is expected to be no more than 250 milliseconds, then set the parameter to 500000 (`--max_clock_skew_usec=500000`).
 
 ### Clock drift
 
@@ -159,10 +160,10 @@ YugabyteDB can run on a number of public clouds.
 
 ### Amazon Web Services (AWS)
 
-- Use the C5 or I3 instance families.
-- Recommended types are i3.4xlarge, i3.8xlarge, c5.4xlarge, and c5.8xlarge. Use the higher CPU instance types especially for large YSQL workloads.
-- For the C5 instance family, use gp3 EBS (SSD) disks that are at least 250GB in size, larger if more IOPS are needed:
-  - The number of IOPS are proportional to the size of the disk.
+- Use the M [instance family](https://aws.amazon.com/ec2/instance-types/).
+- Recommended type is M6i. Use the higher CPU instance types especially for large YSQL workloads.
+- Use gp3 EBS (SSD) disks that are at least 250GB in size, larger if more IOPS are needed.
+  - Scale up the IOPS as you scale up the size of the disk.
   - In YugabyteDB testing, gp3 EBS SSDs provide the best performance for a given cost among the various EBS disk options.
 - Avoid running on [T2 instance types](https://aws.amazon.com/ec2/instance-types/t2/). The T2 instance types are burstable instance types. Their baseline performance and ability to burst are governed by CPU credits, which makes it hard to get steady performance.
 - Use VPC peering for multi-region deployments and connectivity to S3 object stores.
@@ -171,15 +172,15 @@ YugabyteDB can run on a number of public clouds.
 
 - Use the N2 high-CPU instance family. As a second choice, the N2 standard instance family can be used.
 - Recommended instance types are `n2-highcpu-16` and `n2-highcpu-32`.
-- [Local SSDs](https://cloud.google.com/compute/docs/disks/#localssds) are the preferred storage option, as they provide improved performance over attached disks, but the data is not replicated and can be lost if the node fails. This option is ideal for databases such as YugabyteDB that manage their own replication and can guarantee high availability (HA). For more details on these tradeoffs, refer to [Local vs remote SSDs](../../deploy/kubernetes/best-practices/#local-vs-remote-ssds).
+- [Local SSDs](https://cloud.google.com/compute/docs/disks/#localssds) are the preferred storage option, as they provide improved performance over attached disks, but the data is not replicated and can be lost if the node fails. This option is ideal for databases such as YugabyteDB that manage their own replication and can guarantee high availability (HA). For more details on these tradeoffs, refer to [Local vs remote SSDs](../../deploy/kubernetes/best-practices/#local-versus-remote-ssds).
   - Each local SSD is 375 GB in size, but you can attach up to eight local SSD devices for 3 TB of total local SSD storage space per instance.
 - As a second choice, [remote persistent SSDs](https://cloud.google.com/compute/docs/disks/#pdspecs) perform well. Make sure the size of these SSDs are at least 250GB in size, larger if more IOPS are needed:
-  - The number of IOPS are proportional to the size of the disk.
+  - The number of IOPS scale automatically in proportion to the size of the disk.
 - Avoid running on f1 or g1 machine families. These are [burstable, shared core machines](https://cloud.google.com/compute/docs/machine-types#sharedcore) that may not deliver steady performance.
 
 ### Azure
 
 - Use v5 options with 16 vCPU in the Storage Optimized (preferred) or General Purpose VM types. For a busy YSQL instance, use 32 vCPU.
-- For an application that cannot tolerate P99 spikes, local SSDs (Storage Optimized instances) are the preferred option. For more details on the tradeoffs, refer to [Local vs remote SSDs](../../deploy/kubernetes/best-practices/#local-vs-remote-ssds).
+- For an application that cannot tolerate P99 spikes, local SSDs (Storage Optimized instances) are the preferred option. For more details on the tradeoffs, refer to [Local vs remote SSDs](../../deploy/kubernetes/best-practices/#local-versus-remote-ssds).
 - If local SSDs are not available, use ultra disks to eliminate expected latency on Azure premium disks. Refer to the Azure [disk recommendations](https://azure.microsoft.com/en-us/blog/azure-ultra-disk-storage-microsoft-s-service-for-your-most-i-o-demanding-workloads/) and Azure documentation on [disk types](https://docs.microsoft.com/en-us/azure/virtual-machines/disks-types) for databases.
 - Turn on Accelerated Networking, and use VNet peering for multiple VPCs and connectivity to object stores.

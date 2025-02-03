@@ -2,22 +2,38 @@
 
 package com.yugabyte.yw.controllers;
 
+import static com.yugabyte.yw.common.NodeActionType.HARD_REBOOT;
+
 import com.google.inject.Inject;
 import com.yugabyte.yw.commissioner.Commissioner;
+import com.yugabyte.yw.commissioner.Common.CloudType;
+import com.yugabyte.yw.commissioner.tasks.RebootNodeInUniverse;
 import com.yugabyte.yw.commissioner.tasks.params.DetachedNodeTaskParams;
 import com.yugabyte.yw.commissioner.tasks.params.NodeTaskParams;
 import com.yugabyte.yw.common.ApiResponse;
+import com.yugabyte.yw.common.CustomerTaskManager;
+import com.yugabyte.yw.common.KubernetesManagerFactory;
+import com.yugabyte.yw.common.KubernetesUtil;
 import com.yugabyte.yw.common.NodeActionType;
+import com.yugabyte.yw.common.PlacementInfoUtil;
 import com.yugabyte.yw.common.PlatformServiceException;
+import com.yugabyte.yw.common.Util;
+import com.yugabyte.yw.common.backuprestore.ybc.YbcManager;
+import com.yugabyte.yw.common.rbac.PermissionInfo.Action;
+import com.yugabyte.yw.common.rbac.PermissionInfo.ResourceType;
 import com.yugabyte.yw.controllers.JWTVerifier.ClientType;
 import com.yugabyte.yw.controllers.handlers.NodeAgentHandler;
+import com.yugabyte.yw.controllers.handlers.NodeInstanceHandler;
 import com.yugabyte.yw.forms.NodeActionFormData;
 import com.yugabyte.yw.forms.NodeDetailsResp;
 import com.yugabyte.yw.forms.NodeInstanceFormData;
 import com.yugabyte.yw.forms.NodeInstanceFormData.NodeInstanceData;
+import com.yugabyte.yw.forms.NodeInstanceStateFormData;
 import com.yugabyte.yw.forms.PlatformResults;
 import com.yugabyte.yw.forms.PlatformResults.YBPSuccess;
 import com.yugabyte.yw.forms.PlatformResults.YBPTask;
+import com.yugabyte.yw.forms.UniverseDefinitionTaskParams.Cluster;
+import com.yugabyte.yw.forms.UniverseDefinitionTaskParams.ClusterType;
 import com.yugabyte.yw.models.Audit;
 import com.yugabyte.yw.models.AvailabilityZone;
 import com.yugabyte.yw.models.CertificateInfo;
@@ -28,10 +44,17 @@ import com.yugabyte.yw.models.NodeAgent.State;
 import com.yugabyte.yw.models.NodeInstance;
 import com.yugabyte.yw.models.Provider;
 import com.yugabyte.yw.models.Universe;
+import com.yugabyte.yw.models.common.YbaApi;
 import com.yugabyte.yw.models.helpers.AllowedActionsHelper;
+import com.yugabyte.yw.models.helpers.CommonUtils;
 import com.yugabyte.yw.models.helpers.NodeConfig.ValidationResult;
 import com.yugabyte.yw.models.helpers.NodeConfigValidator;
 import com.yugabyte.yw.models.helpers.NodeDetails;
+import com.yugabyte.yw.rbac.annotations.AuthzPath;
+import com.yugabyte.yw.rbac.annotations.PermissionAttribute;
+import com.yugabyte.yw.rbac.annotations.RequiredPermissionOnResource;
+import com.yugabyte.yw.rbac.annotations.Resource;
+import com.yugabyte.yw.rbac.enums.SourceType;
 import io.swagger.annotations.Api;
 import io.swagger.annotations.ApiImplicitParam;
 import io.swagger.annotations.ApiImplicitParams;
@@ -46,8 +69,8 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.stream.Collectors;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.commons.collections.CollectionUtils;
-import play.libs.Json;
+import org.apache.commons.collections4.CollectionUtils;
+import play.mvc.Http;
 import play.mvc.Result;
 import play.mvc.Results;
 
@@ -63,6 +86,17 @@ public class NodeInstanceController extends AuthenticatedController {
 
   @Inject NodeConfigValidator nodeConfigValidator;
 
+  @Inject private KubernetesManagerFactory kubernetesManagerFactory;
+
+  private NodeInstanceHandler nodeInstanceHandler;
+  private YbcManager ybcManager;
+
+  @Inject
+  public NodeInstanceController(NodeInstanceHandler nodeInstanceHandler, YbcManager ybcManager) {
+    this.nodeInstanceHandler = nodeInstanceHandler;
+    this.ybcManager = ybcManager;
+  }
+
   /**
    * GET endpoint for Node data
    *
@@ -74,6 +108,12 @@ public class NodeInstanceController extends AuthenticatedController {
       value = "Get a node instance",
       response = NodeInstance.class,
       nickname = "getNodeInstance")
+  @AuthzPath({
+    @RequiredPermissionOnResource(
+        requiredPermission =
+            @PermissionAttribute(resourceType = ResourceType.OTHER, action = Action.READ),
+        resourceLocation = @Resource(path = Util.CUSTOMERS, sourceType = SourceType.ENDPOINT))
+  })
   public Result get(UUID customerUuid, UUID nodeUuid) {
     Customer.getOrBadRequest(customerUuid);
     NodeInstance node = NodeInstance.getOrBadRequest(nodeUuid);
@@ -92,12 +132,77 @@ public class NodeInstanceController extends AuthenticatedController {
       value = "Get node details",
       response = NodeDetailsResp.class,
       nickname = "getNodeDetails")
+  @AuthzPath({
+    @RequiredPermissionOnResource(
+        requiredPermission =
+            @PermissionAttribute(resourceType = ResourceType.UNIVERSE, action = Action.READ),
+        resourceLocation = @Resource(path = Util.UNIVERSES, sourceType = SourceType.ENDPOINT))
+  })
   public Result getNodeDetails(UUID customerUUID, UUID universeUUID, String nodeName) {
-    Customer.getOrBadRequest(customerUUID);
-    Universe universe = Universe.getOrBadRequest(universeUUID);
+    Customer customer = Customer.getOrBadRequest(customerUUID);
+    Universe universe = Universe.getOrBadRequest(universeUUID, customer);
     NodeDetails detail = universe.getNode(nodeName);
-    NodeDetailsResp resp = new NodeDetailsResp(detail, universe);
+    String helmValues = "";
+    if (universe.getUniverseDetails().getPrimaryCluster().userIntent.providerType
+        == CloudType.kubernetes) {
+      // Return helm values for the corresponding node also for k8s universes.
+      helmValues = getAZHelmValues(universe, nodeName);
+    }
+    NodeDetailsResp resp = new NodeDetailsResp(detail, universe, helmValues);
     return PlatformResults.withData(resp);
+  }
+
+  // Returns the helm values for the release the nodeName is present in.
+  private String getAZHelmValues(Universe universe, String nodeName) {
+    // From nodedetails, nodeName get cluster.
+    // From nodedetails get AZ name/code.
+    // From provider get if it is multi az.
+    // Get provider, azName get AZ config.
+    // Get helm release name, namespace name and call helm get values.
+    try {
+      NodeDetails nodeDetails = universe.getNodeOrBadRequest(nodeName);
+      UUID clusterUUID = nodeDetails.placementUuid;
+      Cluster cluster = universe.getCluster(clusterUUID);
+      boolean isReadOnlyCluster = cluster.clusterType == ClusterType.ASYNC;
+      if (nodeDetails.cloudInfo == null) {
+        log.error(
+            String.format("Cloudinfo for node %s is null. Nodedetails: %s", nodeName, nodeDetails));
+        throw new PlatformServiceException(
+            INTERNAL_SERVER_ERROR,
+            String.format("Failed to get information about node %s.", nodeName));
+      }
+      String azName = nodeDetails.cloudInfo.az;
+      Provider provider = Provider.getOrBadRequest(UUID.fromString(cluster.userIntent.provider));
+      boolean isMultiAz = PlacementInfoUtil.isMultiAZ(provider);
+      // Get AZ uuid
+      Map<String, String> azConfig = AvailabilityZone.getByCode(provider, azName).getConfig();
+      String helmReleaseName =
+          KubernetesUtil.getHelmReleaseName(
+              isMultiAz,
+              universe.getUniverseDetails().nodePrefix,
+              universe.getName(),
+              azName,
+              isReadOnlyCluster,
+              universe.getUniverseDetails().useNewHelmNamingStyle);
+      String namespace =
+          KubernetesUtil.getKubernetesNamespace(
+              universe.getUniverseDetails().nodePrefix,
+              azName,
+              azConfig,
+              universe.getUniverseDetails().useNewHelmNamingStyle,
+              isReadOnlyCluster);
+      return kubernetesManagerFactory
+          .getManager()
+          .getOverridenHelmReleaseValues(namespace, helmReleaseName, azConfig);
+    } catch (Exception e) {
+      log.error(
+          String.format(
+              "Exception in getting helm values for universe: %s with node: %s exception: %s",
+              universe.getUniverseUUID(), nodeName, e.getMessage()),
+          e);
+      // Swallow the exception so that user can see other node details.
+      return "";
+    }
   }
 
   /**
@@ -111,6 +216,12 @@ public class NodeInstanceController extends AuthenticatedController {
       value = "List all of a zone's node instances",
       response = NodeInstance.class,
       responseContainer = "List")
+  @AuthzPath({
+    @RequiredPermissionOnResource(
+        requiredPermission =
+            @PermissionAttribute(resourceType = ResourceType.OTHER, action = Action.READ),
+        resourceLocation = @Resource(path = Util.CUSTOMERS, sourceType = SourceType.ENDPOINT))
+  })
   public Result listByZone(UUID customerUuid, UUID zoneUuid) {
     Customer.getOrBadRequest(customerUuid);
     AvailabilityZone.getOrBadRequest(zoneUuid);
@@ -127,6 +238,12 @@ public class NodeInstanceController extends AuthenticatedController {
       value = "List all of a provider's node instances",
       response = NodeInstance.class,
       responseContainer = "List")
+  @AuthzPath({
+    @RequiredPermissionOnResource(
+        requiredPermission =
+            @PermissionAttribute(resourceType = ResourceType.OTHER, action = Action.READ),
+        resourceLocation = @Resource(path = Util.CUSTOMERS, sourceType = SourceType.ENDPOINT))
+  })
   public Result listByProvider(UUID customerUUID, UUID providerUUID) {
     List<NodeInstance> regionList;
     try {
@@ -155,12 +272,18 @@ public class NodeInstanceController extends AuthenticatedController {
       required = true,
       dataType = "com.yugabyte.yw.forms.NodeInstanceFormData.NodeInstanceData",
       paramType = "body")
-  public Result validate(UUID customerUuid, UUID zoneUuid) {
-    NodeInstanceData nodeData = parseJsonAndValidate(NodeInstanceData.class);
+  @AuthzPath({
+    @RequiredPermissionOnResource(
+        requiredPermission =
+            @PermissionAttribute(resourceType = ResourceType.OTHER, action = Action.UPDATE),
+        resourceLocation = @Resource(path = Util.CUSTOMERS, sourceType = SourceType.ENDPOINT))
+  })
+  public Result validate(UUID customerUuid, UUID zoneUuid, Http.Request request) {
+    NodeInstanceData nodeData = parseJsonAndValidate(request, NodeInstanceData.class);
     Customer.getOrBadRequest(customerUuid);
     AvailabilityZone az = AvailabilityZone.getOrBadRequest(zoneUuid);
     return PlatformResults.withData(
-        nodeConfigValidator.validateNodeConfigs(az.getProvider(), nodeData));
+        nodeConfigValidator.validateNodeConfigs(az.getProvider(), nodeData, true));
   }
 
   /**
@@ -183,10 +306,17 @@ public class NodeInstanceController extends AuthenticatedController {
         dataType = "com.yugabyte.yw.forms.NodeInstanceFormData",
         paramType = "body")
   })
-  public Result create(UUID customerUuid, UUID zoneUuid) {
+  @AuthzPath({
+    @RequiredPermissionOnResource(
+        requiredPermission =
+            @PermissionAttribute(resourceType = ResourceType.OTHER, action = Action.CREATE),
+        resourceLocation = @Resource(path = Util.CUSTOMERS, sourceType = SourceType.ENDPOINT))
+  })
+  public Result create(UUID customerUuid, UUID zoneUuid, Http.Request request) {
     Customer.getOrBadRequest(customerUuid);
     AvailabilityZone az = AvailabilityZone.getOrBadRequest(zoneUuid);
-    NodeInstanceFormData nodeInstanceFormData = parseJsonAndValidate(NodeInstanceFormData.class);
+    NodeInstanceFormData nodeInstanceFormData =
+        parseJsonAndValidate(request, NodeInstanceFormData.class);
     List<NodeInstanceData> nodeDataList = nodeInstanceFormData.nodes;
     Optional<ClientType> clientTypeOp = maybeGetJWTClientType();
     List<String> createdNodeUuids = new ArrayList<String>();
@@ -196,12 +326,9 @@ public class NodeInstanceController extends AuthenticatedController {
       if (!NodeInstance.checkIpInUse(nodeData.ip)) {
         if (clientTypeOp.isPresent() && clientTypeOp.get() == ClientType.NODE_AGENT) {
           NodeAgent nodeAgent = NodeAgent.getOrBadRequest(customerUuid, getJWTClientUuid());
-          nodeAgent.ensureState(State.LIVE);
+          nodeAgent.ensureState(State.READY);
           List<ValidationResult> failedResults =
-              nodeConfigValidator
-                  .validateNodeConfigs(provider, nodeData)
-                  .values()
-                  .stream()
+              nodeConfigValidator.validateNodeConfigs(provider, nodeData, true).values().stream()
                   .filter(r -> r.isRequired())
                   .filter(r -> !r.isValid())
                   .collect(Collectors.toList());
@@ -219,11 +346,10 @@ public class NodeInstanceController extends AuthenticatedController {
     if (nodes.size() > 0) {
       auditService()
           .createAuditEntryWithReqBody(
-              ctx(),
+              request,
               Audit.TargetType.NodeInstance,
               createdNodeUuids.toString(),
-              Audit.ActionType.Create,
-              Json.toJson(nodeInstanceFormData));
+              Audit.ActionType.Create);
       return PlatformResults.withData(nodes);
     }
     throw new PlatformServiceException(
@@ -231,24 +357,40 @@ public class NodeInstanceController extends AuthenticatedController {
   }
 
   @ApiOperation(value = "Detached node action", response = YBPTask.class)
-  public Result detachedNodeAction(UUID customerUUID, UUID providerUUID, String instanceIP) {
+  @ApiImplicitParams({
+    @ApiImplicitParam(
+        name = "Node action",
+        value = "Node action data to be updated",
+        required = true,
+        dataType = "com.yugabyte.yw.forms.NodeActionFormData",
+        paramType = "body")
+  })
+  @AuthzPath({
+    @RequiredPermissionOnResource(
+        requiredPermission =
+            @PermissionAttribute(resourceType = ResourceType.OTHER, action = Action.UPDATE),
+        resourceLocation = @Resource(path = Util.CUSTOMERS, sourceType = SourceType.ENDPOINT))
+  })
+  public Result detachedNodeAction(
+      UUID customerUUID, UUID providerUUID, String instanceIP, Http.Request request) {
     // Validate customer UUID and universe UUID and AWS provider.
     Customer customer = Customer.getOrBadRequest(customerUUID);
     Provider provider = Provider.getOrBadRequest(providerUUID);
     NodeInstance node = findNodeOrThrow(provider, instanceIP);
-    NodeActionFormData nodeActionFormData = parseJsonAndValidate(NodeActionFormData.class);
+    NodeActionFormData nodeActionFormData = parseJsonAndValidate(request, NodeActionFormData.class);
     NodeActionType nodeAction = nodeActionFormData.getNodeAction();
     if (!nodeAction.isForDetached()) {
       throw new PlatformServiceException(
           BAD_REQUEST, "Should provide only detached node action, but found " + nodeAction);
     }
-    if (nodeAction == NodeActionType.PRECHECK_DETACHED && node.isInUse()) {
+    if (nodeAction == NodeActionType.PRECHECK_DETACHED
+        && node.getState().equals(NodeInstance.State.USED)) {
       return Results.status(OK); // Skip checks for node in use
     }
     List<CustomerTask> running = CustomerTask.findIncompleteByTargetUUID(node.getNodeUuid());
     if (!running.isEmpty()) {
       throw new PlatformServiceException(
-          BAD_REQUEST, "Node " + node.getNodeUuid() + " has incomplete tasks");
+          CONFLICT, "Node " + node.getNodeUuid() + " has incomplete tasks");
     }
     DetachedNodeTaskParams taskParams = new DetachedNodeTaskParams();
     taskParams.setNodeUuid(node.getNodeUuid());
@@ -266,26 +408,39 @@ public class NodeInstanceController extends AuthenticatedController {
 
     auditService()
         .createAuditEntryWithReqBody(
-            ctx(),
+            request,
             Audit.TargetType.NodeInstance,
             Objects.toString(node.getNodeUuid(), null),
             Audit.ActionType.Create,
-            Json.toJson(nodeActionFormData),
             taskUUID);
     return new YBPTask(taskUUID).asResult();
   }
 
   @ApiOperation(value = "Delete a node instance", response = YBPSuccess.class)
-  public Result deleteInstance(UUID customerUUID, UUID providerUUID, String instanceIP) {
+  @AuthzPath({
+    @RequiredPermissionOnResource(
+        requiredPermission =
+            @PermissionAttribute(resourceType = ResourceType.OTHER, action = Action.DELETE),
+        resourceLocation = @Resource(path = Util.CUSTOMERS, sourceType = SourceType.ENDPOINT))
+  })
+  public Result deleteInstance(
+      UUID customerUUID, UUID providerUUID, String instanceIP, Http.Request request) {
     Customer.getOrBadRequest(customerUUID);
     Provider provider = Provider.getOrBadRequest(providerUUID);
     NodeInstance nodeToBeFound = findNodeOrThrow(provider, instanceIP);
-    if (nodeToBeFound.isInUse()) {
+    if (nodeToBeFound.isUsed()) {
       throw new PlatformServiceException(BAD_REQUEST, "Node is in use");
     }
+
+    List<CustomerTask> running =
+        CustomerTask.findIncompleteByTargetUUID(nodeToBeFound.getNodeUuid());
+    if (!running.isEmpty()) {
+      throw new PlatformServiceException(
+          CONFLICT, "Node " + nodeToBeFound.getNodeUuid() + " has incomplete tasks");
+    }
     auditService()
-        .createAuditEntryWithReqBody(
-            ctx(),
+        .createAuditEntry(
+            request,
             Audit.TargetType.NodeInstance,
             Objects.toString(nodeToBeFound.getNodeUuid(), null),
             Audit.ActionType.Delete);
@@ -293,20 +448,29 @@ public class NodeInstanceController extends AuthenticatedController {
     return YBPSuccess.empty();
   }
 
-  @ApiOperation(value = "Update a node", response = YBPTask.class)
+  @ApiOperation(
+      value = "Perform the specified action on the universe node",
+      response = YBPTask.class)
   @ApiImplicitParams({
     @ApiImplicitParam(
         name = "Node action",
-        value = "Node action data to be updated",
+        value = "Details of the node action to be performed",
         required = true,
         dataType = "com.yugabyte.yw.forms.NodeActionFormData",
         paramType = "body")
   })
-  public Result nodeAction(UUID customerUUID, UUID universeUUID, String nodeName) {
+  @AuthzPath({
+    @RequiredPermissionOnResource(
+        requiredPermission =
+            @PermissionAttribute(resourceType = ResourceType.UNIVERSE, action = Action.UPDATE),
+        resourceLocation = @Resource(path = Util.UNIVERSES, sourceType = SourceType.ENDPOINT))
+  })
+  public Result nodeAction(
+      UUID customerUUID, UUID universeUUID, String nodeName, Http.Request request) {
     Customer customer = Customer.getOrBadRequest(customerUUID);
-    Universe universe = Universe.getOrBadRequest(universeUUID);
+    Universe universe = Universe.getOrBadRequest(universeUUID, customer);
     universe.getNodeOrBadRequest(nodeName);
-    NodeActionFormData nodeActionFormData = parseJsonAndValidate(NodeActionFormData.class);
+    NodeActionFormData nodeActionFormData = parseJsonAndValidate(request, NodeActionFormData.class);
 
     if (!universe.getUniverseDetails().isUniverseEditable()) {
       String errMsg = "Node actions cannot be performed on universe UUID " + universeUUID;
@@ -314,42 +478,51 @@ public class NodeInstanceController extends AuthenticatedController {
       return ApiResponse.error(BAD_REQUEST, errMsg);
     }
 
-    NodeTaskParams taskParams = new NodeTaskParams();
-    taskParams.universeUUID = universe.universeUUID;
-    taskParams.expectedUniverseVersion = universe.version;
-    taskParams.nodeName = nodeName;
-    taskParams.useSystemd = universe.getUniverseDetails().getPrimaryCluster().userIntent.useSystemd;
-    if (universe.isYbcEnabled()) {
-      taskParams.installYbc = true;
-      taskParams.enableYbc = true;
-      taskParams.ybcSoftwareVersion = universe.getUniverseDetails().ybcSoftwareVersion;
-      taskParams.ybcInstalled = true;
-    }
     NodeActionType nodeAction = nodeActionFormData.getNodeAction();
+    boolean force = nodeActionFormData.isForce();
+    NodeTaskParams taskParams = new NodeTaskParams();
+
+    if (nodeAction == NodeActionType.REBOOT || nodeAction == HARD_REBOOT) {
+      RebootNodeInUniverse.Params params =
+          UniverseControllerRequestBinder.deepCopy(
+              universe.getUniverseDetails(), RebootNodeInUniverse.Params.class);
+      params.isHardReboot = nodeAction == HARD_REBOOT;
+      params.skipWaitingForMasterLeader = force;
+      taskParams = params;
+    } else {
+      taskParams =
+          UniverseControllerRequestBinder.deepCopy(
+              universe.getUniverseDetails(), NodeTaskParams.class);
+    }
+
+    taskParams.nodeName = nodeName;
+    taskParams.creatingUser = CommonUtils.getUserFromContext();
+    if (universe.isYbcEnabled()) {
+      taskParams.setYbcSoftwareVersion(ybcManager.getStableYbcVersion());
+    }
 
     // Check deleting/removing a node will not go below the RF
     // TODO: Always check this for all actions?? For now leaving it as is since it breaks many tests
-    if (nodeAction == NodeActionType.STOP
-        || nodeAction == NodeActionType.REMOVE
-        || nodeAction == NodeActionType.DELETE
-        || nodeAction == NodeActionType.REBOOT) {
-      // Always check this?? For now leaving it as is since it breaks many tests
+    if ((nodeAction == NodeActionType.STOP
+            || nodeAction == NodeActionType.REMOVE
+            || nodeAction == NodeActionType.DELETE
+            || nodeAction == NodeActionType.REBOOT
+            || nodeAction == NodeActionType.HARD_REBOOT
+            || nodeAction == NodeActionType.DECOMMISSION)
+        && !force) {
       new AllowedActionsHelper(universe, universe.getNode(nodeName))
           .allowedOrBadRequest(nodeAction);
     }
-    taskParams.clusters = universe.getUniverseDetails().clusters;
     if (nodeAction == NodeActionType.ADD
         || nodeAction == NodeActionType.START
         || nodeAction == NodeActionType.START_MASTER
-        || nodeAction == NodeActionType.STOP) {
-      taskParams.rootCA = universe.getUniverseDetails().rootCA;
-      taskParams.clientRootCA = universe.getUniverseDetails().clientRootCA;
-      taskParams.rootAndClientRootCASame = universe.getUniverseDetails().rootAndClientRootCASame;
+        || nodeAction == NodeActionType.STOP
+        || nodeAction == NodeActionType.REPLACE) {
       if (!CertificateInfo.isCertificateValid(taskParams.rootCA)) {
         String errMsg =
             String.format(
-                "The certificate %s needs info. Update the cert" + " and retry.",
-                CertificateInfo.get(taskParams.rootCA).label);
+                "The certificate %s needs info. Update the cert and retry.",
+                CertificateInfo.get(taskParams.rootCA).getLabel());
         log.error(errMsg);
         throw new PlatformServiceException(BAD_REQUEST, errMsg);
       }
@@ -365,41 +538,81 @@ public class NodeInstanceController extends AuthenticatedController {
         "{} Node {} in universe={}: name={} at version={}.",
         nodeAction.toString(false),
         nodeName,
-        universe.universeUUID,
-        universe.name,
-        universe.version);
+        universe.getUniverseUUID(),
+        universe.getName(),
+        universe.getVersion());
 
     UUID taskUUID = commissioner.submit(nodeAction.getCommissionerTask(), taskParams);
     CustomerTask.create(
         customer,
-        universe.universeUUID,
+        universe.getUniverseUUID(),
         taskUUID,
         CustomerTask.TargetType.Node,
         nodeAction.getCustomerTask(),
-        nodeName);
+        nodeName,
+        CustomerTaskManager.getCustomTaskName(nodeAction.getCustomerTask(), taskParams, null));
     log.info(
         "Saved task uuid {} in customer tasks table for universe {} : {} for node {}",
         taskUUID,
-        universe.universeUUID,
-        universe.name,
+        universe.getUniverseUUID(),
+        universe.getName(),
         nodeName);
     auditService()
         .createAuditEntryWithReqBody(
-            ctx(),
+            request, Audit.TargetType.NodeInstance, nodeName, Audit.ActionType.Update, taskUUID);
+    return new YBPTask(taskUUID).asResult();
+  }
+
+  @ApiOperation(
+      notes = "WARNING: This is a preview API that could change.",
+      value = "Update node instance state",
+      response = YBPTask.class)
+  @ApiImplicitParams({
+    @ApiImplicitParam(
+        name = "NodeInstanceStateFormData",
+        value = "Resultant node instance state to transition to",
+        required = true,
+        dataType = "com.yugabyte.yw.forms.NodeInstanceStateFormData",
+        paramType = "body")
+  })
+  @AuthzPath({
+    @RequiredPermissionOnResource(
+        requiredPermission =
+            @PermissionAttribute(resourceType = ResourceType.OTHER, action = Action.UPDATE),
+        resourceLocation = @Resource(path = Util.CUSTOMERS, sourceType = SourceType.ENDPOINT))
+  })
+  @YbaApi(visibility = YbaApi.YbaApiVisibility.PREVIEW, sinceYBAVersion = "2024.1.0.0")
+  public Result updateState(
+      UUID customerUUID, UUID providerUUID, String instanceIP, Http.Request request) {
+    Customer c = Customer.getOrBadRequest(customerUUID);
+    Provider provider = Provider.getOrBadRequest(customerUUID, providerUUID);
+    NodeInstance node = findNodeOrThrow(provider, instanceIP);
+    NodeInstanceStateFormData payload =
+        parseJsonAndValidate(request, NodeInstanceStateFormData.class);
+
+    List<CustomerTask> running = CustomerTask.findIncompleteByTargetUUID(node.getNodeUuid());
+    if (!running.isEmpty()) {
+      throw new PlatformServiceException(
+          CONFLICT, "Node " + node.getNodeUuid() + " has incomplete tasks");
+    }
+    UUID taskUUID = nodeInstanceHandler.updateState(payload, node, provider, c);
+
+    auditService()
+        .createAuditEntryWithReqBody(
+            request,
             Audit.TargetType.NodeInstance,
-            nodeName,
+            Objects.toString(node.getNodeUuid(), null),
             Audit.ActionType.Update,
-            Json.toJson(nodeActionFormData),
             taskUUID);
+
     return new YBPTask(taskUUID).asResult();
   }
 
   private NodeInstance findNodeOrThrow(Provider provider, String instanceIP) {
-    List<NodeInstance> nodesInProvider = NodeInstance.listByProvider(provider.uuid);
+    List<NodeInstance> nodesInProvider = NodeInstance.listByProvider(provider.getUuid());
     // TODO: Need to convert routes to use UUID instead of instances' IP address
     // See: https://github.com/yugabyte/yugabyte-db/issues/7936
-    return nodesInProvider
-        .stream()
+    return nodesInProvider.stream()
         .filter(node -> node.getDetails().ip.equals(instanceIP))
         .findFirst()
         .orElseThrow(() -> new PlatformServiceException(BAD_REQUEST, "Node Not Found"));

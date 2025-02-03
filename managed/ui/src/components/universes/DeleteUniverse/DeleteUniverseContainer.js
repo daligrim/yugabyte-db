@@ -13,25 +13,27 @@ import {
   resetUniverseInfo,
   fetchUniverseMetadata
 } from '../../../actions/universe';
+import { createErrorMessage } from '../../../utils/ObjectUtils';
 
 const mapDispatchToProps = (dispatch) => {
   return {
     submitDeleteUniverse: (uuid, isForceDelete, isDeleteBackups) => {
       dispatch(deleteUniverse(uuid, isForceDelete, isDeleteBackups)).then((response) => {
-        dispatch(deleteUniverseResponse(response.payload));
+        if (response.error) {
+          if (response.payload.status !== 200) {
+            toast.error(createErrorMessage(response.payload));
+          }
+        } else {
+          dispatch(deleteUniverseResponse(response.payload));
+        }
       });
     },
     submitDeleteReadReplica: (clusterUUID, universeUUID, isForceDelete) => {
       dispatch(deleteUniverseReadReplica(clusterUUID, universeUUID, isForceDelete)).then(
         (response) => {
           dispatch(deleteUniverseReadReplicaResponse(response.payload));
-          toast.success('Deletion is in progress')
-          if(response.payload?.data?.taskUUID){
-            browserHistory.push(`/tasks/${response.payload?.data.taskUUID}`);
-          }
-          else{
-            browserHistory.push(`/universes/${universeUUID}`);
-          }
+          toast.success('Deletion is in progress');
+          browserHistory.push(`/universes/${universeUUID}/tasks`);
         }
       );
     },

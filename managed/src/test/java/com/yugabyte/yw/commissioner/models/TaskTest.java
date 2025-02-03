@@ -23,13 +23,13 @@ public class TaskTest extends FakeDBApplication {
   @Test
   public void testCreateAndUpdate() {
     // Create the task and save it.
-    TaskInfo taskInfo = new TaskInfo(TaskType.CreateUniverse);
+    TaskInfo taskInfo = new TaskInfo(TaskType.CreateUniverse, null);
     // Set the task details.
     Map<String, String> details = new HashMap<String, String>();
     details.put("description", "Test task");
     details.put("key1", "val1");
     details.put("key2", "val2");
-    taskInfo.setTaskDetails(Json.toJson(details));
+    taskInfo.setTaskParams(Json.toJson(details));
     // Set the owner info.
     String hostname = "";
     try {
@@ -42,11 +42,11 @@ public class TaskTest extends FakeDBApplication {
     taskInfo.save();
 
     // Check the various fields.
-    assertNotNull(taskInfo.getTaskUUID());
+    assertNotNull(taskInfo.getUuid());
     assertEquals(taskInfo.getTaskType(), TaskType.CreateUniverse);
-    assertNotNull(taskInfo.getCreationTime());
-    assertNotNull(taskInfo.getLastUpdateTime());
-    assertEquals(taskInfo.getLastUpdateTime(), taskInfo.getCreationTime());
+    assertNotNull(taskInfo.getCreateTime());
+    assertNotNull(taskInfo.getUpdateTime());
+    assertEquals(taskInfo.getUpdateTime(), taskInfo.getCreateTime());
 
     // Sleep so that the last updated time will be different.
     try {
@@ -57,6 +57,6 @@ public class TaskTest extends FakeDBApplication {
     // Update the task, make sure its last update time is changed.
     taskInfo.markAsDirty();
     taskInfo.save();
-    assertNotEquals(taskInfo.getLastUpdateTime(), taskInfo.getCreationTime());
+    assertNotEquals(taskInfo.getUpdateTime(), taskInfo.getCreateTime());
   }
 }

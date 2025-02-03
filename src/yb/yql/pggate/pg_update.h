@@ -12,36 +12,33 @@
 // under the License.
 //--------------------------------------------------------------------------------------------------
 
-#ifndef YB_YQL_PGGATE_PG_UPDATE_H_
-#define YB_YQL_PGGATE_PG_UPDATE_H_
+#pragma once
 
-#include "yb/yql/pggate/pg_session.h"
+#include <memory>
+
+#include "yb/util/result.h"
+
 #include "yb/yql/pggate/pg_dml_write.h"
 
-namespace yb {
-namespace pggate {
+namespace yb::pggate {
 
-//--------------------------------------------------------------------------------------------------
-// UPDATE
-//--------------------------------------------------------------------------------------------------
-
-class PgUpdate : public PgDmlWrite {
+class PgUpdate final : public PgStatementLeafBase<PgDmlWrite, StmtOp::kUpdate> {
  public:
-  PgUpdate(PgSession::ScopedRefPtr pg_session,
-           const PgObjectId& table_id,
-           bool is_single_row_txn,
-           bool is_region_local)
-      : PgDmlWrite(std::move(pg_session), table_id, is_single_row_txn, is_region_local) {}
-
-  StmtOp stmt_op() const override { return StmtOp::STMT_UPDATE; }
+  static Result<std::unique_ptr<PgUpdate>> Make(
+      const PgSession::ScopedRefPtr& pg_session, const PgObjectId& table_id, bool is_region_local,
+      YbcPgTransactionSetting transaction_setting) {
+    std::unique_ptr<PgUpdate> result{new PgUpdate{pg_session, transaction_setting}};
+    RETURN_NOT_OK(result->Prepare(table_id, is_region_local));
+    return result;
+  }
 
  private:
+  PgUpdate(const PgSession::ScopedRefPtr& pg_session, YbcPgTransactionSetting transaction_setting)
+      : BaseType(pg_session, transaction_setting) {}
+
   PgsqlWriteRequestPB::PgsqlStmtType stmt_type() const override {
     return PgsqlWriteRequestPB::PGSQL_UPDATE;
   }
 };
 
-}  // namespace pggate
-}  // namespace yb
-
-#endif // YB_YQL_PGGATE_PG_UPDATE_H_
+}  // namespace yb::pggate

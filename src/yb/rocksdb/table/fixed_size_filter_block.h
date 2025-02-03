@@ -11,8 +11,7 @@
 // under the License.
 //
 
-#ifndef YB_ROCKSDB_TABLE_FIXED_SIZE_FILTER_BLOCK_H
-#define YB_ROCKSDB_TABLE_FIXED_SIZE_FILTER_BLOCK_H
+#pragma once
 
 #include <stddef.h>
 #include <stdint.h>
@@ -89,11 +88,9 @@ class FixedSizeFilterBlockReader : public FilterBlockReader {
   FixedSizeFilterBlockReader(const FixedSizeFilterBlockReader&) = delete;
   void operator=(const FixedSizeFilterBlockReader&) = delete;
 
-  virtual bool KeyMayMatch(const Slice& key,
-                           uint64_t block_offset = 0) override;
-  virtual bool PrefixMayMatch(const Slice& prefix,
-                              uint64_t block_offset = 0) override;
-  virtual size_t ApproximateMemoryUsage() const override;
+  bool KeyMayMatch(Slice key, uint64_t block_offset = 0) override;
+  bool PrefixMayMatch(const Slice& prefix, uint64_t block_offset = 0) override;
+  size_t ApproximateMemoryUsage() const override;
 
   // convert this object to a human readable form
   std::string ToString() const override;
@@ -107,9 +104,7 @@ class FixedSizeFilterBlockReader : public FilterBlockReader {
 
   // Checks whether entry is present in filter. Entry could be any binary data, but used here for
   // either key or key prefix when calling from corresponding public methods.
-  bool MayMatch(const Slice& entry);
+  bool MayMatch(Slice entry);
 
 };
 }  // namespace rocksdb
-
-#endif // YB_ROCKSDB_TABLE_FIXED_SIZE_FILTER_BLOCK_H

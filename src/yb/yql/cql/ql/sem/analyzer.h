@@ -15,8 +15,7 @@
 // Entry point for the semantic analytical process.
 //--------------------------------------------------------------------------------------------------
 
-#ifndef YB_YQL_CQL_QL_SEM_ANALYZER_H_
-#define YB_YQL_CQL_QL_SEM_ANALYZER_H_
+#pragma once
 
 #include "yb/yql/cql/ql/ptree/ptree_fwd.h"
 #include "yb/yql/cql/ql/util/util_fwd.h"
@@ -25,6 +24,8 @@
 
 namespace yb {
 namespace ql {
+
+class QLMetrics;
 
 //--------------------------------------------------------------------------------------------------
 
@@ -42,7 +43,7 @@ class Analyzer {
 
   // Run semantics analysis on the given parse tree and decorate it with semantics information such
   // as datatype or object-type of a database object.
-  Status Analyze(ParseTreePtr ptree);
+  Status Analyze(ParseTreePtr ptree, const QLMetrics *ql_metrics);
 
   // Returns decorated parse tree from the semantic analysis and destroys the context.
   ParseTreePtr Done();
@@ -59,5 +60,3 @@ class Analyzer {
 
 }  // namespace ql
 }  // namespace yb
-
-#endif  // YB_YQL_CQL_QL_SEM_ANALYZER_H_

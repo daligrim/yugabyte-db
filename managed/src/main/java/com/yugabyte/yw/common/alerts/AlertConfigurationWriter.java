@@ -13,6 +13,7 @@ package com.yugabyte.yw.common.alerts;
 import static com.yugabyte.yw.common.metrics.MetricService.buildMetricTemplate;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.yugabyte.operator.OperatorConfig;
 import com.yugabyte.yw.common.PlatformScheduler;
 import com.yugabyte.yw.common.SwamperHelper;
 import com.yugabyte.yw.common.config.RuntimeConfigFactory;
@@ -96,6 +97,13 @@ public class AlertConfigurationWriter {
   }
 
   public void start() {
+    boolean COMMUNITY_OP_ENABLED = OperatorConfig.getOssMode();
+
+    if (COMMUNITY_OP_ENABLED) {
+      log.debug("Skipping metrics as community edition is enabled");
+      return;
+    }
+
     int configSyncPeriodSec = configFactory.globalRuntimeConf().getInt(CONFIG_SYNC_INTERVAL_PARAM);
     if (configSyncPeriodSec < MIN_CONFIG_SYNC_INTERVAL_SEC) {
       log.warn(
@@ -125,6 +133,11 @@ public class AlertConfigurationWriter {
           || !configuration.isActive()) {
         swamperHelper.removeAlertDefinition(definitionUuid);
         requiresReload.set(true);
+        if (definition != null) {
+          // Don't want to retry inactive definitions.
+          definition.setConfigWritten(true);
+          alertDefinitionService.save(definition);
+        }
         return SyncResult.REMOVED;
       }
       if (definition.isConfigWritten()) {
@@ -162,17 +175,13 @@ public class AlertConfigurationWriter {
       Map<UUID, Set<UUID>> maintenanceWindowToAlertConfigs = new HashMap<>();
       for (MaintenanceWindow window : activeWindows) {
         AlertConfigurationFilter alertConfigurationFilter =
-            window
-                .getAlertConfigurationFilter()
-                .toFilter()
-                .toBuilder()
+            window.getAlertConfigurationFilter().toFilter().toBuilder()
                 .customerUuid(window.getCustomerUUID())
                 .build();
         List<AlertConfiguration> configurations =
             alertConfigurationService.list(alertConfigurationFilter);
         List<AlertConfiguration> toSave =
-            configurations
-                .stream()
+            configurations.stream()
                 .filter(
                     configuration ->
                         !configuration.getMaintenanceWindowUuidsSet().contains(window.getUuid())
@@ -180,7 +189,7 @@ public class AlertConfigurationWriter {
                 .map(configuration -> configuration.addMaintenanceWindowUuid(window.getUuid()))
                 .collect(Collectors.toList());
 
-        alertConfigurationService.save(toSave);
+        alertConfigurationService.save(window.getCustomerUUID(), toSave);
         maintenanceWindowToAlertConfigs.put(
             window.getUuid(),
             configurations.stream().map(AlertConfiguration::getUuid).collect(Collectors.toSet()));
@@ -215,7 +224,9 @@ public class AlertConfigurationWriter {
               toUnsuspend.add(configuration);
             }
           });
-      alertConfigurationService.save(toUnsuspend);
+      toUnsuspend.stream()
+          .collect(Collectors.groupingBy(AlertConfiguration::getCustomerUUID))
+          .forEach(alertConfigurationService::save);
 
       metricService.setOkStatusMetric(
           buildMetricTemplate(PlatformMetrics.ALERT_MAINTENANCE_WINDOW_PROCESSOR_STATUS));
@@ -252,8 +263,7 @@ public class AlertConfigurationWriter {
           new HashSet<>(alertDefinitionService.listIds(AlertDefinitionFilter.builder().build()));
 
       results.addAll(
-          configUuids
-              .stream()
+          configUuids.stream()
               .filter(uuid -> !definitionUuids.contains(uuid))
               .map(this::syncDefinition)
               .collect(Collectors.toList()));

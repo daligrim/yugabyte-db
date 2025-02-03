@@ -11,19 +11,19 @@
 // under the License.
 //
 
-#ifndef YB_COMMON_PG_TYPES_H
-#define YB_COMMON_PG_TYPES_H
-
-#include <boost/functional/hash/hash.hpp>
+#pragma once
 
 #include "yb/common/entity_ids.h"
+#include "yb/common/schema.h"
+
+#include "yb/util/hash_util.h"
 
 namespace yb {
 
 class Slice;
 
 // Postgres object identifier (OID).
-typedef uint32_t PgOid;
+using PgOid = uint32_t;
 static constexpr PgOid kPgInvalidOid = 0;
 static constexpr PgOid kPgByteArrayOid = 17;
 
@@ -57,18 +57,11 @@ struct PgObjectId {
     return GetPgsqlTablespaceId(object_oid);
   }
 
+  NamespaceId GetYbNamespaceId() const {
+    return GetPgsqlNamespaceId(database_oid);
+  }
+
   std::string ToString() const;
-
-  bool operator== (const PgObjectId& other) const {
-    return database_oid == other.database_oid && object_oid == other.object_oid;
-  }
-
-  friend std::size_t hash_value(const PgObjectId& id) {
-    std::size_t value = 0;
-    boost::hash_combine(value, id.database_oid);
-    boost::hash_combine(value, id.object_oid);
-    return value;
-  }
 
   template <class PB>
   void ToPB(PB* pb) const {
@@ -85,14 +78,36 @@ struct PgObjectId {
   static TableId GetYbTableIdFromPB(const PB& pb) {
     return FromPB(pb).GetYbTableId();
   }
+
+  template <class PB>
+  static NamespaceId GetYbNamespaceIdFromPB(const PB& pb) {
+    return FromPB(pb).GetYbNamespaceId();
+  }
+
+  constexpr std::strong_ordering operator<=>(const PgObjectId&) const = default;
+
+  YB_STRUCT_DEFINE_HASH(PgObjectId, database_oid, object_oid);
 };
 
-typedef boost::hash<PgObjectId> PgObjectIdHash;
+using PgObjectIdHash = boost::hash<PgObjectId>;
 
 inline std::ostream& operator<<(std::ostream& out, const PgObjectId& id) {
   return out << id.ToString();
 }
 
-}  // namespace yb
+// A struct for complete PG table names.
+struct YsqlFullTableName {
+  NamespaceName namespace_name;
+  PgSchemaName schema_name;
+  TableName table_name;
 
-#endif  // YB_COMMON_PG_TYPES_H
+  bool operator==(const YsqlFullTableName& other) const = default;
+
+  YB_STRUCT_DEFINE_HASH(YsqlFullTableName, namespace_name, schema_name, table_name);
+
+  std::string ToString() const;
+};
+
+using YsqlFullTableNameHash = boost::hash<YsqlFullTableName>;
+
+}  // namespace yb

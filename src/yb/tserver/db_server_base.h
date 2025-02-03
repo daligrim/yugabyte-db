@@ -11,8 +11,7 @@
 // under the License.
 //
 
-#ifndef YB_TSERVER_DB_SERVER_BASE_H
-#define YB_TSERVER_DB_SERVER_BASE_H
+#pragma once
 
 #include <future>
 
@@ -41,9 +40,11 @@ class DbServerBase : public server::RpcAndWebServerBase {
 
   virtual MonoDelta default_client_timeout() = 0;
   virtual const std::string& permanent_uuid() const = 0;
-  virtual void SetupAsyncClientInit(client::AsyncClientInitialiser* async_client_init) = 0;
+  virtual void SetupAsyncClientInit(client::AsyncClientInitializer* async_client_init) = 0;
 
   virtual client::LocalTabletFilter CreateLocalTabletFilter() = 0;
+
+  virtual void WriteServerMetaCacheAsJson(JsonWriter* writer) = 0;
 
   const std::shared_future<client::YBClient*>& client_future() const;
 
@@ -58,10 +59,12 @@ class DbServerBase : public server::RpcAndWebServerBase {
  protected:
   void EnsureTransactionPoolCreated();
 
+  void WriteMainMetaCacheAsJson(JsonWriter* writer);
+
   // Shared memory owned by the tablet server.
   std::unique_ptr<tserver::TServerSharedObject> shared_object_;
 
-  std::unique_ptr<client::AsyncClientInitialiser> async_client_init_;
+  std::unique_ptr<client::AsyncClientInitializer> async_client_init_;
 
   std::atomic<client::TransactionPool*> transaction_pool_{nullptr};
   std::atomic<client::TransactionManager*> transaction_manager_{nullptr};
@@ -72,5 +75,3 @@ class DbServerBase : public server::RpcAndWebServerBase {
 
 }  // namespace tserver
 }  // namespace yb
-
-#endif  // YB_TSERVER_DB_SERVER_BASE_H

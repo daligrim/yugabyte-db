@@ -11,15 +11,16 @@
 // under the License.
 //
 
-#ifndef YB_CLIENT_SESSION_H
-#define YB_CLIENT_SESSION_H
+#pragma once
 
 #include <future>
 #include <unordered_set>
 
+#include "yb/client/batcher.h"
 #include "yb/client/client_fwd.h"
 
 #include "yb/common/common_fwd.h"
+#include "yb/common/opid.h"
 
 #include "yb/gutil/ref_counted.h"
 
@@ -95,7 +96,10 @@ struct NODISCARD_CLASS FlushStatus {
 // This class is not thread-safe.
 class YBSession : public std::enable_shared_from_this<YBSession> {
  public:
-  explicit YBSession(YBClient* client, const scoped_refptr<ClockBase>& clock = nullptr);
+  explicit YBSession(
+      YBClient* client, MonoDelta delta, const scoped_refptr<ClockBase>& clock = nullptr);
+  explicit YBSession(
+      YBClient* client, CoarseTimePoint deadline, const scoped_refptr<ClockBase>& clock = nullptr);
 
   ~YBSession();
 
@@ -105,14 +109,12 @@ class YBSession : public std::enable_shared_from_this<YBSession> {
   // the current time.
   void RestartNonTxnReadPoint(Restart restart);
 
-  void SetReadPoint(const ReadHybridTime& read_time);
+  // Sets read point for this session. When tablet_id is specified, then local limit from read_time
+  // will be used for local limit of this tablet.
+  void SetReadPoint(const ReadHybridTime& read_time, const TabletId& tablet_id = TabletId());
 
   // Returns true if our current read point requires restart.
   bool IsRestartRequired();
-
-  // Defer the read hybrid time to the global limit.  Since the global limit should not change for a
-  // session, this call is idempotent.
-  void DeferReadPoint();
 
   // Changes transaction used by this session.
   void SetTransaction(YBTransactionPtr transaction);
@@ -130,9 +132,9 @@ class YBSession : public std::enable_shared_from_this<YBSession> {
   // Applied operations just added to the session and waits to be flushed.
   void Apply(YBOperationPtr yb_op);
 
-  bool IsInProgress(YBOperationPtr yb_op) const;
-
   void Apply(const std::vector<YBOperationPtr>& ops);
+
+  bool IsInProgress(YBOperationPtr yb_op) const;
 
   // Flush any pending writes.
   //
@@ -171,17 +173,12 @@ class YBSession : public std::enable_shared_from_this<YBSession> {
   void FlushAsync(FlushCallback callback);
   std::future<FlushStatus> FlushFuture();
 
+  // These block the thread until the operations complete or timeout/deadline has passed.
   // For production code use async variants of the following functions instead.
   FlushStatus TEST_FlushAndGetOpsErrors();
   Status TEST_Flush();
   Status TEST_ApplyAndFlush(YBOperationPtr yb_op);
   Status TEST_ApplyAndFlush(const std::vector<YBOperationPtr>& ops);
-  Status TEST_ReadSync(std::shared_ptr<YBOperation> yb_op);
-
-  // These block the thread until the operations complete or timeout/deadline has passed
-  Status ApplyAndFlushSync(const std::vector<YBOperationPtr>& ops);
-  Status ApplyAndFlushSync(YBOperationPtr ops);
-  Status ReadSync(std::shared_ptr<YBOperation> yb_op);
 
   // Abort the unflushed or in-flight operations in the session.
   void Abort();
@@ -235,6 +232,10 @@ class YBSession : public std::enable_shared_from_this<YBSession> {
 
   void SetRejectionScoreSource(RejectionScoreSourcePtr rejection_score_source);
 
+  void SetLeaderTerm(int64_t leader_term) { batcher_config_.leader_term = leader_term; }
+
+  void SetBatcherBackgroundTransactionMeta(const TransactionMetadata& background_transaction_meta);
+
   struct BatcherConfig {
     std::weak_ptr<YBSession> session;
     client::YBClient* client;
@@ -243,6 +244,7 @@ class YBSession : public std::enable_shared_from_this<YBSession> {
     bool allow_local_calls_in_curr_thread = true;
     bool force_consistent_read = false;
     RejectionScoreSourcePtr rejection_score_source;
+    int64_t leader_term = OpId::kUnknownTerm;
 
     ConsistentReadPoint* read_point() const;
   };
@@ -250,6 +252,8 @@ class YBSession : public std::enable_shared_from_this<YBSession> {
  private:
   friend class YBClient;
   friend class internal::Batcher;
+
+  YBSession(YBClient* client, const scoped_refptr<ClockBase>& clock);
 
   internal::Batcher& Batcher();
 
@@ -285,7 +289,9 @@ class YBSession : public std::enable_shared_from_this<YBSession> {
 // be retried by the session internally without returning error to upper layers.
 bool ShouldSessionRetryError(const Status& status);
 
+int YsqlClientReadWriteTimeoutMs();
+int SysCatalogRetryableRequestTimeoutSecs();
+int RetryableRequestTimeoutSecs(TableType table_type);
+
 } // namespace client
 } // namespace yb
-
-#endif // YB_CLIENT_SESSION_H

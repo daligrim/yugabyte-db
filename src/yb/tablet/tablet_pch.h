@@ -8,6 +8,8 @@
 #include <inttypes.h>
 #include <openssl/ossl_typ.h>
 #include <pthread.h>
+#include <signal.h>
+#include <spawn.h>
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -18,8 +20,8 @@
 #include <sys/types.h>
 #include <sys/uio.h>
 #include <time.h>
+#include <unistd.h>
 #include <uuid/uuid.h>
-
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -29,6 +31,7 @@
 #include <chrono>
 #include <climits>
 #include <cmath>
+#include <compare>
 #include <condition_variable>
 #include <cstdarg>
 #include <cstddef>
@@ -58,10 +61,12 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <tuple>
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include <boost/algorithm/string/join.hpp>
@@ -77,6 +82,7 @@
 #include <boost/container/static_vector.hpp>
 #include <boost/container_hash/hash.hpp>
 #include <boost/core/demangle.hpp>
+#include <boost/core/enable_if.hpp>
 #include <boost/function.hpp>
 #include <boost/function/function_fwd.hpp>
 #include <boost/functional/hash.hpp>
@@ -103,11 +109,14 @@
 #include <boost/preprocessor/facilities/apply.hpp>
 #include <boost/preprocessor/if.hpp>
 #include <boost/preprocessor/punctuation/is_begin_parens.hpp>
+#include <boost/preprocessor/seq/elem.hpp>
 #include <boost/preprocessor/seq/enum.hpp>
 #include <boost/preprocessor/seq/for_each.hpp>
+#include <boost/preprocessor/seq/pop_front.hpp>
 #include <boost/preprocessor/seq/transform.hpp>
 #include <boost/preprocessor/stringize.hpp>
 #include <boost/preprocessor/variadic/to_seq.hpp>
+#include <boost/range/any_range.hpp>
 #include <boost/range/iterator_range.hpp>
 #include <boost/range/iterator_range_core.hpp>
 #include <boost/signals2/dummy_mutex.hpp>
@@ -115,7 +124,9 @@
 #include <boost/system/error_code.hpp>
 #include <boost/thread/thread.hpp>
 #include <boost/tti/has_type.hpp>
+#include <boost/type_traits.hpp>
 #include <boost/type_traits/is_const.hpp>
+#include <boost/type_traits/is_detected.hpp>
 #include <boost/type_traits/make_signed.hpp>
 #include <boost/unordered_map.hpp>
 #include <boost/uuid/uuid.hpp>
@@ -143,7 +154,10 @@
 #include <gtest/gtest.h>
 #include <gtest/gtest_prod.h>
 #include <rapidjson/document.h>
-
+#include "yb/common/opid.fwd.h"
+#include "yb/common/opid.h"
+#include "yb/common/opid.messages.h"
+#include "yb/common/opid.pb.h"
 #include "yb/gutil/atomicops.h"
 #include "yb/gutil/bind.h"
 #include "yb/gutil/bind_internal.h"
@@ -183,16 +197,20 @@
 #include "yb/gutil/threading/thread_collision_warner.h"
 #include "yb/gutil/type_traits.h"
 #include "yb/gutil/walltime.h"
+#include "yb/util/aggregate_stats.h"
 #include "yb/util/algorithm_util.h"
 #include "yb/util/async_util.h"
 #include "yb/util/atomic.h"
+#include "yb/util/backoff_waiter.h"
 #include "yb/util/bitmap.h"
+#include "yb/util/blocking_queue.h"
 #include "yb/util/boost_mutex_utils.h"
 #include "yb/util/byte_buffer.h"
 #include "yb/util/bytes_formatter.h"
 #include "yb/util/cast.h"
 #include "yb/util/clone_ptr.h"
 #include "yb/util/coding_consts.h"
+#include "yb/util/col_group.h"
 #include "yb/util/compare_util.h"
 #include "yb/util/concurrent_pod.h"
 #include "yb/util/condition_variable.h"
@@ -214,8 +232,14 @@
 #include "yb/util/fault_injection.h"
 #include "yb/util/file_system.h"
 #include "yb/util/file_util.h"
-#include "yb/util/flag_tags.h"
+#include "yb/util/flags.h"
+#include "yb/util/flags/auto_flags.h"
+#include "yb/util/flags/auto_flags_util.h"
+#include "yb/util/flags/flag_tags.h"
+#include "yb/util/flags/flags_callback.h"
 #include "yb/util/format.h"
+#include "yb/util/hdr_histogram.h"
+#include "yb/util/high_water_mark.h"
 #include "yb/util/io.h"
 #include "yb/util/jsonwriter.h"
 #include "yb/util/kv_util.h"
@@ -231,6 +255,7 @@
 #include "yb/util/memory/arena_list.h"
 #include "yb/util/memory/mc_types.h"
 #include "yb/util/memory/memory.h"
+#include "yb/util/memory/memory_usage.h"
 #include "yb/util/metric_entity.h"
 #include "yb/util/metrics.h"
 #include "yb/util/metrics_fwd.h"
@@ -244,9 +269,6 @@
 #include "yb/util/net/socket.h"
 #include "yb/util/numbered_deque.h"
 #include "yb/util/operation_counter.h"
-#include "yb/util/opid.fwd.h"
-#include "yb/util/opid.h"
-#include "yb/util/opid.pb.h"
 #include "yb/util/path_util.h"
 #include "yb/util/pb_util.h"
 #include "yb/util/pg_util.h"
@@ -264,6 +286,7 @@
 #include "yb/util/shared_lock.h"
 #include "yb/util/size_literals.h"
 #include "yb/util/slice.h"
+#include "yb/util/slice_parts.h"
 #include "yb/util/stack_trace.h"
 #include "yb/util/status.h"
 #include "yb/util/status_callback.h"
@@ -273,19 +296,25 @@
 #include "yb/util/status_log.h"
 #include "yb/util/std_util.h"
 #include "yb/util/stopwatch.h"
+#include "yb/util/string_trim.h"
 #include "yb/util/string_util.h"
 #include "yb/util/striped64.h"
 #include "yb/util/strongly_typed_bool.h"
 #include "yb/util/strongly_typed_string.h"
 #include "yb/util/strongly_typed_uuid.h"
+#include "yb/util/subprocess.h"
 #include "yb/util/sync_point.h"
+#include "yb/util/tcmalloc_util.h"
 #include "yb/util/test_graph.h"
 #include "yb/util/test_macros.h"
+#include "yb/util/test_thread_holder.h"
 #include "yb/util/test_util.h"
 #include "yb/util/thread.h"
+#include "yb/util/thread_annotations_util.h"
 #include "yb/util/threadlocal.h"
 #include "yb/util/threadpool.h"
 #include "yb/util/timestamp.h"
+#include "yb/util/to_stream.h"
 #include "yb/util/tostring.h"
 #include "yb/util/trace.h"
 #include "yb/util/tsan_util.h"
@@ -295,5 +324,6 @@
 #include "yb/util/unique_lock.h"
 #include "yb/util/uuid.h"
 #include "yb/util/varint.h"
+#include "yb/util/write_buffer.h"
 #include "yb/util/yb_partition.h"
 #include "yb/util/yb_pg_errcodes.h"

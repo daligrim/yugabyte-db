@@ -10,12 +10,17 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.yugabyte.yw.common.PlatformServiceException;
 import com.yugabyte.yw.common.SupportBundleUtil;
 import com.yugabyte.yw.common.utils.FileUtils;
-import com.yugabyte.yw.models.helpers.BundleDetails;
 import com.yugabyte.yw.forms.SupportBundleFormData;
+import com.yugabyte.yw.models.helpers.BundleDetails;
 import io.ebean.Finder;
 import io.ebean.Model;
 import io.ebean.annotation.DbEnumValue;
 import io.ebean.annotation.DbJson;
+import io.swagger.annotations.ApiModelProperty;
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.Id;
+import jakarta.persistence.Transient;
 import java.io.File;
 import java.io.InputStream;
 import java.nio.file.Path;
@@ -24,9 +29,6 @@ import java.text.ParseException;
 import java.util.Date;
 import java.util.List;
 import java.util.UUID;
-import javax.persistence.Column;
-import javax.persistence.Entity;
-import javax.persistence.Id;
 import lombok.Getter;
 import lombok.Setter;
 import org.slf4j.Logger;
@@ -50,12 +52,14 @@ public class SupportBundle extends Model {
 
   @Column
   @Getter
-  @JsonFormat(shape = JsonFormat.Shape.STRING, pattern = "yyyy-MM-dd")
+  @ApiModelProperty(value = "Support bundle start date.", example = "2022-12-12T13:07:18Z")
+  @JsonFormat(shape = JsonFormat.Shape.STRING, pattern = "yyyy-MM-dd'T'HH:mm:ss'Z'")
   private Date startDate;
 
   @Column
   @Getter
-  @JsonFormat(shape = JsonFormat.Shape.STRING, pattern = "yyyy-MM-dd")
+  @ApiModelProperty(value = "Support bundle end date.", example = "2022-12-12T13:07:18Z")
+  @JsonFormat(shape = JsonFormat.Shape.STRING, pattern = "yyyy-MM-dd'T'HH:mm:ss'Z'")
   private Date endDate;
 
   @Column(nullable = true)
@@ -70,10 +74,16 @@ public class SupportBundle extends Model {
 
   @JsonIgnore @Setter @Getter private static int retentionDays;
 
+  @Transient
+  @ApiModelProperty(value = "Size in bytes of the support bundle", required = false)
+  // 0 is the only invalid size.
+  private long sizeInBytes;
+
   public enum SupportBundleStatusType {
     Running("Running"),
     Success("Success"),
-    Failed("Failed");
+    Failed("Failed"),
+    Aborted("Aborted");
 
     private final String status;
 
@@ -108,6 +118,9 @@ public class SupportBundle extends Model {
 
   @JsonIgnore
   public Path getPathObject() {
+    if (this.path == null) {
+      return null;
+    }
     return Paths.get(this.path);
   }
 
@@ -118,12 +131,19 @@ public class SupportBundle extends Model {
   public static SupportBundle create(SupportBundleFormData bundleData, Universe universe) {
     SupportBundle supportBundle = new SupportBundle();
     supportBundle.bundleUUID = UUID.randomUUID();
-    supportBundle.scopeUUID = universe.universeUUID;
+    supportBundle.scopeUUID = universe.getUniverseUUID();
     supportBundle.path = null;
     if (bundleData != null) {
       supportBundle.startDate = bundleData.startDate;
       supportBundle.endDate = bundleData.endDate;
-      supportBundle.bundleDetails = new BundleDetails(bundleData.components);
+      supportBundle.bundleDetails =
+          new BundleDetails(
+              bundleData.components,
+              bundleData.maxNumRecentCores,
+              bundleData.maxCoreFileSize,
+              bundleData.promDumpStartDate,
+              bundleData.promDumpEndDate,
+              bundleData.prometheusMetricsTypes);
     }
     supportBundle.status = SupportBundleStatusType.Running;
     supportBundle.save();
@@ -154,8 +174,7 @@ public class SupportBundle extends Model {
     SupportBundle supportBundle = getOrBadRequest(bundleUUID);
     Path bundlePath = supportBundle.getPathObject();
     File file = bundlePath.toFile();
-    InputStream is = FileUtils.getInputStreamOrFail(file);
-    return is;
+    return FileUtils.getInputStreamOrFail(file);
   }
 
   @JsonIgnore
@@ -181,7 +200,8 @@ public class SupportBundle extends Model {
     return creationDate;
   }
 
-  @JsonFormat(shape = JsonFormat.Shape.STRING, pattern = "yyyy-MM-dd")
+  @ApiModelProperty(value = "Support bundle creation date.", example = "2022-12-12T13:07:18Z")
+  @JsonFormat(shape = JsonFormat.Shape.STRING, pattern = "yyyy-MM-dd'T'HH:mm:ss'Z'")
   public Date getCreationDate() {
     if (this.status != SupportBundleStatusType.Success) {
       return null;
@@ -189,7 +209,8 @@ public class SupportBundle extends Model {
     return this.parseCreationDate();
   }
 
-  @JsonFormat(shape = JsonFormat.Shape.STRING, pattern = "yyyy-MM-dd")
+  @ApiModelProperty(value = "Support bundle expiration date.", example = "2022-12-12T13:07:18Z")
+  @JsonFormat(shape = JsonFormat.Shape.STRING, pattern = "yyyy-MM-dd'T'HH:mm:ss'Z'")
   public Date getExpirationDate() {
     if (this.status != SupportBundleStatusType.Success) {
       return null;
@@ -197,6 +218,15 @@ public class SupportBundle extends Model {
     SupportBundleUtil sbutil = new SupportBundleUtil();
     Date expirationDate = sbutil.getDateNDaysAfter(this.parseCreationDate(), getRetentionDays());
     return expirationDate;
+  }
+
+  public long getSizeInBytes() {
+    if (this.status != SupportBundleStatusType.Success) {
+      return 0;
+    }
+
+    sizeInBytes = FileUtils.getFileSize(path);
+    return sizeInBytes;
   }
 
   public static List<SupportBundle> getAll(UUID universeUUID) {
@@ -207,15 +237,11 @@ public class SupportBundle extends Model {
 
   public static void delete(UUID bundleUUID) {
     SupportBundle supportBundle = SupportBundle.getOrBadRequest(bundleUUID);
-    if (supportBundle.getStatus() == SupportBundleStatusType.Running) {
-      throw new PlatformServiceException(BAD_REQUEST, "The support bundle is in running state.");
+    if (supportBundle.delete()) {
+      LOG.info("Successfully deleted the db entry for support bundle: " + bundleUUID.toString());
     } else {
-      if (supportBundle.delete()) {
-        LOG.info("Successfully deleted the db entry for support bundle: " + bundleUUID.toString());
-      } else {
-        throw new PlatformServiceException(
-            INTERNAL_SERVER_ERROR, "Unable to delete the Support Bundle");
-      }
+      throw new PlatformServiceException(
+          INTERNAL_SERVER_ERROR, "Unable to delete the Support Bundle");
     }
   }
 }

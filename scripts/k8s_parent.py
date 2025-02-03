@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 
+import time
 import errno
 import logging
 import os
@@ -7,8 +8,14 @@ import shutil
 import signal
 import subprocess
 import sys
-from glob import glob
-
+import glob
+import traceback
+import threading
+import re
+import random
+import string
+# Stop event to signal the background thread to stop.:
+bg_thread_stop_event = threading.Event()
 child_process = None
 
 # Set of signals which are propagated to the child process from this
@@ -43,6 +50,15 @@ PROPAGATE_SIGS = {
 }
 MAX_FILES_FROM_GLOB = 5
 CORE_GLOB = "*core*"
+# Check if environment overrides it, if not use the default.
+PG_UNIX_SOCKET_LOCK_FILE_PATH_GLOB = os.environ.get(
+    "PG_UNIX_SOCKET_LOCK_FILE_PATH_GLOB",
+    "/tmp/.yb.*/.s.PGSQL.*.lock")   # Default pattern
+MASTER_BINARY = "/home/yugabyte/bin/yb-master"
+GFLAGS_MASTER_TEMPLATE_FILE = "/opt/master/conf/server.conf.template"
+GFLAGS_MASTER_GENERATED_FILE = "/tmp/yugabyte/master/conf/server.conf"
+GFLAGS_TSERVER_TEMPLATE_FILE = "/opt/tserver/conf/server.conf.template"
+GFLAGS_TSERVER_GENERATED_FILE = "/tmp/yugabyte/tserver/conf/server.conf"
 
 
 def signal_handler(signum, frame):
@@ -88,6 +104,90 @@ def create_core_dump_dir():
             )
 
 
+def delete_pg_lock_files():
+    file_pattern = PG_UNIX_SOCKET_LOCK_FILE_PATH_GLOB
+    files_to_delete = glob.glob(file_pattern)
+    # Check if any files were found
+    if not files_to_delete:
+        logging.info(f"No files found matching the pattern: {file_pattern}")
+        return
+    # Log a list of files to delete.
+    logging.info(f"Files to delete after expanded glob: {files_to_delete}")
+
+    # We don't want to catch exceptions but raise them as this will
+    # in debugging; pod goes into crashloop.
+    for file_path in files_to_delete:
+        logging.info(f"Trying to delete {file_path}")
+        os.remove(file_path)
+        logging.info(f"Deleted: {file_path}")
+
+
+def replace_var_env(match):
+    var = match.group(1)
+    if var in os.environ:
+        return os.environ[var]
+
+    return ""
+
+
+def random_string(length):
+    return ''.join(random.choice(string.ascii_lowercase) for i in range(length))
+
+
+def background_sub_env_gflags(sleep_time_seconds, command):
+    logging.info("Starting gflags file template substitution")
+    infile = GFLAGS_MASTER_TEMPLATE_FILE if is_master(command) else GFLAGS_TSERVER_TEMPLATE_FILE
+    outfile = GFLAGS_MASTER_GENERATED_FILE if is_master(command) else GFLAGS_TSERVER_GENERATED_FILE
+    tmp_outfile = outfile + '.' + random_string(8)
+    if not os.path.exists(infile):
+        logging.info("Template gflags file does not exist, ignoring substitution")
+        return
+    try:
+        os.makedirs(os.path.dirname(outfile), exist_ok=True)
+        os.makedirs(os.path.dirname(tmp_outfile), exist_ok=True)
+    except Exception as e:
+        logging.error("Error while creating gflag file: {}, traceback: {}"
+                      .format(e, traceback.format_exc()))
+    global bg_thread_stop_event
+    while not bg_thread_stop_event.is_set():
+        logging.info("Substituting env to gflag template")
+        try:
+            with open(infile, 'r') as instream:
+                content = instream.read()
+            content = re.sub("\\${(.*?)}", replace_var_env, content)
+            # Safe create the gflags file by creating tmp file and moving it
+            with open(tmp_outfile, 'w') as outstream:
+                outstream.write(content)
+            os.replace(tmp_outfile, outfile)
+            try:
+                os.remove(tmp_outfile)
+            except FileNotFoundError:
+                pass
+        except Exception as e:
+            logging.error(
+                "Error while substituting env to gflag template: {}, traceback: {}"
+                .format(e, traceback.format_exc()))
+        logging.info("Sleeping for {} seconds".format(sleep_time_seconds))
+        time.sleep(sleep_time_seconds)
+
+
+def background_copy_cores_wrapper(dst, sleep_time_seconds):
+    logging.info("Starting Collection")
+    global bg_thread_stop_event
+    copy_count = None
+    while not bg_thread_stop_event.is_set():
+        logging.info("Invoking copy_cores")
+        try:
+            copy_count = copy_cores(dst)
+        except Exception as e:
+            logging.error(
+                "Error while copying cores: {}, traceback: {}".format(
+                    e, traceback.format_exc()))
+        logging.info("Copied {} core files".format(copy_count))
+        logging.info("Sleeping for {} seconds".format(sleep_time_seconds))
+        time.sleep(sleep_time_seconds)
+
+
 def copy_cores(dst):
     # os.makedirs(dst, exist_ok=True)
     try:
@@ -118,7 +218,7 @@ def copy_cores(dst):
             MAX_FILES_FROM_GLOB, dst, core_glob
         )
     )
-    core_files = glob(core_glob)
+    core_files = glob.glob(core_glob)
 
     # TODO: handle cases where this list is huge, this is less likely
     # to happen with the current glob *core*, but can happen with a
@@ -138,12 +238,39 @@ def copy_cores(dst):
     return total_files_copied
 
 
+def invoke_hook(hook_stage=None):
+    """
+    Invokes the kubernetes configmap hook with associated hook_stage.
+    """
+    if hook_stage not in ("pre", "post"):
+        raise Exception("NotImplemented")
+    hostname = os.getenv("HOSTNAME")
+
+    hostname_parsed = "-".join(hostname.split("-")[-3:])
+    hook_filename = "{}-{}_debug_hook.sh".format(hostname_parsed, hook_stage)
+    op_name = "{}_{}_{}".format(hostname, hook_stage, "debug_hook")
+    hook_filepath = os.path.join("/opt/debug_hooks_config/", hook_filename)
+    if os.path.exists(hook_filepath):
+        logging.info("Executing operation: {} filepath: {}".format(op_name, hook_filepath))
+        # TODO: Do we care about capturing ret code,
+        # exception since exceptions will be logged by default
+        output = subprocess.check_output(hook_filepath, shell=True)
+        logging.info("Output from hook {}".format(output))
+
+
+def is_master(command):
+    if MASTER_BINARY in command:
+        return True
+    return False
+
+
 if __name__ == "__main__":
     logging.basicConfig(
         format="%(asctime)s [%(levelname)s] %(filename)s: %(message)s",
         level=logging.INFO,
     )
-
+    core_collection_interval = 30  # Seconds
+    subs_env_gflags_interval = 20  # Seconds
     command = sys.argv[1:]
     if len(command) < 1:
         logging.critical("No command to run")
@@ -158,6 +285,26 @@ if __name__ == "__main__":
     # Make sure the directory from core_pattern is present, otherwise
     # core dumps are not collected.
     create_core_dump_dir()
+    # Copy cores once in 30s
+    copy_cores_thread = threading.Thread(
+        target=background_copy_cores_wrapper, args=(cores_dir, core_collection_interval))
+    copy_cores_thread.daemon = True
+    copy_cores_thread.start()
+    # Substitute environment varibles to gflag template file once in 20s
+    subs_env_gflags_thread = threading.Thread(
+        target=background_sub_env_gflags, args=(subs_env_gflags_interval, command))
+    subs_env_gflags_thread.daemon = True
+    subs_env_gflags_thread.start()
+    # Delete PG Unix Socket Lock files that can be left after a previous
+    # ungraceful exit of the container.
+    if not is_master(command):
+        _delete_pg_lock_file = os.environ.get(
+            "YB_DEL_PG_LOCK_FILE", "true").lower() in ('true', '1', 't')
+        logging.info("Deleting PG socket lock files: %s" % _delete_pg_lock_file)
+        if _delete_pg_lock_file:
+            delete_pg_lock_files()
+    # invoking the prehook.
+    invoke_hook(hook_stage="pre")
 
     child_process = subprocess.Popen(command)
 
@@ -170,6 +317,13 @@ if __name__ == "__main__":
 
     child_process.wait()
 
+    # invoking the Post hook
+    invoke_hook(hook_stage="post")
+    bg_thread_stop_event.set()
+    # Give some time for the thread to finish its job,
+    # we do a 2x core collection interval.
+    copy_cores_thread.join(2*core_collection_interval)
+    # There may be left over cores when we crash, so copy them now.
     # Do the core copy, and exit with child return code.
     files_copied = copy_cores(cores_dir)
     logging.info("Copied {} core files to '{}'".format(files_copied, cores_dir))

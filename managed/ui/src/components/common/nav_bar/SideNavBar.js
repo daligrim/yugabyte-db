@@ -1,6 +1,6 @@
 // Copyright (c) YugaByte, Inc.
 
-import React, { Component } from 'react';
+import { Component } from 'react';
 import { Link, IndexLink, withRouter } from 'react-router';
 import { NavDropdown } from 'react-bootstrap';
 import slackIcon from './images/slack-monochrome-black.svg';
@@ -8,9 +8,23 @@ import './stylesheets/SideNavBar.scss';
 import { getPromiseState } from '../../../utils/PromiseUtils';
 import { isHidden, isNotHidden, getFeatureState } from '../../../utils/LayoutUtils';
 
+//icons
+import UnionIcon from '../../../redesign/assets/union.svg';
+import UnionInActiveIcon from '../../../redesign/assets/union_inactive.svg';
+
 class NavLink extends Component {
   render() {
-    const { router, display, index, to, icon, text, ...props } = this.props;
+    const {
+      router,
+      display,
+      index,
+      to,
+      icon,
+      text,
+      iconComponent,
+      inActiveIcon,
+      ...props
+    } = this.props;
 
     // Added by withRouter in React Router 3.0.
     delete props.params;
@@ -25,12 +39,20 @@ class NavLink extends Component {
       <li className={`${isActive ? 'active' : ''}${display === 'disabled' ? ' disabled' : ''}`}>
         {display === 'disabled' ? (
           <div>
-            <i className={icon}></i>
+            {iconComponent ? (
+              <img src={isActive ? iconComponent : inActiveIcon} alt="--" />
+            ) : (
+              <i className={icon}></i>
+            )}
             <span>{text}</span>
           </div>
         ) : (
           <LinkComponent to={to} title={text} disabled={display === 'disabled'} {...props}>
-            <i className={icon}></i>
+            {iconComponent ? (
+              <img src={isActive ? iconComponent : inActiveIcon} alt="--" />
+            ) : (
+              <i className={icon}></i>
+            )}
             <span>{text}</span>
           </LinkComponent>
         )}
@@ -39,6 +61,7 @@ class NavLink extends Component {
   }
 }
 
+// eslint-disable-next-line no-class-assign
 NavLink = withRouter(NavLink);
 
 export default class SideNavBar extends Component {
@@ -81,7 +104,11 @@ export default class SideNavBar extends Component {
                       to="/metrics"
                       icon="fa fa-line-chart"
                       text="Metrics"
-                      display={getFeatureState(currentCustomer.data.features, 'menu.metrics')}
+                      display={getFeatureState(
+                        currentCustomer.data.features,
+                        'menu.metrics',
+                        'hidden'
+                      )}
                     />
                     <NavLink
                       to="/tasks"
@@ -99,12 +126,17 @@ export default class SideNavBar extends Component {
                       to="/backups"
                       icon="fa fa-upload"
                       text="Backups"
-                      display={this.props.enableBackupv2}
-                      />
+                      display={
+                        this.props.enableBackupv2 &&
+                        getFeatureState(currentCustomer.data.features, 'menu.backups')
+                      }
+                    />
                     <NavLink
                       to="/config"
                       icon="fa fa-cloud-upload"
-                      text="Configs"
+                      iconComponent={UnionIcon}
+                      inActiveIcon={UnionInActiveIcon}
+                      text="Integrations"
                       display={getFeatureState(currentCustomer.data.features, 'menu.config')}
                     />
                     <NavLink

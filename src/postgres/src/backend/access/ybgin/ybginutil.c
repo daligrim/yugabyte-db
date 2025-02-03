@@ -25,9 +25,11 @@
 #include "postgres.h"
 
 #include "access/gin_private.h"
+#include "access/relation.h"
 #include "access/reloptions.h"
 #include "c.h"
-#include "nodes/relation.h"
+#include "nodes/execnodes.h"
+#include "commands/yb_cmds.h"
 #include "nodes/nodes.h"
 #include "utils/index_selfuncs.h"
 
@@ -96,6 +98,19 @@ ybginvalidate(Oid opclassoid)
 	 * string and pass it down).
 	 */
 	return ginvalidate(opclassoid);
+}
+
+void
+ybginbindschema(YbcPgStatement handle,
+				struct IndexInfo *indexInfo,
+				TupleDesc indexTupleDesc,
+				int16 *coloptions)
+{
+	YBCBindCreateIndexColumns(handle,
+							  indexInfo,
+							  indexTupleDesc,
+							  coloptions,
+							  indexInfo->ii_NumIndexKeyAttrs);
 }
 
 /*

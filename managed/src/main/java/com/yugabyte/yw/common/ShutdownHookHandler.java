@@ -3,21 +3,24 @@
 package com.yugabyte.yw.common;
 
 import com.google.common.annotations.VisibleForTesting;
+import java.lang.ref.WeakReference;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.WeakHashMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
 import javax.inject.Inject;
 import javax.inject.Singleton;
 import lombok.Getter;
-import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
-import play.inject.ApplicationLifecycle;
+import org.apache.pekko.actor.CoordinatedShutdown;
 
 /**
  * This allows setting order of shutdown hook execution. ApplicationLifecycle of play framework
@@ -27,30 +30,33 @@ import play.inject.ApplicationLifecycle;
  */
 @Slf4j
 @Singleton
-@Setter
 public class ShutdownHookHandler {
 
-  private final ApplicationLifecycle lifecycle;
   private final ExecutorService shutdownExecutor;
-  private final List<Hook> hooks;
+  private final Map<Object, Hook<?>> hooks;
+  private final AtomicBoolean isShutdown = new AtomicBoolean();
   // Setting this to true makes it behave like addStopHook of ApplicationLifecycle
   // that invokes the hooks serially.
   private boolean isSerialShutdown = false;
+  private int lastTime = 0;
 
   @Getter
-  private static class Hook implements Comparable<Hook> {
-    private final Runnable runnable;
+  private static class Hook<T> implements Comparable<Hook<?>>, Runnable {
+    private final WeakReference<T> referentRef;
+    private final Consumer<T> consumer;
     private final int weight;
     private final int time;
 
-    Hook(Runnable runnable, int weight, int time) {
-      this.runnable = runnable;
+    Hook(T referent, Consumer<T> consumer, int weight, int time) {
+      // Key in the map cannot be directly referred as it can create strong reference.
+      this.referentRef = new WeakReference<>(referent);
+      this.consumer = consumer;
       this.weight = weight;
       this.time = time;
     }
 
     @Override
-    public int compareTo(Hook o) {
+    public int compareTo(Hook<?> o) {
       // Descending such that greater weights are submitted first
       // to the execution service.
       if (weight == o.weight) {
@@ -59,55 +65,87 @@ public class ShutdownHookHandler {
       }
       return o.weight - weight;
     }
+
+    @Override
+    public void run() {
+      try {
+        T referent = referentRef.get();
+        if (referent != null) {
+          consumer.accept(referent);
+        }
+      } catch (Exception e) {
+        log.error("Error in running hook {}", this, e);
+      }
+    }
   }
 
   @Inject
-  public ShutdownHookHandler(ApplicationLifecycle lifecycle) {
-    this.lifecycle = lifecycle;
+  public ShutdownHookHandler(CoordinatedShutdown coordinatedShutdown) {
     this.shutdownExecutor = Executors.newCachedThreadPool();
-    this.hooks = new ArrayList<>();
-    this.lifecycle.addStopHook(
+    this.hooks = new WeakHashMap<>();
+    coordinatedShutdown.addTask(
+        CoordinatedShutdown.PhaseServiceRequestsDone(),
+        getClass().getSimpleName(),
         () -> {
-          return CompletableFuture.runAsync(this::onApplicationShutdown, shutdownExecutor);
+          onApplicationShutdown();
+          return CompletableFuture.completedFuture(null);
         });
   }
 
   /**
-   * Registers a callback to be invoked on application shutdown.
+   * Registers a callback to be invoked on application shutdown with a key. When the referent is
+   * garbage collected, the hook is removed.
    *
-   * @param runnable the callback.
+   * @param referent the referent object to manage the removal.
+   * @param runnable the precedence for ordering. Higher the value, higher is the precedence.
+   * @param weight the callback.
    */
-  public void addShutdownHook(Runnable runnable) {
-    addShutdownHook(0, runnable);
+  public <T> void addShutdownHook(T referent, Consumer<T> consumer) {
+    addShutdownHook(referent, consumer, 0);
   }
 
   /**
    * Registers a callback to be invoked on application shutdown. Hooks with same weights are
-   * executed either concurrently or serially based on isSerialShutdown flag.
+   * executed either concurrently or serially based on isSerialShutdown flag. When the referent is
+   * garbage collected, the hook is removed.
    *
-   * @param weight the precedence for ordering. Higher the value, higher is the precedence.
-   * @param runnable the callback.
+   * @param referent the referent object to manage the removal.
+   * @param runnable the precedence for ordering. Higher the value, higher is the precedence.
+   * @param weight the callback.
    */
-  public synchronized void addShutdownHook(int weight, Runnable runnable) {
-    int lastTime = hooks.size() > 0 ? hooks.get(hooks.size() - 1).getTime() : 0;
-    hooks.add(new Hook(runnable, weight, lastTime + 1));
+  public synchronized <T> void addShutdownHook(T referent, Consumer<T> consumer, int weight) {
+    hooks.put(referent, new Hook<T>(referent, consumer, weight, lastTime++));
+  }
+
+  /**
+   * Method to check if shutdown is triggered.
+   *
+   * @return Returns true if it is being shut down, else false.
+   */
+  public boolean isShutdown() {
+    return isShutdown.get();
   }
 
   @VisibleForTesting
   void onApplicationShutdown() {
-    Collections.sort(hooks);
+    if (!isShutdown.compareAndSet(false, true)) {
+      log.error("Application is already shut down");
+      return;
+    }
+    List<Hook<?>> list = new ArrayList<>(hooks.values());
+    Collections.sort(list);
     int pos = 0;
-    while (pos < hooks.size()) {
-      Map<Hook, Future<?>> futures = new HashMap<>();
-      Hook currHook = hooks.get(pos);
-      futures.put(currHook, shutdownExecutor.submit(currHook.getRunnable()));
+    while (pos < list.size()) {
+      Map<Hook<?>, Future<?>> futures = new HashMap<>();
+      Hook<?> currHook = list.get(pos);
+      futures.put(currHook, shutdownExecutor.submit(currHook));
       pos++;
       if (!isSerialShutdown) {
         // Hooks with the same weights are executed concurrently.
-        for (; pos < hooks.size(); pos++) {
-          currHook = hooks.get(pos);
-          if (hooks.get(pos - 1).getWeight() == currHook.getWeight()) {
-            futures.put(currHook, shutdownExecutor.submit(currHook.getRunnable()));
+        for (; pos < list.size(); pos++) {
+          currHook = list.get(pos);
+          if (list.get(pos - 1).getWeight() == currHook.getWeight()) {
+            futures.put(currHook, shutdownExecutor.submit(currHook));
           } else {
             break;
           }

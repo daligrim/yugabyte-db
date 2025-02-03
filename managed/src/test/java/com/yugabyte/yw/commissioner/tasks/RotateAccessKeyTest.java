@@ -4,35 +4,33 @@ package com.yugabyte.yw.commissioner.tasks;
 
 import static com.yugabyte.yw.models.TaskInfo.State.Failure;
 import static com.yugabyte.yw.models.TaskInfo.State.Success;
+import static org.hamcrest.CoreMatchers.containsString;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 import com.google.common.collect.ImmutableList;
 import com.yugabyte.yw.commissioner.tasks.params.RotateAccessKeyParams;
 import com.yugabyte.yw.common.AccessKeyRotationUtilTest;
-import com.yugabyte.yw.common.ApiUtils;
-import com.yugabyte.yw.forms.UniverseDefinitionTaskParams;
-import com.yugabyte.yw.forms.UniverseDefinitionTaskParams.Cluster;
-import com.yugabyte.yw.forms.UniverseDefinitionTaskParams.UserIntent;
+import com.yugabyte.yw.common.PlatformServiceException;
 import com.yugabyte.yw.models.AccessKey;
 import com.yugabyte.yw.models.NodeInstance;
 import com.yugabyte.yw.models.TaskInfo;
 import com.yugabyte.yw.models.Universe;
 import com.yugabyte.yw.models.helpers.NodeDetails;
-import com.yugabyte.yw.models.helpers.TaskType;
 import com.yugabyte.yw.models.helpers.NodeDetails.NodeState;
-
+import com.yugabyte.yw.models.helpers.TaskType;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.stream.Collectors;
+import lombok.extern.slf4j.Slf4j;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.junit.MockitoJUnitRunner;
-
-import lombok.extern.slf4j.Slf4j;
 
 @Slf4j
 @RunWith(MockitoJUnitRunner.Silent.class)
@@ -81,7 +79,7 @@ public class RotateAccessKeyTest extends UniverseModifyBaseTest {
     try {
       UUID taskUUID = commissioner.submit(TaskType.RotateAccessKey, taskParams);
       return waitForTask(taskUUID);
-    } catch (Exception e) {
+    } catch (InterruptedException e) {
       log.error("Failing with error {}", e.getMessage());
       fail();
     }
@@ -104,7 +102,10 @@ public class RotateAccessKeyTest extends UniverseModifyBaseTest {
       Universe universe, AccessKey newAccessKey) {
     RotateAccessKeyParams taskParams =
         new RotateAccessKeyParams(
-            defaultCustomer.uuid, defaultProvider.uuid, universe.universeUUID, newAccessKey);
+            defaultCustomer.getUuid(),
+            defaultProvider.getUuid(),
+            universe.getUniverseUUID(),
+            newAccessKey);
     return taskParams;
   }
 
@@ -135,8 +136,9 @@ public class RotateAccessKeyTest extends UniverseModifyBaseTest {
   public void testRotateAccessKeyPausedUniverseFailure() {
     AccessKeyRotationUtilTest.setUniversePaused(true, defaultUniverse);
     RotateAccessKeyParams taskParams = createRotateAccessKeyParams(defaultUniverse, newAccessKey);
-    TaskInfo taskInfo = submitTask(taskParams);
-    assertEquals(Failure, taskInfo.getTaskState());
+    PlatformServiceException thrown =
+        assertThrows(PlatformServiceException.class, () -> submitTask(taskParams));
+    assertThat(thrown.getMessage(), containsString("is currently paused"));
     AccessKeyRotationUtilTest.setUniversePaused(false, defaultUniverse);
   }
 
@@ -152,14 +154,12 @@ public class RotateAccessKeyTest extends UniverseModifyBaseTest {
   public void setNodeNonLive(boolean setNonLive, Universe universe) {
     UUID clusterUUID = universe.getUniverseDetails().clusters.get(0).uuid;
     String nodeName =
-        universe
-            .getNodesInCluster(clusterUUID)
-            .stream()
+        universe.getNodesInCluster(clusterUUID).stream()
             .collect(Collectors.toList())
             .get(0)
             .nodeName;
     Universe.saveDetails(
-        universe.universeUUID,
+        universe.getUniverseUUID(),
         u -> {
           NodeDetails node = u.getNode(nodeName);
           if (setNonLive) {
@@ -170,7 +170,8 @@ public class RotateAccessKeyTest extends UniverseModifyBaseTest {
           NodeInstance.maybeGetByName(nodeName)
               .ifPresent(
                   nodeInstance -> {
-                    nodeInstance.setInUse(!setNonLive);
+                    nodeInstance.setState(
+                        setNonLive ? NodeInstance.State.FREE : NodeInstance.State.USED);
                     nodeInstance.save();
                   });
         });

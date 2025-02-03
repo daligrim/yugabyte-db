@@ -3,7 +3,6 @@ title: Find the right page or section
 headerTitle: Find the right page or section
 linkTitle: Docs layout
 description: Find the right location in the YugabyteDB docs
-image: /images/section_icons/index/quick_start.png
 menu:
   preview:
     identifier: docs-layout
@@ -16,7 +15,7 @@ The YugabyteDB docs are divided into several sections:
 
 * [**YugabyteDB Core**](/preview/) is the overview documentation for YugabyteDB
 * [**YugabyteDB Anywhere**](/preview/yugabyte-platform/) documents YugabyteDB Anywhere
-* [**YugabyteDB Managed**](/preview/yugabyte-cloud/) documents YugabyteDB Managed
+* [**YugabyteDB Aeon**](/preview/yugabyte-cloud/) documents YugabyteDB Aeon
 * [**Releases**](/preview/releases/) contains release notes and other information related to releases
 * [**Integrations**](/preview/integrations/) documents third-party integrations
 * [**Reference**](/preview/reference/configuration/) contains detailed reference and architecture information about functions, features, and interfaces
@@ -43,6 +42,12 @@ Here are some examples of reference docs in our documentation:
 ### Design docs on GitHub
 
 We also have design docs [in GitHub](https://github.com/yugabyte/yugabyte-db/tree/master/architecture/design). These design docs should be referenced from the Reference section in the docs.
+
+## Legend for illustrations
+
+Many of the illustrations in the docs use the following legend to represent tablet leaders and followers, cloud regions and zones, and applications.
+
+![Legend for illustrations](/images/develop/global-apps/global-database-legend.png)
 
 ## Next steps
 

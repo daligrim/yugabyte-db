@@ -1,9 +1,9 @@
 ---
-title: Manage users and roles
+title: Manage users and roles - YSQL
+headerTitle: Manage users and roles
 linkTitle: Manage users and roles
 description: Manage users and roles in YSQL
 headcontent: Manage users and roles
-image: /images/section_icons/secure/create-roles.png
 menu:
   stable:
     identifier: create-roles
@@ -56,7 +56,7 @@ Roles that have `LOGIN` privileges are users. For example, create a user `john` 
 yugabyte=# CREATE ROLE john LOGIN PASSWORD 'PasswdForJohn';
 ```
 
-Read about [how to create users in YugabyteDB](../../enable-authentication/ysql/) in the Authentication section.
+Read about [how to create users in YugabyteDB](../../enable-authentication/authentication-ysql/) in the Authentication section.
 
 ## Grant roles
 
@@ -112,8 +112,8 @@ You should see the following output:
 In the table, note the following:
 
 * The `yugabyte` role is the built-in superuser.
-* The role `john` can login, and hence is a user. Note that `john` is not a superuser.
-* The roles `engineering` and `developer` cannot login.
+* The role `john` can log in, and hence is a user. Note that `john` is not a superuser.
+* The roles `engineering` and `developer` cannot log in.
 * Both `john` and `developer` inherit the role `engineering`.
 
 ## Revoke roles

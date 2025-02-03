@@ -3,7 +3,6 @@ title: Contribution checklist
 headerTitle: Contribution checklist
 linkTitle: Contribution checklist
 description: Review the steps to start contributing code and documentation.
-image: /images/section_icons/index/quick_start.png
 headcontent: Checklist for contributing to the core database.
 menu:
   preview:
@@ -21,16 +20,16 @@ type: docs
     git clone https://github.com/yugabyte/yugabyte-db.git
     ```
 
-* Next, [build the source code](../build-from-src).
-* Optionally, you may want to [run the unit tests](../run-unit-tests).
+* Next, [build the source code](../build-from-src-almalinux).
+* Optionally, you may want to [run the unit tests](../build-and-test#test).
 
 ## Step 2. Start a local cluster
 
-Having built the source, you can [start a local cluster](../../../quick-start/).
+Having built the source, you can [start a local cluster](/preview/tutorials/quick-start/macos/).
 
 ## Step 3. Make the change
 
-You should now make you change, recompile the code and test out your change.
+You should now make your change, recompile the code and test out your change.
 
 {{< note title="Note" >}}
 
@@ -44,7 +43,7 @@ Depending on the change, you should add unit tests to make sure they do not brea
 
 ## Step 5. Re-run unit tests
 
-Re-run the unit tests with you changes and make sure all tests pass.
+Re-run the unit tests with your changes and make sure all tests pass.
 
 ## Step 6. Submit a pull request
 

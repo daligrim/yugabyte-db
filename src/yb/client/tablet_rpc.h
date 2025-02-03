@@ -13,14 +13,13 @@
 //
 //
 
-#ifndef YB_CLIENT_TABLET_RPC_H
-#define YB_CLIENT_TABLET_RPC_H
+#pragma once
 
 #include <memory>
 #include <string>
 #include <unordered_set>
 
-#include <gflags/gflags_declare.h>
+#include "yb/util/flags.h"
 #include <gtest/gtest_prod.h>
 
 #include "yb/client/client_fwd.h"
@@ -35,18 +34,35 @@
 #include "yb/tserver/tserver_fwd.h"
 #include "yb/tserver/tserver_types.pb.h"
 
-#include "yb/util/status_fwd.h"
+#include "yb/util/atomic.h"
 #include "yb/util/net/net_fwd.h"
+#include "yb/util/pb_util.h"
+#include "yb/util/status_fwd.h"
+
+DECLARE_bool(TEST_always_return_consensus_info_for_succeeded_rpc);
 
 namespace yb {
 
 namespace tserver {
+class TabletConsensusInfoPB;
 class TabletServerServiceProxy;
 }
 
 namespace client {
 namespace internal {
 
+// A TabletRpc is an RPC that is being sent to a tablet rather than a particular TServer or the
+// master leader.  This requires extra work like looking up where the tablet participants are and
+// dealing with stale information about where tablet participants/leaders are when retrying.
+//
+// Most of the code for handling this has been put in a separate class, TabletInvoker; this class
+// (TabletRpc) acts as an interface, providing access to RPC class functionality needed by
+// TabletInvoker that is not already provided by the rpc::RpcCommand interface.
+//
+// Many of these virtual methods exist to allow the untemplated TabletInvoker to work with the
+// request and/or response of the RPC in a generic manner.  For example,
+// SetRequestRaftConfigOpidIndex(-) is used to set the set_raft_config_opid_index field of the
+// request if the request type has such a field.
 class TabletRpc {
  public:
   virtual const tserver::TabletServerErrorPB* response_error() const = 0;
@@ -55,7 +71,14 @@ class TabletRpc {
   // attempt_num starts with 1.
   virtual void SendRpcToTserver(int attempt_num) = 0;
 
-  virtual bool ShouldRetryExpiredRequest() { return false; }
+  // Called to partially refresh a tablet's tablet peers using information
+  // piggybacked from a successful or failed response of a tablet RPC.
+  // The responses in this case will have a field called tablet_consensus_info,
+  // which carries the tablet server and replicas' raft config information.
+  // Returns true if we successfully updated the metacache, otherwise false.
+  virtual bool RefreshMetaCacheWithResponse() { return false; }
+
+  virtual void SetRequestRaftConfigOpidIndex(int64_t opid_index) {}
 
  protected:
   ~TabletRpc() {}
@@ -63,10 +86,38 @@ class TabletRpc {
 
 tserver::TabletServerErrorPB_Code ErrorCode(const tserver::TabletServerErrorPB* error);
 
+// Returns false iff we detect that the consensus info is unexpectedly missing.
+template <class Resp, class Req>
+inline bool CheckIfConsensusInfoUnexpectedlyMissing(const Req& request, const Resp& response) {
+  if constexpr (tserver::HasTabletConsensusInfo<Resp>::value) {
+    if (GetAtomicFlag(&FLAGS_TEST_always_return_consensus_info_for_succeeded_rpc)) {
+      // If that flag is set, we expect every successful RPC response (i.e., the response that comes
+      // back has no error field) to have its tablet_consensus_info field filled in if the response
+      // type has that field.
+      if (!response.has_error() && !response.has_tablet_consensus_info()) {
+        // This should be a debug build at this point, but this test is somewhat expensive so do it
+        // last to minimize how often we need to do it.
+        Resp empty;
+        if (pb_util::ArePBsEqual(response, empty, /*diff_str=*/ nullptr)) {
+          return true;  // we haven't gotten an actual response from an RPC yet...
+        }
+        LOG(ERROR) << "Detected consensus info unexpectedly missing; request: "
+                   << request.DebugString() << ", response: " << response.DebugString();
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+// See class comment for TabletRpc.
 class TabletInvoker {
  public:
   // If table is specified, TabletInvoker can detect that table partitions are stale in case tablet
   // is no longer available and return ClientErrorCode::kTablePartitionListIsStale.
+  //
+  // Precondition: command and rpc are different interfaces of the same object or (in tests) both
+  // nullptr.
   explicit TabletInvoker(const bool local_tserver_only,
                          const bool consistent_prefix,
                          YBClient* client,
@@ -76,7 +127,7 @@ class TabletInvoker {
                          const std::shared_ptr<const YBTable>& table,
                          rpc::RpcRetrier* retrier,
                          Trace* trace,
-                         master::IncludeInactive include_inactive = master::IncludeInactive::kFalse,
+                         master::IncludeHidden include_hidden = master::IncludeHidden::kFalse,
                          master::IncludeDeleted include_deleted = master::IncludeDeleted::kFalse);
 
   virtual ~TabletInvoker();
@@ -97,6 +148,9 @@ class TabletInvoker {
 
   bool is_consistent_prefix() const { return consistent_prefix_; }
 
+  bool RefreshTabletInfoWithConsensusInfo(
+      const tserver::TabletConsensusInfoPB& tablet_consensus_info);
+
  private:
   friend class TabletRpcTest;
   FRIEND_TEST(TabletRpcTest, TabletInvokerSelectTabletServerRace);
@@ -114,7 +168,8 @@ class TabletInvoker {
   // Marks all replicas on current_ts_ as failed and retries the write on a
   // new replica.
   Status FailToNewReplica(const Status& reason,
-                                  const tserver::TabletServerErrorPB* error_code = nullptr);
+                          const tserver::TabletServerErrorPB* error_code = nullptr,
+                          bool consensus_info_refresh_succeeded = false);
 
   // Called when we finish a lookup (to find the new consensus leader). Retries
   // the rpc after a short delay.
@@ -124,11 +179,26 @@ class TabletInvoker {
 
   // If we receive TABLET_NOT_FOUND and current_ts_ is set, that means we contacted a tserver
   // with a tablet_id, but the tserver no longer has that tablet.
-  bool TabletNotFoundOnTServer(const tserver::TabletServerErrorPB* error_code,
-                               const Status& status) {
-    return status.IsNotFound() &&
+  // If we receive ShutdownInProgress status then the tablet is about to shutdown and such tablet
+  // should also be considered as not found.
+  bool IsTabletConsideredNotFound(
+      const tserver::TabletServerErrorPB* error_code, const Status& status) {
+    return (status.IsNotFound() &&
         ErrorCode(error_code) == tserver::TabletServerErrorPB::TABLET_NOT_FOUND &&
-        current_ts_ != nullptr;
+        current_ts_ != nullptr) || status.IsShutdownInProgress();
+  }
+
+  bool IsTabletConsideredNonLeader(
+      const tserver::TabletServerErrorPB* error_code, const Status& status) {
+    // The error code is undefined for some statuses like Aborted where we don't even send an RPC
+    // because the service is unavailable and thus don't have a response with an error code; to
+    // handle that here, we only check the error code for statuses we know have valid error codes
+    // and may have the error code we are looking for.
+    if (ErrorCode(error_code) == tserver::TabletServerErrorPB::NOT_THE_LEADER &&
+        current_ts_ != nullptr) {
+      return status.IsNotFound() || status.IsIllegalState();
+}
+    return false;
   }
 
   YBClient* const client_;
@@ -150,8 +220,8 @@ class TabletInvoker {
   // while this object is alive.
   Trace* const trace_;
 
-  // Whether or not to allow lookups of inactive (hidden) tablets.
-  const master::IncludeInactive include_inactive_;
+  // Whether or not to allow lookups of hiddden tablets.
+  const master::IncludeHidden include_hidden_;
 
   // Whether or not to allow deleted tablets.
   const master::IncludeDeleted include_deleted_;
@@ -193,5 +263,3 @@ HybridTime GetPropagatedHybridTime(const Response& response) {
 } // namespace internal
 } // namespace client
 } // namespace yb
-
-#endif // YB_CLIENT_TABLET_RPC_H

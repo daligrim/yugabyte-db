@@ -11,8 +11,7 @@
 // under the License.
 //
 
-#ifndef YB_UTIL_TSAN_UTIL_H
-#define YB_UTIL_TSAN_UTIL_H
+#pragma once
 
 namespace yb {
 
@@ -27,6 +26,14 @@ constexpr T NonTsanVsTsan(T value_not_in_tsan, T value_in_tsan) {
 
 constexpr bool IsTsan() {
   return NonTsanVsTsan(false, true);
+}
+
+constexpr bool IsAsan() {
+#if ADDRESS_SANITIZER
+  return true;
+#else
+  return false;
+#endif
 }
 
 template <class T>
@@ -50,6 +57,20 @@ constexpr T RegularBuildVsDebugVsSanitizers(
 #endif
 }
 
+template <class T>
+constexpr T ReleaseVsDebugVsAsanVsTsan(
+    T release_build_value, T debug_build_value, T asan_value, T tsan_value) {
+#if defined(THREAD_SANITIZER)
+  return tsan_value;
+#elif defined(ADDRESS_SANITIZER)
+  return asan_value;
+#elif defined(NDEBUG)
+  return release_build_value;
+#else
+  return debug_build_value;
+#endif
+}
+
 constexpr bool IsSanitizer() {
   return RegularBuildVsSanitizers(false, true);
 }
@@ -58,5 +79,3 @@ const int kTimeMultiplier = RegularBuildVsSanitizers(1, 3);
 const float kTimeMultiplierWithFraction = RegularBuildVsSanitizers(1.0f, 3.0f);
 
 }  // namespace yb
-
-#endif  // YB_UTIL_TSAN_UTIL_H

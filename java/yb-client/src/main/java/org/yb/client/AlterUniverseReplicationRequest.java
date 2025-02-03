@@ -29,6 +29,24 @@ public class AlterUniverseReplicationRequest extends YRpc<AlterUniverseReplicati
   private final Set<String> sourceTableIdsToRemove;
   private final Set<HostPortPB> sourceMasterAddresses;
   private final String newReplicationGroupName;
+  private final boolean removeTableIgnoreErrors;
+  // Must be null for table level remove to be used.
+  private final String producerNamespaceIdToRemove;
+
+  AlterUniverseReplicationRequest(
+    YBTable table,
+    String replicationGroupName,
+    String producerNamespaceIdToRemove) {
+    super(table);
+    this.replicationGroupName = replicationGroupName;
+    this.sourceTableIdsToAddBootstrapIdMap = new HashMap<>();
+    this.sourceTableIdsToRemove = new HashSet<>();
+    this.sourceMasterAddresses = new HashSet<>();
+    this.newReplicationGroupName = null;
+    this.removeTableIgnoreErrors = true;
+    this.producerNamespaceIdToRemove = producerNamespaceIdToRemove;
+  }
+
 
   AlterUniverseReplicationRequest(
     YBTable table,
@@ -36,13 +54,16 @@ public class AlterUniverseReplicationRequest extends YRpc<AlterUniverseReplicati
     Map<String, String> sourceTableIdsToAddBootstrapIdMap,
     Set<String> sourceTableIdsToRemove,
     Set<CommonNet.HostPortPB> sourceMasterAddresses,
-    String newReplicationGroupName) {
+    String newReplicationGroupName,
+    boolean removeTableIgnoreErrors) {
     super(table);
     this.replicationGroupName = replicationGroupName;
     this.sourceTableIdsToAddBootstrapIdMap = sourceTableIdsToAddBootstrapIdMap;
     this.sourceTableIdsToRemove = sourceTableIdsToRemove;
     this.sourceMasterAddresses = sourceMasterAddresses;
     this.newReplicationGroupName = newReplicationGroupName;
+    this.removeTableIgnoreErrors = removeTableIgnoreErrors;
+    this.producerNamespaceIdToRemove = null;
   }
 
   @Override
@@ -58,18 +79,24 @@ public class AlterUniverseReplicationRequest extends YRpc<AlterUniverseReplicati
     });
 
     final MasterReplicationOuterClass.AlterUniverseReplicationRequestPB.Builder builder =
-      MasterReplicationOuterClass.AlterUniverseReplicationRequestPB.newBuilder()
-        .setProducerId(replicationGroupName)
-        .addAllProducerMasterAddresses(sourceMasterAddresses)
-        .addAllProducerTableIdsToAdd(sourceTableIdsToAdd)
-        .addAllProducerTableIdsToRemove(sourceTableIdsToRemove);
+        MasterReplicationOuterClass.AlterUniverseReplicationRequestPB.newBuilder()
+            .setReplicationGroupId(replicationGroupName)
+            .addAllProducerMasterAddresses(sourceMasterAddresses)
+            .addAllProducerTableIdsToAdd(sourceTableIdsToAdd)
+            .addAllProducerTableIdsToRemove(sourceTableIdsToRemove)
+            .setRemoveTableIgnoreErrors(removeTableIgnoreErrors);
+
     if (newReplicationGroupName != null) {
-      builder.setNewProducerUniverseId(newReplicationGroupName);
+      builder.setDEPRECATEDNewReplicationGroupId(newReplicationGroupName);
     }
 
     // If all bootstrap IDs are null, it is not required.
     if (sourceBootstrapIdstoAdd.stream().anyMatch(Objects::nonNull)){
       builder.addAllProducerBootstrapIdsToAdd(sourceBootstrapIdstoAdd);
+    }
+
+    if (producerNamespaceIdToRemove != null) {
+      builder.setProducerNamespaceIdToRemove(producerNamespaceIdToRemove);
     }
 
     return toChannelBuffer(header, builder.build());

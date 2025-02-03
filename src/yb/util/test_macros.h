@@ -29,8 +29,7 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_UTIL_TEST_MACROS_H
-#define YB_UTIL_TEST_MACROS_H
+#pragma once
 
 #include <set>
 #include <sstream>
@@ -40,8 +39,12 @@
 
 #include <gtest/gtest.h> // For SUCCEED/FAIL
 
-#include "yb/util/tostring.h"
 #include "yb/gutil/stl_util.h"  // For VectorToSet
+
+#include "yb/util/result.h"
+#include "yb/util/status.h"
+#include "yb/util/string_trim.h"
+#include "yb/util/tostring.h"
 
 namespace yb {
 namespace util {
@@ -128,7 +131,7 @@ std::string TEST_SetDifferenceStr(const std::set<T>& expected, const std::set<T>
     } \
   } while (0)
 
-#define EXPECT_NOT_OK(s) EXPECT_FALSE((s).ok())
+#define EXPECT_NOK(s) EXPECT_FALSE((s).ok())
 
 // Like the above, but doesn't record successful
 // tests.
@@ -158,6 +161,18 @@ std::string TEST_SetDifferenceStr(const std::set<T>& expected, const std::set<T>
       ADD_FAILURE() << "Unexpected error: " << ec.message(); \
     } \
   } while (false)
+
+// Asserts that result is ok, extracts result value is case of success.
+#define ASSERT_RESULT(expr) \
+  RESULT_CHECKER_HELPER(expr, ASSERT_OK(__result))
+
+// Expects that result is ok, extracts result value is case of success.
+#define EXPECT_RESULT(expr) \
+  RESULT_CHECKER_HELPER(expr, EXPECT_OK(__result))
+
+// Asserts that result is ok, extracts result value is case of success.
+#define ASSERT_RESULT_FAST(expr) \
+  RESULT_CHECKER_HELPER(expr, ASSERT_OK_FAST(__result))
 
 #ifdef THREAD_SANITIZER
 #define ASSERT_PERF_LE(lhs, rhs) do { (void)(lhs); (void)(rhs); } while(false)
@@ -217,28 +232,28 @@ inline std::string FindFirstDiff(const std::string& lhs, const std::string& rhs)
 // expected and actual values without any escaping. We're also printing a stack trace to allow
 // easier debugging.
 #define _ASSERT_EXPECT_STR_EQ_VERBOSE_COMMON_SETUP(expected, actual) \
-    const auto expected_tmp = ::yb::util::TrimStr(yb::util::LeftShiftTextBlock(expected)); \
-    const auto actual_tmp = ::yb::util::TrimStr(yb::util::LeftShiftTextBlock(actual));
+    const auto _expected_tmp = ::yb::util::TrimStr(yb::util::LeftShiftTextBlock(expected)); \
+    const auto _actual_tmp = ::yb::util::TrimStr(yb::util::LeftShiftTextBlock(actual));
 
 #define _ASSERT_EXPECT_STR_EQ_VERBOSE_COMMON_MSG \
-    "\nActual (trimmed):\n" << actual_tmp \
-        << "\n\nExpected (trimmed):\n" << expected_tmp;
+    "\nActual (trimmed):\n" << _actual_tmp \
+        << "\n\nExpected (trimmed):\n" << _expected_tmp;
 
 #define ASSERT_STR_EQ_VERBOSE_TRIMMED(expected, actual) \
   do { \
     _ASSERT_EXPECT_STR_EQ_VERBOSE_COMMON_SETUP(expected, actual) \
-    ASSERT_EQ(expected_tmp, actual_tmp) << _ASSERT_EXPECT_STR_EQ_VERBOSE_COMMON_MSG; \
+    ASSERT_EQ(_expected_tmp, _actual_tmp) << _ASSERT_EXPECT_STR_EQ_VERBOSE_COMMON_MSG; \
   } while(0)
 
 #define ASSERT_SETS_EQ(expected_set, actual_set) \
   do { \
-    auto&& expected_set_computed = (expected_set); \
-    auto&& actual_set_computed = (actual_set); \
-    if (expected_set_computed != actual_set_computed) { \
+    auto&& _expected_set_computed = (expected_set); \
+    auto&& _actual_set_computed = (actual_set); \
+    if (_expected_set_computed != _actual_set_computed) { \
       FAIL() << "Expected " \
              << BOOST_PP_STRINGIZE(actual_set) << " to be equal to " \
              << BOOST_PP_STRINGIZE(expected_set) << ". Differences: " \
-             << ::yb::util::TEST_SetDifferenceStr(expected_set_computed, actual_set_computed); \
+             << ::yb::util::TEST_SetDifferenceStr(_expected_set_computed, _actual_set_computed); \
     } \
   } while (0)
 
@@ -259,16 +274,16 @@ inline std::string FindFirstDiff(const std::string& lhs, const std::string& rhs)
 // ASSERT_EQ -> GTEST_ASSERT_EQ -> ASSERT_PRED_FORMAT2 -> GTEST_PRED_FORMAT2_ -> GTEST_ASSERT_
 #define ASSERT_VECTORS_EQ(expected_vector, actual_vector) \
   do { \
-    auto&& expected_vector_computed = (expected_vector); \
-    auto&& actual_vector_computed = (actual_vector); \
-    auto expected_set = ::yb::VectorToSet(expected_vector_computed); \
-    auto actual_set = ::yb::VectorToSet(actual_vector_computed); \
+    auto&& _expected_vector_computed = (expected_vector); \
+    auto&& _actual_vector_computed = (actual_vector); \
+    auto expected_set = ::yb::VectorToSet(_expected_vector_computed); \
+    auto actual_set = ::yb::VectorToSet(_actual_vector_computed); \
     GTEST_ASSERT_( \
         ::testing::internal::EqHelper::Compare( \
             BOOST_PP_STRINGIZE(expected_vector), \
             BOOST_PP_STRINGIZE(actual_vector), \
-            expected_vector_computed, \
-            actual_vector_computed), \
+            _expected_vector_computed, \
+            _actual_vector_computed), \
         GTEST_FATAL_FAILURE_) \
         << "Differences (as sets): " \
         << ::yb::util::TEST_SetDifferenceStr(expected_set, actual_set); \
@@ -279,7 +294,7 @@ inline std::string FindFirstDiff(const std::string& lhs, const std::string& rhs)
 #define EXPECT_STR_EQ_VERBOSE_TRIMMED(expected, actual) \
   do { \
     _ASSERT_EXPECT_STR_EQ_VERBOSE_COMMON_SETUP(expected, actual) \
-    EXPECT_EQ(expected_tmp, actual_tmp) << _ASSERT_EXPECT_STR_EQ_VERBOSE_COMMON_MSG; \
+    EXPECT_EQ(_expected_tmp, _actual_tmp) << _ASSERT_EXPECT_STR_EQ_VERBOSE_COMMON_MSG; \
   } while(0)
 
 #define YB_ASSERT_TRUE(condition) \
@@ -288,14 +303,14 @@ inline std::string FindFirstDiff(const std::string& lhs, const std::string& rhs)
 
 #define VERIFY_EQ(expected_expr, actual_expr) \
   do { \
-    auto&& expected = (expected_expr); \
-    auto&& actual = (actual_expr); \
-    if (expected != actual) { \
+    auto&& _expected = (expected_expr); \
+    auto&& _actual = (actual_expr); \
+    if (_expected != _actual) { \
       return ::testing::internal::EqFailure( \
           BOOST_PP_STRINGIZE(expected_expr), \
           BOOST_PP_STRINGIZE(actual_expr), \
-          ::testing::internal::FormatForComparisonFailureMessage(expected, actual), \
-          ::testing::internal::FormatForComparisonFailureMessage(actual, expected), \
+          ::testing::internal::FormatForComparisonFailureMessage(_expected, _actual), \
+          ::testing::internal::FormatForComparisonFailureMessage(_actual, _expected), \
           false); \
     } \
   } while (false) \
@@ -303,9 +318,9 @@ inline std::string FindFirstDiff(const std::string& lhs, const std::string& rhs)
 
 #define ASSERT_VERIFY(expr) \
   do { \
-    auto&& result = (expr); \
-    if (!result) { \
-      FAIL() << result.message(); \
+    auto&& _result = (expr); \
+    if (!_result) { \
+      FAIL() << _result.message(); \
     } \
   } while (false) \
   /**/
@@ -313,13 +328,37 @@ inline std::string FindFirstDiff(const std::string& lhs, const std::string& rhs)
 // Asserts that expr is not null, returns expr in case of success.
 #define ASSERT_NOTNULL(expr) \
   __extension__ ({ \
-    auto&& result = (expr); \
-    if (result == nullptr) { \
+    auto&& _result = (expr); \
+    if (_result == nullptr) { \
       FAIL() << "Unexpected nullptr"; \
     } \
-    std::move(result); \
+    std::move(_result); \
   }) \
   /**/
+
+// Similar to ASSERT_NOTNULL but does not return anything.
+#define ASSERT_ONLY_NOTNULL(expr) \
+  do { \
+    auto&& _result = (expr); \
+    if (_result == nullptr) { \
+      FAIL() << "Unexpected nullptr"; \
+    } \
+  } while (false)
+  /**/
+
+#define ASSERT_NOK_PG_ERROR_CODE(expr, pg_error_code) \
+  do { \
+    auto&& _status = (expr); \
+    ASSERT_NOK(_status); \
+    ASSERT_EQ(PgsqlError(_status), pg_error_code); \
+  } while (false)
+
+#define ASSERT_NOK_STR_CONTAINS(expr, expected_failure_substr) \
+  do { \
+    auto&& _result = (expr); \
+    ASSERT_NOK(_result); \
+    ASSERT_STR_CONTAINS(StatusToString(_result), expected_failure_substr); \
+  } while (false)
 
 #define CURRENT_TEST_NAME() \
   ::testing::UnitTest::GetInstance()->current_test_info()->name()
@@ -329,6 +368,10 @@ inline std::string FindFirstDiff(const std::string& lhs, const std::string& rhs)
 
 #define CURRENT_TEST_CASE_AND_TEST_NAME_STR() \
   (std::string(CURRENT_TEST_CASE_NAME()) + '.' + CURRENT_TEST_NAME())
+
+// Macros to disable tests in certain build types. Cannot be used in a parameterized test with
+// TEST_P or extended test fixtures with TEST_F_EX. For these, please use GTEST_SKIP or
+// YB_SKIP_TEST_IN_TSAN macros.
 
 #define YB_DISABLE_TEST(test_name) BOOST_PP_CAT(DISABLED_, test_name)
 
@@ -344,10 +387,22 @@ inline std::string FindFirstDiff(const std::string& lhs, const std::string& rhs)
 #define YB_DISABLE_TEST_IN_TSAN(test_name) test_name
 #endif
 
+#ifdef ADDRESS_SANITIZER
+#define YB_DISABLE_TEST_IN_ASAN(test_name) YB_DISABLE_TEST(test_name)
+#else
+#define YB_DISABLE_TEST_IN_ASAN(test_name) test_name
+#endif
+
 #if defined(THREAD_SANITIZER) || defined(ADDRESS_SANITIZER)
 #define YB_DISABLE_TEST_IN_SANITIZERS(test_name) YB_DISABLE_TEST(test_name)
 #else
 #define YB_DISABLE_TEST_IN_SANITIZERS(test_name) test_name
+#endif
+
+#ifdef FASTDEBUG
+#define YB_DISABLE_TEST_IN_FASTDEBUG(test_name) YB_DISABLE_TEST(test_name)
+#else
+#define YB_DISABLE_TEST_IN_FASTDEBUG(test_name) test_name
 #endif
 
 #if defined(__APPLE__) || defined(THREAD_SANITIZER) || defined(ADDRESS_SANITIZER)
@@ -356,12 +411,37 @@ inline std::string FindFirstDiff(const std::string& lhs, const std::string& rhs)
 #define YB_DISABLE_TEST_IN_SANITIZERS_OR_MAC(test_name) test_name
 #endif
 
-// TODO: use GTEST_SKIP() here when we upgrade gtest.
-#define YB_SKIP_TEST_IN_TSAN() do { \
+#if !defined(NDEBUG) || defined(THREAD_SANITIZER) || defined(ADDRESS_SANITIZER)
+#define YB_DISABLE_TEST_EXCEPT_RELEASE(test_name) YB_DISABLE_TEST(test_name)
+#else
+#define YB_DISABLE_TEST_EXCEPT_RELEASE(test_name) test_name
+#endif
+
+#ifdef __linux__
+#define YB_LINUX_ONLY_TEST(test_name) test_name
+#else
+#define YB_LINUX_ONLY_TEST(test_name) YB_DISABLE_TEST(test_name)
+#endif
+
+#if !defined(NDEBUG)
+#define YB_DEBUG_ONLY_TEST(test_name) test_name
+#else
+#define YB_DEBUG_ONLY_TEST(test_name) YB_DISABLE_TEST(test_name)
+#endif
+
+// Can be used in individual test cases or in the SetUp() method to skip all tests for a fixture.
+#define YB_SKIP_TEST_IN_TSAN() \
+  do { \
     if (::yb::IsTsan()) { \
-      LOG(INFO) << "This test is skipped in TSAN"; \
+      GTEST_SKIP() << "Skipping test in TSAN"; \
       return; \
     } \
   } while (false)
 
-#endif  // YB_UTIL_TEST_MACROS_H
+#define YB_SKIP_TEST_IN_SANITIZERS() \
+  do { \
+    if (::yb::IsSanitizer()) { \
+      GTEST_SKIP() << "Skipping test in sanitizers"; \
+      return; \
+    } \
+  } while (false)

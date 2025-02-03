@@ -33,12 +33,11 @@
 
 #include <memory>
 
-#include <gflags/gflags.h>
-#include <glog/logging.h>
-
-#include "yb/common/partition.h"
-#include "yb/common/ql_rowblock.h"
+#include "yb/dockv/partition.h"
+#include "yb/qlexpr/ql_rowblock.h"
+#include "yb/common/schema_pbutil.h"
 #include "yb/common/schema.h"
+#include "yb/common/transaction.h"
 #include "yb/common/wire_protocol.h"
 
 #include "yb/consensus/consensus.proxy.h"
@@ -49,7 +48,7 @@
 #include "yb/rpc/secure_stream.h"
 
 #include "yb/consensus/metadata.pb.h"
-#include "yb/server/secure.h"
+#include "yb/rpc/secure.h"
 #include "yb/server/server_base.proxy.h"
 
 #include "yb/tablet/tablet.pb.h"
@@ -69,16 +68,19 @@ using std::ostringstream;
 using std::shared_ptr;
 using std::string;
 using std::vector;
-using yb::HostPort;
 using yb::consensus::ConsensusServiceProxy;
 using yb::consensus::RaftConfigPB;
 using yb::rpc::Messenger;
 using yb::rpc::MessengerBuilder;
 using yb::rpc::RpcController;
-using yb::server::ServerStatusPB;
 using yb::server::ReloadCertificatesRequestPB;
 using yb::server::ReloadCertificatesResponsePB;
+using yb::server::ServerStatusPB;
 using yb::tablet::TabletStatusPB;
+using yb::tserver::ClearAllMetaCachesOnServerRequestPB;
+using yb::tserver::ClearAllMetaCachesOnServerResponsePB;
+using yb::tserver::ClearUniverseUuidRequestPB;
+using yb::tserver::ClearUniverseUuidResponsePB;
 using yb::tserver::CountIntentsRequestPB;
 using yb::tserver::CountIntentsResponsePB;
 using yb::tserver::DeleteTabletRequestPB;
@@ -91,6 +93,12 @@ using yb::tserver::ListTabletsRequestPB;
 using yb::tserver::ListTabletsResponsePB;
 using yb::tserver::TabletServerAdminServiceProxy;
 using yb::tserver::TabletServerServiceProxy;
+using yb::tserver::ListMasterServersRequestPB;
+using yb::tserver::ListMasterServersResponsePB;
+using yb::tserver::AcquireObjectLockRequestPB;
+using yb::tserver::AcquireObjectLockResponsePB;
+using yb::tserver::ReleaseObjectLockRequestPB;
+using yb::tserver::ReleaseObjectLockResponsePB;
 using yb::consensus::StartRemoteBootstrapRequestPB;
 using yb::consensus::StartRemoteBootstrapResponsePB;
 
@@ -99,6 +107,7 @@ const char* const kVerifyTabletOp = "verify_tablet";
 const char* const kAreTabletsRunningOp = "are_tablets_running";
 const char* const kIsServerReadyOp = "is_server_ready";
 const char* const kSetFlagOp = "set_flag";
+const char* const kValidateFlagValueOp = "validate_flag_value";
 const char* const kRefreshFlagsOp = "refresh_flags";
 const char* const kDumpTabletOp = "dump_tablet";
 const char* const kTabletStateOp = "get_tablet_state";
@@ -113,22 +122,28 @@ const char* const kCompactTabletOp = "compact_tablet";
 const char* const kCompactAllTabletsOp = "compact_all_tablets";
 const char* const kReloadCertificatesOp = "reload_certificates";
 const char* const kRemoteBootstrapOp = "remote_bootstrap";
+const char* const kListMasterServersOp = "list_master_servers";
+const char* const kClearAllMetaCachesOnServerOp = "clear_server_metacache";
+const char* const kClearUniverseUuidOp = "clear_universe_uuid";
+const char* const kAcquireObjectLockOp = "acquire_object_lock";
+const char* const kReleaseObjectLockOp = "release_object_lock";
+const char* const kReleaseAllLocksForTxnOp = "release_all_locks_for_txn";
 
-DEFINE_string(server_address, "localhost",
+DEFINE_NON_RUNTIME_string(server_address, "localhost",
               "Address of server to run against");
-DEFINE_int64(timeout_ms, 1000 * 60, "RPC timeout in milliseconds");
+DEFINE_NON_RUNTIME_int64(timeout_ms, 1000 * 60, "RPC timeout in milliseconds");
 
-DEFINE_bool(force, false, "set_flag: If true, allows command to set a flag "
+DEFINE_NON_RUNTIME_bool(force, false, "set_flag: If true, allows command to set a flag "
             "which is not explicitly marked as runtime-settable. Such flag changes may be "
             "simply ignored on the server, or may cause the server to crash.\n"
             "delete_tablet: If true, command will delete the tablet and remove the tablet "
             "from the memory, otherwise tablet metadata will be kept in memory with state "
             "TOMBSTONED.");
 
-DEFINE_string(certs_dir_name, "",
-              "Directory with certificates to use for secure server connection.");
+DEFINE_NON_RUNTIME_string(certs_dir_name, "",
+    "Directory with certificates to use for secure server connection.");
 
-DEFINE_string(client_node_name, "", "Client node name.");
+DEFINE_NON_RUNTIME_string(client_node_name, "", "Client node name.");
 
 PB_ENUM_FORMATTERS(yb::consensus::LeaderLeaseStatus);
 
@@ -162,6 +177,7 @@ namespace yb {
 namespace tools {
 
 typedef ListTabletsResponsePB::StatusAndSchemaPB StatusAndSchemaPB;
+typedef ListMasterServersResponsePB::MasterServerAndTypePB MasterServerAndTypePB;
 
 class TsAdminClient {
  public:
@@ -192,6 +208,9 @@ class TsAdminClient {
   // safe to change at runtime.
   Status SetFlag(const string& flag, const string& val,
                  bool force);
+
+  // Validates the value of a flag without actually setting it.
+  Status ValidateFlagValue(const string& flag, const string& val);
 
   // Refreshes all gflags on the remote server to the flagfile, via RPC.
   Status RefreshFlags();
@@ -242,6 +261,23 @@ class TsAdminClient {
   // Performs a manual remote bootstrap onto `target_server` for a given tablet.
   Status RemoteBootstrap(const std::string& target_server, const std::string& tablet_id);
 
+  // List information for all master servers.
+  Status ListMasterServers();
+
+  Status ClearAllMetaCachesOnServer();
+
+  // Clear Universe Uuid.
+  Status ClearUniverseUuid();
+
+  Status AcquireObjectLock(
+      const string& txn_id_str, const string& subtxn_id,
+      const string& database_id, const string& object_id, const std::string& lock_mode);
+  Status ReleaseObjectLock(
+      const string& txn_id_str, const string& subtxn_id,
+      const string& database_id, int argc, char** argv);
+  Status ReleaseAllLocksForTxn(
+      const string& txn_id_str, const string& subtxn_id);
+
  private:
   std::string addr_;
   MonoDelta timeout_;
@@ -275,9 +311,9 @@ Status TsAdminClient::Init() {
   auto messenger_builder = MessengerBuilder("ts-cli");
   if (!FLAGS_certs_dir_name.empty()) {
     const std::string& cert_name = FLAGS_client_node_name;
-    secure_context_ = VERIFY_RESULT(server::CreateSecureContext(
-        FLAGS_certs_dir_name, server::UseClientCerts(!cert_name.empty()), cert_name));
-    server::ApplySecureContext(secure_context_.get(), &messenger_builder);
+    secure_context_ = VERIFY_RESULT(rpc::CreateSecureContext(
+        FLAGS_certs_dir_name, rpc::UseClientCerts(!cert_name.empty()), cert_name));
+    rpc::ApplySecureContext(secure_context_.get(), &messenger_builder);
   }
   messenger_ = VERIFY_RESULT(messenger_builder.Build());
 
@@ -366,6 +402,18 @@ Status TsAdminClient::SetFlag(const string& flag, const string& val,
     default:
       return STATUS(RemoteError, resp.ShortDebugString());
   }
+}
+
+Status TsAdminClient::ValidateFlagValue(const string& flag, const string& val) {
+  server::ValidateFlagValueRequestPB req;
+  server::ValidateFlagValueResponsePB resp;
+  RpcController rpc;
+
+  rpc.set_timeout(timeout_);
+  req.set_flag_name(flag);
+  req.set_flag_value(val);
+
+  return generic_proxy_->ValidateFlagValue(req, &resp, &rpc);
 }
 
 Status TsAdminClient::RefreshFlags() {
@@ -464,8 +512,9 @@ Status TsAdminClient::DumpTablet(const std::string& tablet_id) {
     return STATUS(IOError, "Failed to read: ", resp.error().ShortDebugString());
   }
 
-  QLRowBlock row_block(schema);
-  Slice data = VERIFY_RESULT(rpc.GetSidecar(0));
+  qlexpr::QLRowBlock row_block(schema);
+  auto data_buffer = VERIFY_RESULT(rpc.ExtractSidecar(0));
+  auto data = data_buffer.AsSlice();
   if (!data.empty()) {
     RETURN_NOT_OK(row_block.Deserialize(YQL_CLIENT_CQL, &data));
   }
@@ -649,6 +698,161 @@ Status TsAdminClient::RemoteBootstrap(const std::string& source_server,
   return Status::OK();
 }
 
+Status TsAdminClient::ListMasterServers() {
+  CHECK(initted_);
+  std::vector<MasterServerAndTypePB> master_servers;
+  ListMasterServersRequestPB req;
+  ListMasterServersResponsePB resp;
+  RpcController rpc;
+
+  rpc.set_timeout(timeout_);
+  RETURN_NOT_OK(ts_proxy_->ListMasterServers(req, &resp, &rpc));
+  if (resp.has_error()) {
+    return StatusFromPB(resp.error().status());
+  }
+
+  master_servers.assign(resp.master_server_and_type().begin(),
+                          resp.master_server_and_type().end());
+
+  std::cout << "RPC Host/Port\t\tRole" << std::endl;
+  for (const auto &master_server_and_type : master_servers) {
+    std::string leader_string = master_server_and_type.is_leader() ? "Leader" : "Follower";
+    std::cout << master_server_and_type.master_server() << "\t\t" << leader_string << std::endl;
+  }
+
+  return Status::OK();
+}
+
+Status TsAdminClient::ClearAllMetaCachesOnServer() {
+  CHECK(initted_);
+  tserver::ClearAllMetaCachesOnServerRequestPB req;
+  tserver::ClearAllMetaCachesOnServerResponsePB resp;
+  RpcController rpc;
+  rpc.set_timeout(timeout_);
+  RETURN_NOT_OK(ts_proxy_->ClearAllMetaCachesOnServer(req, &resp, &rpc));
+  return Status::OK();
+}
+
+Status TsAdminClient::ClearUniverseUuid() {
+  CHECK(initted_);
+  ClearUniverseUuidRequestPB req;
+  ClearUniverseUuidResponsePB resp;
+  RpcController rpc;
+
+  rpc.set_timeout(timeout_);
+  RETURN_NOT_OK(ts_proxy_->ClearUniverseUuid(req, &resp, &rpc));
+  if (resp.has_error()) {
+    return StatusFromPB(resp.error().status());
+  }
+
+  std::cout << "Universe UUID cleared from Instance Metadata" << std::endl;
+  return Status::OK();
+}
+
+Status TsAdminClient::AcquireObjectLock(
+    const string& txn_id_str, const string& subtxn_id,
+    const string& database_id, const string& object_id, const std::string& lock_mode) {
+  SCHECK(initted_, IllegalState, "TsAdminClient not initialized");
+  static const std::unordered_map<std::string, TableLockType> lock_key_entry_map = {
+    {"ACCESS_SHARE", ACCESS_SHARE},
+    {"ROW_SHARE", ROW_SHARE},
+    {"ROW_EXCLUSIVE", ROW_EXCLUSIVE},
+    {"SHARE_UPDATE_EXCLUSIVE", SHARE_UPDATE_EXCLUSIVE},
+    {"SHARE", SHARE},
+    {"SHARE_ROW_EXCLUSIVE", SHARE_ROW_EXCLUSIVE},
+    {"EXCLUSIVE", EXCLUSIVE},
+    {"ACCESS_EXCLUSIVE", ACCESS_EXCLUSIVE},
+  };
+  auto it = lock_key_entry_map.find(lock_mode);
+  SCHECK(it != lock_key_entry_map.end(), InvalidArgument, "Unsupported lock mode");
+
+  tserver::AcquireObjectLockRequestPB req;
+  tserver::AcquireObjectLockResponsePB resp;
+  RpcController rpc;
+  rpc.set_timeout(timeout_);
+
+  auto txn_id = VERIFY_RESULT(TransactionId::FromString(txn_id_str));
+  req.set_txn_id(txn_id.data(), txn_id.size());
+  req.set_subtxn_id(stoi(subtxn_id));
+  req.set_session_host_uuid(FLAGS_server_address);
+  auto* object_lock_req = req.add_object_locks();
+  object_lock_req->set_database_oid(stoi(database_id));
+  object_lock_req->set_object_oid(stoi(object_id));
+  object_lock_req->set_lock_type(it->second);
+
+  RETURN_NOT_OK(ts_proxy_->AcquireObjectLocks(req, &resp, &rpc));
+
+  if (resp.has_error()) {
+    return StatusFromPB(resp.error().status());
+  }
+  std::cout << "Acquired lock for txn=" << txn_id
+            << " subtxn id=" << subtxn_id
+            << " on object with id=" << object_id
+            << " database id=" << database_id
+            << " and mode " << lock_mode << " at tserver local object lock manager" << std::endl;
+  return Status::OK();
+}
+
+Status TsAdminClient::ReleaseObjectLock(
+    const string& txn_id_str, const string& subtxn_id,
+    const string& database_id, int argc, char** argv) {
+  SCHECK(initted_, IllegalState, "TsAdminClient not initialized");
+
+  tserver::ReleaseObjectLockRequestPB req;
+  tserver::ReleaseObjectLockResponsePB resp;
+  RpcController rpc;
+  rpc.set_timeout(timeout_);
+
+  auto txn_id = VERIFY_RESULT(TransactionId::FromString(txn_id_str));
+  req.set_txn_id(txn_id.data(), txn_id.size());
+  req.set_subtxn_id(stoi(subtxn_id));
+  req.set_session_host_uuid(FLAGS_server_address);
+  std::ostringstream object_ids_stream;
+  for (int i = 5; i < argc; i++) {
+    object_ids_stream << " " << argv[i];
+    auto* object_lock_req = req.add_object_locks();
+    object_lock_req->set_database_oid(stoi(database_id));
+    object_lock_req->set_object_oid(atoi(argv[i]));
+  }
+
+  RETURN_NOT_OK(ts_proxy_->ReleaseObjectLocks(req, &resp, &rpc));
+
+  if (resp.has_error()) {
+    return StatusFromPB(resp.error().status());
+  }
+  std::cout << "Released all locks on objects with ids" << object_ids_stream.str()
+            << " database id=" <<  database_id
+            << " for txn=" << txn_id
+            << " subtxn id=" << subtxn_id
+            << " at tserver local object lock manager" << std::endl;
+  return Status::OK();
+}
+
+Status TsAdminClient::ReleaseAllLocksForTxn(
+    const string& txn_id_str, const string& subtxn_id) {
+  SCHECK(initted_, IllegalState, "TsAdminClient not initialized");
+
+  tserver::ReleaseObjectLockRequestPB req;
+  tserver::ReleaseObjectLockResponsePB resp;
+  RpcController rpc;
+  rpc.set_timeout(timeout_);
+
+  auto txn_id = VERIFY_RESULT(TransactionId::FromString(txn_id_str));
+  req.set_txn_id(txn_id.data(), txn_id.size());
+  req.set_session_host_uuid(FLAGS_server_address);
+  if (!subtxn_id.empty()) {
+    req.set_subtxn_id(stoi(subtxn_id));
+  }
+  req.set_release_all_locks(true);
+  RETURN_NOT_OK(ts_proxy_->ReleaseObjectLocks(req, &resp, &rpc));
+  if (resp.has_error()) {
+    return StatusFromPB(resp.error().status());
+  }
+  std::cout << "Released all locks for txn id=" << txn_id
+            << " subtxn=" << subtxn_id << " at tserver local object lock manager" << std::endl;
+  return Status::OK();
+}
+
 namespace {
 
 void SetUsage(const char* argv0) {
@@ -660,6 +864,7 @@ void SetUsage(const char* argv0) {
       << "  " << kAreTabletsRunningOp << "\n"
       << "  " << kIsServerReadyOp << "\n"
       << "  " << kSetFlagOp << " [-force] <flag> <value>\n"
+      << "  " << kValidateFlagValueOp << " <flag> <value>\n"
       << "  " << kRefreshFlagsOp << "\n"
       << "  " << kTabletStateOp << " <tablet_id>\n"
       << "  " << kDumpTabletOp << " <tablet_id>\n"
@@ -675,7 +880,15 @@ void SetUsage(const char* argv0) {
       << "  " << kVerifyTabletOp
       << " <tablet_id> <number of indexes> <index list> <start_key> <number of rows>\n"
       << "  " << kReloadCertificatesOp << "\n"
-      << "  " << kRemoteBootstrapOp << " <server address to bootstrap from> <tablet_id>\n";
+      << "  " << kRemoteBootstrapOp << " <server address to bootstrap from> <tablet_id>\n"
+      << "  " << kListMasterServersOp << "\n"
+      << "  " << kClearUniverseUuidOp << "\n"
+      << "  " << kAcquireObjectLockOp
+      << " <txn id> <subtxn id> <database_id> <object_id> <lock type>\n"
+      << "  " << kReleaseObjectLockOp
+      << " <txn id> <subtxn id> <database_id> <object_id> [<object_id>..]\n"
+      << "  " << kReleaseAllLocksForTxnOp
+      << " <txn id> [subtxn id]\n";
   google::SetUsageMessage(str.str());
 }
 
@@ -716,16 +929,17 @@ static int TsCliMain(int argc, char** argv) {
       Schema schema;
       RETURN_NOT_OK_PREPEND_FROM_MAIN(SchemaFromPB(status_and_schema.schema(), &schema),
                                       "Unable to deserialize schema from " + addr);
-      PartitionSchema partition_schema;
-      RETURN_NOT_OK_PREPEND_FROM_MAIN(PartitionSchema::FromPB(status_and_schema.partition_schema(),
-                                                              schema, &partition_schema),
-                                      "Unable to deserialize partition schema from " + addr);
+      dockv::PartitionSchema partition_schema;
+      RETURN_NOT_OK_PREPEND_FROM_MAIN(
+          dockv::PartitionSchema::FromPB(
+              status_and_schema.partition_schema(), schema, &partition_schema),
+          "Unable to deserialize partition schema from " + addr);
 
 
       TabletStatusPB ts = status_and_schema.tablet_status();
 
-      Partition partition;
-      Partition::FromPB(ts.partition(), &partition);
+      dockv::Partition partition;
+      dockv::Partition::FromPB(ts.partition(), &partition);
 
       string state = tablet::RaftGroupStatePB_Name(ts.state());
       std::cout << "Tablet id: " << ts.tablet_id() << std::endl;
@@ -789,6 +1003,13 @@ static int TsCliMain(int argc, char** argv) {
 
     RETURN_NOT_OK_PREPEND_FROM_MAIN(client.SetFlag(argv[2], argv[3], FLAGS_force),
                                     "Unable to set flag");
+
+  } else if (op == kValidateFlagValueOp) {
+    CHECK_ARGC_OR_RETURN_WITH_USAGE(op, 4);
+
+    RETURN_NOT_OK_PREPEND_FROM_MAIN(
+        client.ValidateFlagValue(argv[2], argv[3]), "Invalid flag value");
+    std::cout << "Flag value is valid" << std::endl;
 
   } else if (op == kRefreshFlagsOp) {
     CHECK_ARGC_OR_RETURN_WITH_USAGE(op, 2);
@@ -885,6 +1106,41 @@ static int TsCliMain(int argc, char** argv) {
     string tablet_id = argv[3];
     RETURN_NOT_OK_PREPEND_FROM_MAIN(client.RemoteBootstrap(target_server, tablet_id),
                                     "Unable to run remote bootstrap");
+  } else if (op == kListMasterServersOp) {
+    CHECK_ARGC_OR_RETURN_WITH_USAGE(op, 2);
+
+    RETURN_NOT_OK_PREPEND_FROM_MAIN(client.ListMasterServers(),
+                                    "Unable to list master servers on " + addr);
+  } else if (op == kClearAllMetaCachesOnServerOp) {
+    CHECK_ARGC_OR_RETURN_WITH_USAGE(op, 2);
+    RETURN_NOT_OK_PREPEND_FROM_MAIN(
+        client.ClearAllMetaCachesOnServer(),
+        "Unable to clear the meta-cache on tablet server with address " + addr);
+  } else if (op == kClearUniverseUuidOp) {
+    CHECK_ARGC_OR_RETURN_WITH_USAGE(op, 2);
+
+    RETURN_NOT_OK_PREPEND_FROM_MAIN(client.ClearUniverseUuid(),
+                                    "Unable to clear universe uuid on " + addr);
+  } else if (op == kAcquireObjectLockOp) {
+    CHECK_ARGC_OR_RETURN_WITH_USAGE(op, 7);
+    RETURN_NOT_OK_PREPEND_FROM_MAIN(
+        client.AcquireObjectLock(argv[2], argv[3], argv[4], argv[5], argv[6]),
+        "Unable to acquire object lock");
+  } else if (op == kReleaseObjectLockOp) {
+    if (argc < 6) {
+      CHECK_ARGC_OR_RETURN_WITH_USAGE(op, 6);
+    }
+    RETURN_NOT_OK_PREPEND_FROM_MAIN(
+        client.ReleaseObjectLock(argv[2], argv[3], argv[4], argc, argv),
+        "Unable to release object lock");
+  } else if (op == kReleaseAllLocksForTxnOp) {
+    if (argc < 3) {
+      CHECK_ARGC_OR_RETURN_WITH_USAGE(op, 3);
+    }
+    std::string subtxn = argc > 3 ? argv[3] : "";
+    RETURN_NOT_OK_PREPEND_FROM_MAIN(
+        client.ReleaseAllLocksForTxn(argv[2], subtxn),
+        "Unable to release all locks for given transaction");
   } else {
     std::cerr << "Invalid operation: " << op << std::endl;
     google::ShowUsageWithFlagsRestrict(argv[0], __FILE__);

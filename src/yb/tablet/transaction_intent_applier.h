@@ -11,32 +11,47 @@
 // under the License.
 //
 
-#ifndef YB_TABLET_TRANSACTION_INTENT_APPLIER_H
-#define YB_TABLET_TRANSACTION_INTENT_APPLIER_H
+#pragma once
 
+#include <span>
 #include <type_traits>
 
 #include "yb/common/transaction.h"
 
 #include "yb/docdb/docdb_fwd.h"
 
+#include "yb/dockv/dockv_fwd.h"
+#include "yb/rocksdb/rocksdb_fwd.h"
 #include "yb/tablet/tablet_fwd.h"
 
 #include "yb/util/status_fwd.h"
 
-namespace yb {
-namespace tablet {
+namespace yb::tablet {
+
+YB_DEFINE_ENUM(RemoveReason,
+               (kApplied)(kLargeApplied)(kProcessCleanup)(kStatusReceived)(kAbortReceived)
+               (kShutdown)(kSetDB)(kCleanupAborts)(kNotFound)(kUnlock));
 
 // Interface to object that should apply intents in RocksDB when transaction is applying.
 class TransactionIntentApplier {
  public:
-  virtual Result<docdb::ApplyTransactionState> ApplyIntents(const TransactionApplyData& data) = 0;
+  virtual docdb::ApplyTransactionState ApplyIntents(const TransactionApplyData& data) = 0;
   virtual Status RemoveIntents(
-      const RemoveIntentsData& data, const TransactionId& transaction_id) = 0;
+      const RemoveIntentsData& data, RemoveReason reason,
+      const TransactionId& transaction_id) = 0;
   virtual Status RemoveIntents(
-      const RemoveIntentsData& data, const TransactionIdSet& transactions) = 0;
+      const RemoveIntentsData& data, RemoveReason reason,
+      const TransactionIdSet& transactions) = 0;
+  virtual Status WritePostApplyMetadata(
+      std::span<const PostApplyTransactionMetadata> metadatas) = 0;
 
-  virtual Result<HybridTime> ApplierSafeTime(HybridTime min_allowed, CoarseTimePoint deadline) = 0;
+  virtual Status RemoveAdvisoryLocks(
+      const TransactionId& transaction_id, rocksdb::DirectWriteHandler* handler) = 0;
+  virtual Status RemoveAdvisoryLock(
+      const TransactionId& transaction_id, const Slice& key,
+      const dockv::IntentTypeSet& intent_types, rocksdb::DirectWriteHandler* handler) = 0;
+
+  virtual HybridTime ApplierSafeTime(HybridTime min_allowed, CoarseTimePoint deadline) = 0;
 
   // See TransactionParticipant::WaitMinRunningHybridTime below
   virtual void MinRunningHybridTimeSatisfied() = 0;
@@ -45,7 +60,4 @@ class TransactionIntentApplier {
   ~TransactionIntentApplier() {}
 };
 
-}  // namespace tablet
-}  // namespace yb
-
-#endif  // YB_TABLET_TRANSACTION_INTENT_APPLIER_H
+}  // namespace yb::tablet

@@ -1,13 +1,13 @@
 // Copyright (c) YugaByte, Inc.
 
-import React, { Component } from 'react';
+import { Component } from 'react';
 import PropTypes from 'prop-types';
 import { isNonEmptyObject, isNonEmptyArray, timeFormatXAxis } from '../../../utils/ObjectUtils';
 import './MetricsPanel.scss';
 import Measure from 'react-measure';
 import _ from 'lodash';
 import { METRIC_FONT } from '../MetricsConfig';
-import moment from 'moment';
+import moment from 'moment-timezone';
 
 const Plotly = require('plotly.js/lib/core');
 
@@ -54,8 +54,8 @@ export default class MetricsPanelOverview extends Component {
 
       if (max === 0) max = 1.01;
       metric.layout.autosize = false;
-      metric.layout.width = this.state.dimensions.width || 300;
-      metric.layout.height = 145;
+      metric.layout.width = this.props.width || this.state.dimensions.width || 300;
+      metric.layout.height = this.props.height || 145;
       metric.layout.title = '';
       metric.layout.showlegend = false;
       metric.layout.margin = {

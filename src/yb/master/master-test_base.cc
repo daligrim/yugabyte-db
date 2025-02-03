@@ -36,14 +36,14 @@
 
 #include <gtest/gtest.h>
 
+#include "yb/common/schema_pbutil.h"
 #include "yb/common/wire_protocol.h"
 
 #include "yb/gutil/strings/substitute.h"
 
-#include "yb/master/master-test-util.h"
 #include "yb/master/master.h"
 #include "yb/master/master_client.proxy.h"
-#include "yb/master/master_cluster.proxy.h"
+#include "yb/master/master_cluster_client.h"
 #include "yb/master/master_ddl.proxy.h"
 #include "yb/master/master_heartbeat.proxy.h"
 #include "yb/master/master_replication.proxy.h"
@@ -58,8 +58,12 @@
 #include "yb/util/status_format.h"
 #include "yb/util/status_log.h"
 
+using std::make_shared;
+
 DECLARE_bool(catalog_manager_check_ts_count_for_create_table);
 DECLARE_bool(TEST_disable_cdc_state_insert_on_setup);
+DECLARE_bool(TEST_create_table_in_running_state);
+DECLARE_uint32(tablet_replicas_per_gib_limit);
 
 namespace yb {
 namespace master {
@@ -76,9 +80,13 @@ void MasterTestBase::SetUp() {
 
   // In this test, we create tables to test catalog manager behavior,
   // but we have no tablet servers. Typically this would be disallowed.
-  FLAGS_catalog_manager_check_ts_count_for_create_table = false;
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_catalog_manager_check_ts_count_for_create_table) = false;
+  // no tablet servers means allowed tablet limit is 0 so disable that check
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_tablet_replicas_per_gib_limit) = 0;
   // Since this is a master-only test, don't do any operations on cdc state for xCluster tests.
-  FLAGS_TEST_disable_cdc_state_insert_on_setup = true;
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_disable_cdc_state_insert_on_setup) = true;
+  // Since this is a master-only test, don't wait for tablet creation of tables.
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_create_table_in_running_state) = true;
 
   // Start master with the create flag on.
   mini_master_.reset(new MiniMaster(Env::Default(), GetTestPath("Master"),
@@ -91,14 +99,15 @@ void MasterTestBase::SetUp() {
   rpc::ProxyCache proxy_cache(client_messenger_.get());
   proxy_client_ = std::make_unique<MasterClientProxy>(
       &proxy_cache, mini_master_->bound_rpc_addr());
-  proxy_cluster_ = std::make_unique<MasterClusterProxy>(
-      &proxy_cache, mini_master_->bound_rpc_addr());
   proxy_ddl_ = std::make_unique<MasterDdlProxy>(
       &proxy_cache, mini_master_->bound_rpc_addr());
   proxy_heartbeat_ = std::make_unique<MasterHeartbeatProxy>(
       &proxy_cache, mini_master_->bound_rpc_addr());
   proxy_replication_ = std::make_unique<MasterReplicationProxy>(
       &proxy_cache, mini_master_->bound_rpc_addr());
+
+  cluster_client_ = std::make_unique<MasterClusterClient>(
+      MasterClusterProxy(&proxy_cache, mini_master_->bound_rpc_addr()));
 
   // Create the default test namespace.
   CreateNamespaceResponsePB resp;
@@ -125,8 +134,25 @@ Status MasterTestBase::CreateTable(const NamespaceName& namespace_name,
 Status MasterTestBase::CreatePgsqlTable(const NamespaceId& namespace_id,
                                         const TableName& table_name,
                                         const Schema& schema) {
-  CreateTableRequestPB req, *request;
-  request = &req;
+  CreateTableRequestPB req;
+  return CreatePgsqlTable(namespace_id, table_name, schema, &req);
+}
+
+Status MasterTestBase::CreatePgsqlTable(
+    const NamespaceId& namespace_id, const TableName& table_name, const TableId& table_id,
+    const Schema& schema) {
+  CreateTableRequestPB req;
+
+  // PGSQL OIDs have a specific format. The table_id must be of the same format otherwise it can
+  // lead to failures such as during Alter table.
+  // See IsPgsqlId inside src/yb/common/entity_ids.cc for the exact format.
+  req.set_table_id(table_id);
+  return CreatePgsqlTable(namespace_id, table_name, schema, &req);
+}
+
+Status MasterTestBase::CreatePgsqlTable(
+    const NamespaceId& namespace_id, const TableName& table_name, const Schema& schema,
+    CreateTableRequestPB* request) {
   CreateTableResponsePB resp;
 
   request->set_table_type(TableType::PGSQL_TABLE_TYPE);
@@ -138,6 +164,7 @@ Status MasterTestBase::CreatePgsqlTable(const NamespaceId& namespace_id,
   }
   request->mutable_partition_schema()->set_hash_schema(PartitionSchemaPB::PGSQL_HASH_SCHEMA);
   request->mutable_schema()->mutable_table_properties()->set_num_tablets(8);
+  request->mutable_schema()->set_pgschema_name("public");
 
   // Dereferencing as the RPCs require const ref for request. Keeping request param as pointer
   // though, as that helps with readability and standardization.
@@ -339,6 +366,21 @@ Status MasterTestBase::CreateNamespace(const NamespaceName& ns_name,
   return CreateNamespaceWait(resp->id(), database_type);
 }
 
+Status MasterTestBase::CreatePgsqlNamespace(
+    const NamespaceName& ns_name, const NamespaceId& ns_id, CreateNamespaceResponsePB* resp) {
+  CreateNamespaceRequestPB req;
+  req.set_name(ns_name);
+  req.set_database_type(YQLDatabase::YQL_DATABASE_PGSQL);
+
+  // PGSQL OIDs have a specific format. The namespace id must be of the same format otherwise it can
+  // lead to failures such as during Alter table.
+  // See IsPgsqlId inside src/yb/common/entity_ids.cc for the exact format.
+  req.set_namespace_id(ns_id);
+
+  *resp = VERIFY_RESULT(CreateNamespaceAsync(req));
+  return CreateNamespaceWait(resp->id(), YQLDatabase::YQL_DATABASE_PGSQL);
+}
+
 Status MasterTestBase::CreateNamespaceAsync(const NamespaceName& ns_name,
                                             const boost::optional<YQLDatabase>& database_type,
                                             CreateNamespaceResponsePB* resp) {
@@ -348,11 +390,18 @@ Status MasterTestBase::CreateNamespaceAsync(const NamespaceName& ns_name,
     req.set_database_type(*database_type);
   }
 
-  RETURN_NOT_OK(proxy_ddl_->CreateNamespace(req, resp, ResetAndGetController()));
-  if (resp->has_error()) {
-    RETURN_NOT_OK(StatusFromPB(resp->error().status()));
-  }
+  *resp = VERIFY_RESULT(CreateNamespaceAsync(req));
   return Status::OK();
+}
+
+Result<CreateNamespaceResponsePB> MasterTestBase::CreateNamespaceAsync(
+    const CreateNamespaceRequestPB& req) {
+  CreateNamespaceResponsePB resp;
+  RETURN_NOT_OK(proxy_ddl_->CreateNamespace(req, &resp, ResetAndGetController()));
+  if (resp.has_error()) {
+    RETURN_NOT_OK(StatusFromPB(resp.error().status()));
+  }
+  return resp;
 }
 
 Status MasterTestBase::CreateNamespaceWait(const NamespaceId& ns_id,
@@ -497,16 +546,13 @@ void MasterTestBase::CheckTables(
   ASSERT_EQ(tables.tables_size(), table_info.size());
 }
 
-void MasterTestBase::UpdateMasterClusterConfig(SysClusterConfigEntryPB* cluster_config) {
-  ChangeMasterClusterConfigRequestPB change_req;
-  change_req.mutable_cluster_config()->CopyFrom(*cluster_config);
-  ChangeMasterClusterConfigResponsePB change_resp;
-  rpc::ProxyCache proxy_cache(client_messenger_.get());
-  master::MasterClusterProxy proxy(&proxy_cache, mini_master_->bound_rpc_addr());
-  ASSERT_OK(proxy.ChangeMasterClusterConfig(change_req, &change_resp, ResetAndGetController()));
+Status MasterTestBase::UpdateMasterClusterConfig(SysClusterConfigEntryPB* cluster_config) {
+  RETURN_NOT_OK(
+      cluster_client_->ChangeMasterClusterConfig(SysClusterConfigEntryPB(*cluster_config)));
   // Bump version number by 1, so we do not have to re-query.
   cluster_config->set_version(cluster_config->version() + 1);
   LOG(INFO) << "Update cluster config to: " << cluster_config->ShortDebugString();
+  return Status::OK();
 }
 
 } // namespace master

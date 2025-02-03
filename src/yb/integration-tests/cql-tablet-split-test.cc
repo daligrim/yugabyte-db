@@ -46,6 +46,8 @@
 #include "yb/util/test_thread_holder.h"
 #include "yb/util/tsan_util.h"
 
+using std::string;
+
 using namespace std::literals;  // NOLINT
 
 DECLARE_int32(heartbeat_interval_ms);
@@ -145,39 +147,31 @@ const auto kSecondaryIndexTestTableName =
 class CqlTabletSplitTest : public CqlTestBase<MiniCluster> {
  protected:
   void SetUp() override {
-    FLAGS_yb_num_shards_per_tserver = 1;
-    FLAGS_enable_automatic_tablet_splitting = true;
+    itest::SetupQuickSplit(64_KB);
 
-    // Setting this very low will just cause to include metrics in every heartbeat, no overhead on
-    // setting it lower than FLAGS_heartbeat_interval_ms.
-    FLAGS_tserver_heartbeat_metrics_interval_ms = 1;
-    FLAGS_heartbeat_interval_ms = 1000;
+    ANNOTATE_UNPROTECTED_WRITE(FLAGS_yb_num_shards_per_tserver) = 1;
 
-    // Reduce cleanup waiting time, so tests are completed faster.
-    FLAGS_cleanup_split_tablets_interval_sec = 1;
-
-    FLAGS_tablet_split_low_phase_size_threshold_bytes = 0;
-    FLAGS_tablet_split_high_phase_size_threshold_bytes = 0;
-    FLAGS_tablet_split_low_phase_shard_count_per_node = 0;
-    FLAGS_tablet_split_high_phase_shard_count_per_node = 0;
-    FLAGS_tablet_force_split_threshold_bytes = 64_KB;
-    FLAGS_db_write_buffer_size = FLAGS_tablet_force_split_threshold_bytes;
-    FLAGS_db_block_size_bytes = 2_KB;
-    FLAGS_db_filter_block_size_bytes = 2_KB;
-    FLAGS_db_index_block_size_bytes = 2_KB;
+    ANNOTATE_UNPROTECTED_WRITE(FLAGS_tablet_force_split_threshold_bytes) = 64_KB;
+    ANNOTATE_UNPROTECTED_WRITE(FLAGS_db_write_buffer_size) =
+        FLAGS_tablet_force_split_threshold_bytes;
+    ANNOTATE_UNPROTECTED_WRITE(FLAGS_db_block_size_bytes) = 2_KB;
+    ANNOTATE_UNPROTECTED_WRITE(FLAGS_db_filter_block_size_bytes) = 2_KB;
+    ANNOTATE_UNPROTECTED_WRITE(FLAGS_db_index_block_size_bytes) = 2_KB;
     CqlTestBase::SetUp();
 
     // We want to test default behaviour here without overrides done by
     // YBMiniClusterTestBase::SetUp.
     // See https://github.com/yugabyte/yugabyte-db/issues/8935#issuecomment-1142223006
-    FLAGS_use_priority_thread_pool_for_flushes = saved_use_priority_thread_pool_for_flushes_;
+    ANNOTATE_UNPROTECTED_WRITE(FLAGS_use_priority_thread_pool_for_flushes) =
+        saved_use_priority_thread_pool_for_flushes_;
   }
 
   void WaitUntilAllCommittedOpsApplied(const MonoDelta timeout) {
     const auto splits_completion_deadline = MonoTime::Now() + timeout;
     for (auto& peer : ListTabletPeers(cluster_.get(), ListPeersFilter::kAll)) {
-      auto consensus = peer->shared_consensus();
-      if (consensus) {
+      auto consensus_result = peer->GetConsensus();
+      if (consensus_result) {
+        auto consensus = consensus_result->get();
         ASSERT_OK(Wait([consensus]() -> Result<bool> {
           return consensus->GetLastAppliedOpId() >= consensus->GetLastCommittedOpId();
         }, splits_completion_deadline, "Waiting for all committed ops to be applied"));
@@ -499,6 +493,7 @@ class CqlTabletSplitTestExt : public CqlTestBase<ExternalMiniCluster> {
 
     auto& tserver_flags = mini_cluster_opt_.extra_tserver_flags;
     tserver_flags.push_back(Format("--db_write_buffer_size=$0", kSplitThreshold));
+    tserver_flags.push_back("--rocksdb_max_write_buffer_number=2");
     // Lower SST block size to have multiple entries in index and be able to detect a split key.
     tserver_flags.push_back(Format(
         "--db_block_size_bytes=$0", std::min(FLAGS_db_block_size_bytes, kSplitThreshold / 8)));
@@ -579,7 +574,7 @@ Status RunBatchTimeSeriesTest(
 
   std::mutex random_mutex;
   auto get_random_source = [&rng, &random_mutex, &data_sources]() -> BatchTimeseriesDataSource* {
-    std::lock_guard<decltype(random_mutex)> lock(random_mutex);
+    std::lock_guard lock(random_mutex);
     return RandomElement(data_sources, &rng).get();
   };
 
@@ -658,6 +653,10 @@ Status RunBatchTimeSeriesTest(
       }
       YB_LOG_EVERY_N_SECS(INFO, 5)
           << "Completed " << num_writes << " writes, num_write_errors: " << num_write_errors;
+      if (IsSanitizer()) {
+        // Give some time for compaction to go.
+        std::this_thread::sleep_for(num_writes.load() * 1ms);
+      }
     }
   };
 

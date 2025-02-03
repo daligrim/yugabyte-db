@@ -29,8 +29,7 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_UTIL_NET_DNS_RESOLVER_H
-#define YB_UTIL_NET_DNS_RESOLVER_H
+#pragma once
 
 #include <future>
 
@@ -42,7 +41,8 @@
 
 namespace yb {
 
-class Histogram;
+class EventStats;
+class MetricEntity;
 class HostPort;
 class ThreadPool;
 
@@ -54,7 +54,7 @@ class DnsResolver {
   DnsResolver(const DnsResolver&) = delete;
   void operator=(const DnsResolver&) = delete;
 
-  explicit DnsResolver(IoService* io_service);
+  explicit DnsResolver(IoService* io_service, const scoped_refptr<MetricEntity>& metric_entity);
   ~DnsResolver();
 
   std::shared_future<Result<IpAddress>> ResolveFuture(const std::string& host);
@@ -68,18 +68,16 @@ class DnsResolver {
 
 class ScopedDnsTracker {
  public:
-  explicit ScopedDnsTracker(const scoped_refptr<Histogram>& metric);
+  explicit ScopedDnsTracker(const scoped_refptr<EventStats>& metric);
   ~ScopedDnsTracker();
 
   ScopedDnsTracker(const ScopedDnsTracker&) = delete;
   void operator=(const ScopedDnsTracker&) = delete;
 
-  static Histogram* active_metric();
+  static EventStats* active_metric();
  private:
-  Histogram* old_metric_;
-  scoped_refptr<Histogram> metric_;
+  EventStats* old_metric_;
+  scoped_refptr<EventStats> metric_;
 };
 
 } // namespace yb
-
-#endif /* YB_UTIL_NET_DNS_RESOLVER_H */

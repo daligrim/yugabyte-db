@@ -11,8 +11,7 @@
 // under the License.
 //
 
-#ifndef YB_INTEGRATION_TESTS_CQL_TEST_UTIL_H
-#define YB_INTEGRATION_TESTS_CQL_TEST_UTIL_H
+#pragma once
 
 #include <cassandra.h>
 
@@ -135,6 +134,8 @@ class CassandraResult {
   std::string RenderToString(const std::string& line_separator = ";",
                              const std::string& value_separator = ",") const;
 
+  bool HasMorePages() const;
+
   const CassResult* get() const { return cass_result_.get(); }
 
  private:
@@ -150,6 +151,14 @@ class CassandraPrepared {
   explicit CassandraPrepared(const CassPrepared* prepared) : prepared_(prepared) {}
 
   CassandraStatement Bind();
+
+  bool operator!() const {
+    return !prepared_;
+  }
+
+  explicit operator bool() const {
+    return prepared_ != nullptr;
+  }
 
  private:
   CassPreparedPtr prepared_;
@@ -238,7 +247,8 @@ class CassandraSession {
 
   static Result<CassandraSession> Create(CassCluster* cluster);
 
-  Status Execute(const CassandraStatement& statement);
+  // if timeout_ms == 0 - default CASS_DEFAULT_REQUEST_TIMEOUT_MS = 12000 is used.
+  Status Execute(const CassandraStatement& statement, uint32_t timeout_ms = 0);
 
   Result<CassandraResult> ExecuteWithResult(const CassandraStatement& statement);
 
@@ -246,7 +256,8 @@ class CassandraSession {
 
   CassandraFuture ExecuteGetFuture(const std::string& query);
 
-  Status ExecuteQuery(const std::string& query);
+  // if timeout_ms == 0 - default CASS_DEFAULT_REQUEST_TIMEOUT_MS = 12000 is used.
+  Status ExecuteQuery(const std::string& query, uint32_t timeout_ms = 0);
 
   template <class... Args>
   Status ExecuteQueryFormat(const std::string& query, Args&&... args) {
@@ -316,6 +327,7 @@ class CppCassandraDriver {
   Result<CassandraSession> CreateSession();
 
   void EnableTLS(const std::vector<std::string>& ca_certs);
+  void SetCredentials(const std::string& username, const std::string& password);
 
  private:
   CassCluster* cass_cluster_ = nullptr;
@@ -350,5 +362,3 @@ extern const std::string kCqlTestKeyspace;
 Result<CassandraSession> EstablishSession(CppCassandraDriver* driver);
 
 } // namespace yb
-
-#endif // YB_INTEGRATION_TESTS_CQL_TEST_UTIL_H

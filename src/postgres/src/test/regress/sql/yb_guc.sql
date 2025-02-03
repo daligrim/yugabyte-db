@@ -24,34 +24,83 @@ set yb_transaction_priority_upper_bound = 0.6;
 set yb_transaction_priority_lower_bound = 0.4;
 set yb_transaction_priority_lower_bound = 0.6;
 
+-- Test yb_fetch_row_limit
+set yb_fetch_row_limit = 100;
+show yb_fetch_row_limit;
+
+set yb_fetch_row_limit = -1;  -- ERROR since yb_fetch_row_limit must be non-negative.
+
+-- Test yb_fetch_size_limit
+set yb_fetch_size_limit = '2MB';
+show yb_fetch_size_limit;
+set yb_fetch_size_limit = 789;
+show yb_fetch_size_limit;
+set yb_fetch_size_limit = 2048;
+show yb_fetch_size_limit;
+
+set yb_fetch_size_limit = -1;  -- ERROR since yb_fetch_size_limit must be non-negative.
+
 -- Check enable_seqscan, enable_indexscan, enable_indexonlyscan for YB scans.
 CREATE TABLE test_scan (i int, j int);
 CREATE INDEX NONCONCURRENTLY ON test_scan (j);
--- Don't add (costs off) to EXPLAIN to be able to see when disable_cost=1.0e10
--- is added.
+
+-- We want to know when disable_cost is added, but we don't want to depend on
+-- the exact cost value.
+CREATE OR REPLACE FUNCTION get_plan_details(stmt text) RETURNS TABLE (
+    scan_type text,
+    disabled boolean
+) AS
+$_$
+DECLARE
+    ret text;
+    first_line text;
+BEGIN
+    EXECUTE format('EXPLAIN (FORMAT text) %s', stmt) INTO ret;
+    first_line := split_part(ret, E'\n', 1); -- Extract the first line
+    -- return (first two words of the line, is_disabled)
+    RETURN QUERY
+      SELECT trim(split_part(first_line, ' ', 1) || ' ' || split_part(first_line, ' ', 2)) AS scan_type,
+      first_line SIMILAR TO '%cost=1[0-9]{10}%' AS disabled;
+END;
+$_$
+LANGUAGE plpgsql;
+
+set yb_enable_bitmapscan = on;
 set enable_seqscan = on;
 set enable_indexscan = on;
 set enable_indexonlyscan = on;
-EXPLAIN SELECT * FROM test_scan;
-EXPLAIN SELECT * FROM test_scan WHERE j = 1;
-EXPLAIN SELECT j FROM test_scan;
+set enable_bitmapscan = on;
+SELECT * FROM get_plan_details('SELECT * FROM test_scan;');
+SELECT * FROM get_plan_details('SELECT * FROM test_scan WHERE j = 1;');
+SELECT * FROM get_plan_details('SELECT j FROM test_scan;');
 set enable_seqscan = on;
 set enable_indexscan = off;
-EXPLAIN SELECT * FROM test_scan;
-EXPLAIN SELECT * FROM test_scan WHERE j = 1;
-EXPLAIN SELECT j FROM test_scan;
+set enable_bitmapscan = off;
+SELECT * FROM get_plan_details('SELECT * FROM test_scan;');
+SELECT * FROM get_plan_details('SELECT * FROM test_scan WHERE j = 1;');
+SELECT * FROM get_plan_details('SELECT j FROM test_scan;');
 set enable_seqscan = off;
 set enable_indexscan = off;
-EXPLAIN SELECT * FROM test_scan;
-EXPLAIN SELECT * FROM test_scan WHERE j = 1;
-EXPLAIN SELECT j FROM test_scan;
+set enable_bitmapscan = off;
+SELECT * FROM get_plan_details('SELECT * FROM test_scan;');
+SELECT * FROM get_plan_details('SELECT * FROM test_scan WHERE j = 1;');
+SELECT * FROM get_plan_details('SELECT j FROM test_scan;');
 set enable_seqscan = off;
 set enable_indexscan = on;
-EXPLAIN SELECT * FROM test_scan;
-EXPLAIN SELECT * FROM test_scan WHERE j = 1;
-EXPLAIN SELECT j FROM test_scan;
+set enable_bitmapscan = off;
+SELECT * FROM get_plan_details('SELECT * FROM test_scan;');
+SELECT * FROM get_plan_details('SELECT * FROM test_scan WHERE j = 1;');
+SELECT * FROM get_plan_details('SELECT j FROM test_scan;');
+set enable_seqscan = off;
+set enable_indexscan = off;
+set enable_bitmapscan = on;
+SELECT * FROM get_plan_details('SELECT * FROM test_scan;');
+SELECT * FROM get_plan_details('SELECT * FROM test_scan WHERE j = 1;');
+SELECT * FROM get_plan_details('SELECT j FROM test_scan;');
 set enable_indexonlyscan = off;
-EXPLAIN SELECT j FROM test_scan;
+SELECT * FROM get_plan_details('SELECT j FROM test_scan;');
+
+DROP FUNCTION get_plan_details;
 
 -- Show transaction priority. As it is not possible to have a deterministic
 -- yb_transaction_priority, we set yb_transaction_priority_lower_bound and
@@ -59,7 +108,7 @@ EXPLAIN SELECT j FROM test_scan;
 -- yb_transaction_priority to be equal to those two.
 set yb_transaction_priority_lower_bound = 0.4;
 set yb_transaction_priority_upper_bound = 0.4;
-BEGIN TRANSACTION;
+BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ;
 INSERT INTO test_scan (i, j) values (1, 1), (2, 2), (3, 3);
 show yb_transaction_priority;
 COMMIT;
@@ -70,7 +119,7 @@ set yb_transaction_priority = 0.3; -- ERROR
 -- High priority transaction
 set yb_transaction_priority_lower_bound = 0.4;
 set yb_transaction_priority_upper_bound = 0.4;
-BEGIN TRANSACTION;
+BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ;
 SELECT i, j FROM test_scan WHERE i = 1 FOR UPDATE;
 show yb_transaction_priority;
 COMMIT;
@@ -78,7 +127,7 @@ COMMIT;
 -- Highest priority transaction
 set yb_transaction_priority_upper_bound = 1;
 set yb_transaction_priority_lower_bound = 1;
-BEGIN TRANSACTION;
+BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ;
 SELECT i, j FROM test_scan WHERE i = 1 FOR UPDATE;
 show yb_transaction_priority;
 COMMIT;
@@ -99,10 +148,6 @@ select myfunc(0), current_setting('work_mem');
 
 -- test SET unrecognized parameter
 SET foo = false;  -- no such setting
-
--- test setting a parameter with a registered prefix (plpgsql)
-SET plpgsql.extra_foo_warnings = false;  -- no such setting
-SHOW plpgsql.extra_foo_warnings;  -- but the parameter is set
 
 -- test temp_file_limit default
 SHOW temp_file_limit;
@@ -125,4 +170,4 @@ RESET track_functions;
 
 -- cleanup
 RESET foo;
-RESET plpgsql.extra_foo_warnings;
+RESET yb_enable_bitmapscan;

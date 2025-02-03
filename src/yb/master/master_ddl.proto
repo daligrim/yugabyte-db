@@ -17,7 +17,10 @@ package yb.master;
 option java_package = "org.yb.master";
 
 import "yb/common/common.proto";
+import "yb/common/common_net.proto";
 import "yb/common/common_types.proto";
+import "yb/common/wire_protocol.proto";
+import "yb/docdb/docdb.proto";
 import "yb/master/catalog_entity_info.proto";
 import "yb/master/master_types.proto";
 import "yb/rpc/service.proto";
@@ -54,7 +57,7 @@ message UDTypeInfoPB {
 
 // Create table request (including index table)
 message CreateTableRequestPB {
-  // TODO(proto3) reserved 4;
+  reserved 4, 32;
 
   required string name = 1;
   optional SchemaPB schema = 2;
@@ -96,7 +99,7 @@ message CreateTableRequestPB {
   // Only makes sense for colocated tables.
   optional uint32 colocation_id = 25;
 
-  // DDL Dependent upon Transaction success (abort removes). Used by YSQL.
+  // For YSQL tables, transaction used by this DDL. If aborted, table will be removed.
   optional TransactionMetadataPB transaction = 20;
 
   // For YSQL tables, this denotes the tablespace that this table is associated with.
@@ -107,7 +110,24 @@ message CreateTableRequestPB {
 
   optional bool is_matview = 26;
 
-  optional bytes matview_pg_table_id = 24;
+  // In case the table was rewritten, explicitly store the TableId containing the PG table OID
+  // (as the table's TableId no longer matches).
+  optional bytes pg_table_id = 24;
+
+  repeated StatefulServiceKind hosted_stateful_services = 27;
+
+  optional bool ysql_yb_ddl_rollback_enabled = 28 [ default = false ];
+
+  // Used during table rewrite - the TableId of the old DocDB table that is being rewritten.
+  optional bytes old_rewrite_table_id = 29;
+
+  optional bool is_clone = 30;
+
+  // Set to true when the table is being re-written as part of a TRUNCATE operation.
+  optional bool is_truncate = 31;
+
+  // Set by DDL Replication to link the table to the original table in the source cluster.
+  optional bytes xcluster_source_table_id = 33;
 }
 
 message CreateTableResponsePB {
@@ -149,6 +169,11 @@ message ListTablesResponsePB {
   // The error, if an error occurred with this request.
   optional MasterErrorPB error = 1;
 
+  message ColocatedInfo {
+    optional bool colocated = 1;
+    optional bytes parent_table_id = 2;
+  }
+
   message TableInfo {
     required bytes id = 1;
     required string name = 2;
@@ -157,6 +182,9 @@ message ListTablesResponsePB {
     optional RelationType relation_type = 5 [default = USER_TABLE_RELATION];
     optional SysTablesEntryPB.State state = 6;
     optional string pgschema_name = 7;
+    optional ColocatedInfo colocated_info = 8;
+    optional bool hidden = 9;
+    optional string indexed_table_id = 10;
   }
 
   repeated TableInfo tables = 2;
@@ -164,6 +192,8 @@ message ListTablesResponsePB {
 
 message GetTableSchemaRequestPB {
   required TableIdentifierPB table = 1;
+  optional bool include_hidden = 2;
+  optional bool check_exists_only = 3;
 }
 
 message GetTableSchemaResponsePB {
@@ -210,6 +240,16 @@ message GetTableSchemaResponsePB {
   optional bool is_compatible_with_previous_version = 14 [default = false];
 
   optional uint32 wal_retention_secs = 15;
+
+  repeated YsqlDdlTxnVerifierStatePB ysql_ddl_txn_verifier_state = 17;
+
+  // If the table is rewritten, this field explicitly stores the PG table id.
+  optional bytes pg_table_id = 18;
+
+  // Added on Oct 2024 (v2025.1). This will not be set on versions before this
+  // change, and there is no direct AutoFlag protecting this, so use with
+  // caution.
+  optional bool is_backfilling = 19; // [default = false]
 }
 
 message GetTablegroupSchemaRequestPB {
@@ -291,10 +331,39 @@ message GetBackfillJobsResponsePB {
   optional MasterErrorPB error = 2;
 }
 
+message GetBackfillStatusRequestPB {
+  // A list of index tables whose backfill status should be returned. Either table_id or
+  // a pair of table_name and namespace should be specified to identify a table.
+  repeated TableIdentifierPB index_tables = 1;
+}
+
+message IndexStatusPB {
+  enum BackfillStatus {
+    BACKFILL_UNKNOWN = 0; // Unspecified state.
+    BACKFILL_SUCCESS = 1; // Backfill succeeded.
+  }
+
+  optional TableIdentifierPB index_table = 1;
+
+  // Contains an error if it's not possible to get backfill_status and index permissions.
+  optional AppStatusPB error = 2;
+
+  // Backfill status for the specified index table on base of index permissions. Value absence means
+  // either error field is specified, or backfill_status is not present in BackfillStatus enum.
+  optional BackfillStatus backfill_status = 3;
+}
+
+message GetBackfillStatusResponsePB {
+  optional MasterErrorPB error = 1;
+  repeated IndexStatusPB index_status = 2;
+}
+
 // Delete table request (including index table).
 message DeleteTableRequestPB {
   required TableIdentifierPB table = 1;
   optional bool is_index_table = 2 [ default = false ];
+  optional TransactionMetadataPB transaction = 3;
+  optional bool ysql_yb_ddl_rollback_enabled = 4 [ default = false ];
 }
 
 message DeleteTableResponsePB {
@@ -382,7 +451,8 @@ message AlterTableRequestPB {
   // Replication information for this table.
   optional ReplicationInfoPB replication_info = 8;
 
-  // DDL Dependent upon Transaction success (abort removes). Used by YSQL.
+  // This is the transaction performing the Alter operation. This is used by TServers to abort
+  // any ongoing DML on the table other than this transaction.
   optional TransactionMetadataPB transaction = 9;
 
   // If set, updates the pgschema_name in SchemaPB.
@@ -390,6 +460,13 @@ message AlterTableRequestPB {
 
   // Used for YSQL to notify DocDB of DDL changes that affect only PG metadata
   optional bool increment_schema_version = 11 [default = false];
+
+  // If set, YB-Master will poll the status of 'transaction' and rollback the Alter if failed.
+  optional bool ysql_yb_ddl_rollback_enabled = 12 [ default = false ];
+
+  // For CDCSDK Stream creation with consistent snapshot
+  optional bytes cdc_sdk_stream_id = 13;
+  optional bool cdc_sdk_require_history_cutoff = 14;
 }
 
 message AlterTableResponsePB {
@@ -515,6 +592,7 @@ message AlterNamespaceResponsePB {
 
 message ListNamespacesRequestPB {
   optional YQLDatabase database_type = 1 [ default = YQL_DATABASE_CQL ];
+  optional bool include_nonrunning = 2;
 }
 
 message ListNamespacesResponsePB {
@@ -522,6 +600,12 @@ message ListNamespacesResponsePB {
   optional MasterErrorPB error = 1;
 
   repeated NamespaceIdentifierPB namespaces = 2;
+
+  repeated int32 states = 3;
+
+  /* We use int32 because the repeated bool type is bugged.
+  See https://github.com/yugabyte/yugabyte-db/issues/15868 */
+  repeated int32 colocated = 4;
 }
 
 message GetNamespaceInfoRequestPB {
@@ -534,6 +618,8 @@ message GetNamespaceInfoResponsePB {
 
   optional NamespaceIdentifierPB namespace = 2;
   optional bool colocated = 3;
+  // This denotes if a colocated database is a legacy colocated database.
+  optional bool legacy_colocated_database = 4;
 }
 
 // ============================================================================
@@ -544,6 +630,11 @@ message CreateTablegroupRequestPB {
   required bytes id = 1;
   required bytes namespace_id = 2;
   optional string namespace_name = 3;
+
+  // These two fields ensure that YB-Master will poll the status of 'transaction' and delete the
+  // tablegroup if aborted.
+  optional TransactionMetadataPB transaction = 5;
+  optional bool ysql_yb_ddl_rollback_enabled = 6 [ default = false ];
 
   // This denotes the tablespace that this tablegroup is associated with.
   optional bytes tablespace_id = 4;
@@ -559,7 +650,15 @@ message CreateTablegroupResponsePB {
 
 message DeleteTablegroupRequestPB {
   required bytes id = 1;
-  optional bytes namespace_id_UNUSED = 2 [ deprecated = true ];
+
+  // Deprecated namespace_id.
+  reserved 2;
+
+  // These two fields ensure that YB-Master will first mark the tablegroup for deletion, poll the
+  // status of 'transaction' and rollback the marker if failed. Otherwise deletion of the tablegroup
+  // will be initiated upon receipt of this request.
+  optional TransactionMetadataPB transaction = 3;
+  optional bool ysql_yb_ddl_rollback_enabled = 4 [ default = false ];
 }
 
 message DeleteTablegroupResponsePB {
@@ -627,6 +726,64 @@ message GetUDTypeInfoResponsePB {
   optional UDTypeInfoPB udtype = 2;
 }
 
+// ============================================================================
+//  YSQL DDL Atomicity
+// ============================================================================
+
+message ReportYsqlDdlTxnStatusRequestPB {
+  // The transaction whose status is being reported.
+  optional bytes transaction_id = 1;
+
+  // Whether the above transaction is committed or aborted.
+  optional bool is_committed = 2;
+}
+
+message ReportYsqlDdlTxnStatusResponsePB {
+  optional MasterErrorPB error = 1;
+}
+
+message IsYsqlDdlVerificationDoneRequestPB {
+  optional TransactionMetadataPB transaction = 1;
+}
+
+message IsYsqlDdlVerificationDoneResponsePB {
+  optional MasterErrorPB error = 1;
+
+  optional bool done = 2;
+}
+
+// ============================================================================
+// Table/Object Locks
+// ============================================================================
+
+message AcquireObjectLocksGlobalRequestPB {
+  optional bytes txn_id = 1;
+  optional uint32 subtxn_id = 2;
+  optional bytes session_host_uuid = 3;
+  repeated docdb.ObjectLockPB object_locks = 4;
+  // The lease epoch of the requesting tserver.
+  optional uint64 lease_epoch = 5;
+}
+
+message AcquireObjectLocksGlobalResponsePB {
+  optional MasterErrorPB error = 1;
+}
+
+message ReleaseObjectLocksGlobalRequestPB {
+  optional bytes txn_id = 1;
+  optional uint32 subtxn_id = 2;
+  optional bytes session_host_uuid = 3;
+  repeated docdb.ObjectLockPB object_locks = 4;
+  // When set, releases locks on all objects held against the given session id.
+  optional bool release_all_locks = 5;
+  // The lease epoch of the requesting tserver.
+  optional uint64 lease_epoch = 6;
+}
+
+message ReleaseObjectLocksGlobalResponsePB {
+  optional MasterErrorPB error = 1;
+}
+
 service MasterDdl {
   option (yb.rpc.custom_service_name) = "yb.master.MasterService";
 
@@ -647,6 +804,7 @@ service MasterDdl {
   rpc LaunchBackfillIndexForTable(LaunchBackfillIndexForTableRequestPB)
           returns (LaunchBackfillIndexForTableResponsePB);
   rpc GetBackfillJobs(GetBackfillJobsRequestPB) returns (GetBackfillJobsResponsePB);
+  rpc GetBackfillStatus(GetBackfillStatusRequestPB) returns (GetBackfillStatusResponsePB);
 
   rpc DeleteTable(DeleteTableRequestPB) returns (DeleteTableResponsePB);
   rpc IsDeleteTableDone(IsDeleteTableDoneRequestPB) returns (IsDeleteTableDoneResponsePB);
@@ -675,4 +833,14 @@ service MasterDdl {
   rpc DeleteUDType(DeleteUDTypeRequestPB) returns (DeleteUDTypeResponsePB);
   rpc ListUDTypes(ListUDTypesRequestPB) returns (ListUDTypesResponsePB);
   rpc GetUDTypeInfo(GetUDTypeInfoRequestPB) returns (GetUDTypeInfoResponsePB);
+
+  rpc ReportYsqlDdlTxnStatus(ReportYsqlDdlTxnStatusRequestPB) returns
+      (ReportYsqlDdlTxnStatusResponsePB);
+  rpc IsYsqlDdlVerificationDone(IsYsqlDdlVerificationDoneRequestPB) returns
+      (IsYsqlDdlVerificationDoneResponsePB);
+
+  rpc AcquireObjectLocksGlobal(AcquireObjectLocksGlobalRequestPB)
+      returns (AcquireObjectLocksGlobalResponsePB);
+  rpc ReleaseObjectLocksGlobal(ReleaseObjectLocksGlobalRequestPB)
+      returns (ReleaseObjectLocksGlobalResponsePB);
 }

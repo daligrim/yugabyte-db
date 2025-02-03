@@ -37,7 +37,7 @@
 #include <memory>
 #include <vector>
 
-#include <glog/logging.h>
+#include "yb/util/logging.h"
 
 #include "yb/common/schema.h"
 
@@ -180,7 +180,7 @@ Status FsTool::ListLogSegmentsForTablet(const string& tablet_id) {
 Status FsTool::ListAllTablets() {
   DCHECK(initialized_);
 
-  vector<string> tablets = VERIFY_RESULT(fs_manager_->ListTabletIds());
+  auto tablets = VERIFY_RESULT(fs_manager_->ListTabletIds(CleanupTemporaryFiles::kFalse));
   for (const string& tablet : tablets) {
     if (detail_level_ >= HEADERS_ONLY) {
       std::cout << "Tablet: " << tablet << std::endl;
@@ -248,7 +248,8 @@ Status FsTool::PrintTabletMeta(const string& tablet_id, int indent) {
             << std::endl;
   std::cout << Indent(indent) << "Table name: " << meta->table_name()
             << " Table id: " << meta->table_id() << std::endl;
-  std::cout << Indent(indent) << "Schema (version=" << meta->schema_version() << "): "
+  std::cout << Indent(indent)
+            << Format("Schema (primary table version=$0)", meta->primary_table_schema_version())
             << schema->ToString() << std::endl;
 
   tablet::RaftGroupReplicaSuperBlockPB pb;
@@ -267,26 +268,28 @@ Status FsTool::DumpTabletData(const std::string& tablet_id) {
   scoped_refptr<log::LogAnchorRegistry> reg(new log::LogAnchorRegistry());
   tablet::TabletOptions tablet_options;
   tablet::TabletInitData tablet_init_data = {
-    .metadata = meta,
-    .client_future = std::shared_future<client::YBClient*>(),
-    .clock = scoped_refptr<server::Clock>(),
-    .parent_mem_tracker = shared_ptr<MemTracker>(),
-    .block_based_table_mem_tracker = shared_ptr<MemTracker>(),
-    .metric_registry = nullptr,
-    .log_anchor_registry = reg.get(),
-    .tablet_options = tablet_options,
-    .log_prefix_suffix = std::string(),
-    .transaction_participant_context = nullptr,
-    .local_tablet_filter = client::LocalTabletFilter(),
-    .transaction_coordinator_context = nullptr,
-    .txns_enabled = tablet::TransactionsEnabled::kTrue,
-    .is_sys_catalog = tablet::IsSysCatalogTablet(tablet_id == master::kSysCatalogTabletId),
-    .snapshot_coordinator = nullptr,
-    .tablet_splitter = nullptr,
-    .allowed_history_cutoff_provider = {},
-    .transaction_manager_provider = nullptr,
-    .post_split_compaction_pool = nullptr,
-    .post_split_compaction_added = nullptr
+      .metadata = meta,
+      .client_future = std::shared_future<client::YBClient*>(),
+      .clock = scoped_refptr<server::Clock>(),
+      .parent_mem_tracker = shared_ptr<MemTracker>(),
+      .block_based_table_mem_tracker = shared_ptr<MemTracker>(),
+      .metric_registry = nullptr,
+      .log_anchor_registry = reg.get(),
+      .tablet_options = tablet_options,
+      .log_prefix_suffix = std::string(),
+      .transaction_participant_context = nullptr,
+      .local_tablet_filter = client::LocalTabletFilter(),
+      .transaction_coordinator_context = nullptr,
+      .txns_enabled = tablet::TransactionsEnabled::kTrue,
+      .is_sys_catalog = tablet::IsSysCatalogTablet(tablet_id == master::kSysCatalogTabletId),
+      .snapshot_coordinator = nullptr,
+      .tablet_splitter = nullptr,
+      .allowed_history_cutoff_provider = {},
+      .transaction_manager_provider = nullptr,
+      .full_compaction_pool = nullptr,
+      .admin_triggered_compaction_pool = nullptr,
+      .post_split_compaction_added = nullptr,
+      .metadata_cache = nullptr
   };
   Tablet t(tablet_init_data);
   RETURN_NOT_OK_PREPEND(t.Open(), "Couldn't open tablet");

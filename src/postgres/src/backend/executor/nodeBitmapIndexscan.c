@@ -3,7 +3,7 @@
  * nodeBitmapIndexscan.c
  *	  Routines to support bitmapped index scans of relations
  *
- * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -21,12 +21,16 @@
  */
 #include "postgres.h"
 
+#include "access/genam.h"
 #include "executor/execdebug.h"
 #include "executor/nodeBitmapIndexscan.h"
 #include "executor/nodeIndexscan.h"
 #include "miscadmin.h"
 #include "utils/memutils.h"
 
+/* YB includes. */
+#include "pg_yb_utils.h"
+#include "access/relscan.h"
 
 /* ----------------------------------------------------------------
  *		ExecBitmapIndexScan
@@ -48,7 +52,7 @@ ExecBitmapIndexScan(PlanState *pstate)
 Node *
 MultiExecBitmapIndexScan(BitmapIndexScanState *node)
 {
-	TIDBitmap  *tbm;
+	TIDBitmap  *bitmap;
 	IndexScanDesc scandesc;
 	double		nTuples = 0;
 	bool		doscan;
@@ -85,15 +89,17 @@ MultiExecBitmapIndexScan(BitmapIndexScanState *node)
 	 */
 	if (node->biss_result)
 	{
-		tbm = node->biss_result;
+		bitmap = node->biss_result;
+
 		node->biss_result = NULL;	/* reset for next time */
 	}
 	else
 	{
 		/* XXX should we use less than work_mem for this? */
-		tbm = tbm_create(work_mem * 1024L,
-						 ((BitmapIndexScan *) node->ss.ps.plan)->isshared ?
-						 node->ss.ps.state->es_query_dsa : NULL);
+		bitmap = tbm_create(work_mem * 1024L,
+							(((BitmapIndexScan *) node->ss.ps.plan)->isshared ?
+							 node->ss.ps.state->es_query_dsa :
+							 NULL));
 	}
 
 	/*
@@ -101,7 +107,7 @@ MultiExecBitmapIndexScan(BitmapIndexScanState *node)
 	 */
 	while (doscan)
 	{
-		nTuples += (double) index_getbitmap(scandesc, tbm);
+		nTuples += (double) index_getbitmap(scandesc, bitmap);
 
 		CHECK_FOR_INTERRUPTS();
 
@@ -117,7 +123,7 @@ MultiExecBitmapIndexScan(BitmapIndexScanState *node)
 	if (node->ss.ps.instrument)
 		InstrStopNode(node->ss.ps.instrument, nTuples);
 
-	return (Node *) tbm;
+	return (Node *) bitmap;
 }
 
 /* ----------------------------------------------------------------
@@ -210,7 +216,7 @@ BitmapIndexScanState *
 ExecInitBitmapIndexScan(BitmapIndexScan *node, EState *estate, int eflags)
 {
 	BitmapIndexScanState *indexstate;
-	bool		relistarget;
+	LOCKMODE	lockmode;
 
 	/* check for unsupported flags */
 	Assert(!(eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK)));
@@ -259,16 +265,9 @@ ExecInitBitmapIndexScan(BitmapIndexScan *node, EState *estate, int eflags)
 	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
 		return indexstate;
 
-	/*
-	 * Open the index relation.
-	 *
-	 * If the parent table is one of the target relations of the query, then
-	 * InitPlan already opened and write-locked the index, so we can avoid
-	 * taking another lock here.  Otherwise we need a normal reader's lock.
-	 */
-	relistarget = ExecRelationIsTargetRelation(estate, node->scan.scanrelid);
-	indexstate->biss_RelationDesc = index_open(node->indexid,
-											   relistarget ? NoLock : AccessShareLock);
+	/* Open the index relation. */
+	lockmode = exec_rt_fetch(node->scan.scanrelid, estate)->rellockmode;
+	indexstate->biss_RelationDesc = index_open(node->indexid, lockmode);
 
 	/*
 	 * Initialize index-specific scan state

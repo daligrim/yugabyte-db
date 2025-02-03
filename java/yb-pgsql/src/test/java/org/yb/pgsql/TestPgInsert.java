@@ -17,7 +17,7 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.yb.util.YBTestRunnerNonTsanOnly;
+import org.yb.YBTestRunner;
 
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -28,7 +28,7 @@ import java.util.List;
 
 import static org.yb.AssertionWrappers.assertEquals;
 
-@RunWith(value=YBTestRunnerNonTsanOnly.class)
+@RunWith(value=YBTestRunner.class)
 public class TestPgInsert extends BasePgSQLTest {
   private static final Logger LOG = LoggerFactory.getLogger(TestPgInsert.class);
 
@@ -124,7 +124,7 @@ public class TestPgInsert extends BasePgSQLTest {
           List<Row> expectedRows = new ArrayList<>();
           String text_stmt = String.format(stmt_format, tableName,
                                            h, r + 0.5, h * 10 + r, "v" + h + r,
-                                           "h + 100L, r + 100, vs");
+                                           "h + 100, r + 100, vs");
           expectedRows.add(new Row(h + 100, r + 0.5 + 100, "v" + h + r));
           statement.execute(text_stmt);
 

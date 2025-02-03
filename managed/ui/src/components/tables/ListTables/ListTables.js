@@ -1,11 +1,12 @@
 // Copyright (c) YugaByte, Inc.
 
-import React, { Component, Fragment } from 'react';
+import { Component, Fragment } from 'react';
 import { Link } from 'react-router';
 import { Image, ProgressBar, ButtonGroup, DropdownButton } from 'react-bootstrap';
 import { toast } from 'react-toastify';
+import { Typography } from '@material-ui/core';
+
 import tableIcon from '../images/table.png';
-import './ListTables.scss';
 import { isNonEmptyArray } from '../../../utils/ObjectUtils';
 import { TableAction } from '../../tables';
 import { YBPanelItem } from '../../panels';
@@ -13,10 +14,21 @@ import { BootstrapTable, TableHeaderColumn } from 'react-bootstrap-table';
 import 'react-bootstrap-table/css/react-bootstrap-table.css';
 import _ from 'lodash';
 import { getPromiseState } from '../../../utils/PromiseUtils';
-import { YBResourceCount } from '../../common/descriptors';
+import { YBBanner, YBBannerVariant, YBResourceCount } from '../../common/descriptors';
 import { isDisabled, isNotHidden } from '../../../utils/LayoutUtils';
 import { formatSchemaName } from '../../../utils/Formatters';
 import { YBButtonLink } from '../../common/forms/fields';
+import { YBButton } from '../../../redesign/components';
+import {
+  getTableName,
+  getTableUuid,
+  getIsColocatedChildTable,
+  getIsColocatedParentTable
+} from '../../../utils/tableUtils';
+import { SchemaChangeModeInfoModal } from '../../xcluster/sharedComponents/SchemaChangeInfoModal';
+import { getPrimaryCluster } from '../../../utils/universeUtilsTyped';
+
+import './ListTables.scss';
 
 class TableTitle extends Component {
   render() {
@@ -35,7 +47,7 @@ class TableTitle extends Component {
         toast.error('Refresh failed, try again', {
           // Adding toastId helps prevent multiple duplicate toasts that appears
           // on screen when user presses refresh button multiple times
-          toastId: 'table-fetch-failure',
+          toastId: 'table-fetch-failure'
         });
       }
     };
@@ -60,7 +72,7 @@ class TableTitle extends Component {
         <div className="pull-right">
           <YBButtonLink
             btnIcon="fa fa-refresh"
-            btnClass="btn btn-default refresh-btn"
+            btnClass="btn btn-default refresh-table-list-btn"
             onClick={() => fetchCurrentUniverseTables(currentUniverseUUID)}
           />
         </div>
@@ -72,11 +84,18 @@ class TableTitle extends Component {
 export default class ListTables extends Component {
   constructor(props) {
     super(props);
-    this.state = { currentView: 'listTables' };
+    this.state = { currentView: 'listTables', isSchemaChangeInfoModalOpen: false };
   }
 
   showListTables = () => {
     this.setState({ currentView: 'listTables' });
+  };
+
+  openSchemaChangeInfoModal = () => {
+    this.setState({ isSchemaChangeInfoModalOpen: true });
+  };
+  closeSchemaChangeInfoModal = () => {
+    this.setState({ isSchemaChangeInfoModalOpen: false });
   };
 
   render() {
@@ -97,19 +116,67 @@ export default class ListTables extends Component {
       });
     }
 
+    const currentUniverse = this.props.universe.currentUniverse.data;
+    const hasTablesInXClusterReplication = !!(
+      currentUniverse.drConfigUuidsAsSource.length ||
+      currentUniverse.drConfigUuidsAsTarget.length ||
+      currentUniverse.universeDetails.xclusterInfo.sourceXClusterConfigs.length ||
+      currentUniverse.universeDetails.xclusterInfo.sourceXClusterConfigs.length
+    );
+
+    const clusters = currentUniverse?.universeDetails.clusters;
+    const currentUniverseVersion = clusters
+      ? getPrimaryCluster(clusters)?.userIntent.ybSoftwareVersion ?? ''
+      : '';
+
     if (tables.currentTableView === 'list') {
       return (
-        <YBPanelItem
-          header={
-            <TableTitle
-              numRedisTables={numRedisTables}
-              numCassandraTables={numCassandraTables}
-              numPostgresTables={numPostgresTables}
-              {...this.props}
-            />
-          }
-          body={<ListTableGrid {...this.props} />}
-        />
+        <>
+          {hasTablesInXClusterReplication && (
+            <>
+              <YBBanner variant={YBBannerVariant.INFO} isFeatureBanner={true}>
+                <div className="universe-tables-bannerContainer">
+                  <Typography variant="body2">
+                    <b>One or more tables in this universe is involved with xCluster.</b> Before
+                    making schema changes to tables in replication, review the steps for making
+                    manual schema changes.
+                  </Typography>
+                  <div className="universe-tables-bannerActionButtonContainer">
+                    <YBButton
+                      variant="secondary"
+                      size="large"
+                      onClick={this.openSchemaChangeInfoModal}
+                    >
+                      Learn More
+                    </YBButton>
+                  </div>
+                </div>
+              </YBBanner>
+              {this.state.isSchemaChangeInfoModalOpen && (
+                <SchemaChangeModeInfoModal
+                  currentUniverseVersion={currentUniverseVersion}
+                  isDrInterface={true}
+                  isConfigInterface={false}
+                  modalProps={{
+                    open: this.state.isSchemaChangeInfoModalOpen,
+                    onClose: this.closeSchemaChangeInfoModal
+                  }}
+                />
+              )}
+            </>
+          )}
+          <YBPanelItem
+            header={
+              <TableTitle
+                numRedisTables={numRedisTables}
+                numCassandraTables={numCassandraTables}
+                numPostgresTables={numPostgresTables}
+                {...this.props}
+              />
+            }
+            body={<ListTableGrid {...this.props} />}
+          />
+        </>
       );
     } else {
       return <span />;
@@ -137,8 +204,8 @@ class ListTableGrid extends Component {
       }
     };
 
-    const getTableName = function (tableName, data) {
-      if (data.status === 'success') {
+    const formatTableName = function (tableName, data) {
+      if (data?.status === 'success' && !data?.isParentTable) {
         return (
           <Link
             title={tableName}
@@ -157,20 +224,11 @@ class ListTableGrid extends Component {
     };
     const actions_disabled =
       isDisabled(currentCustomer.data.features, 'universes.backup') ||
-      currentUniverse.universeDetails.backupInProgress;
+      currentUniverse.universeDetails.updateInProgress;
     const disableManualBackup = currentUniverse?.universeConfig?.takeBackups === 'true';
     const formatActionButtons = function (item, row, disabled) {
       if (!row.isIndexTable) {
-        const actions = [
-          <TableAction
-            key={`${row.tableName}-backup-btn`}
-            currentRow={row}
-            actionType="create-backup"
-            disabled={actions_disabled || !disableManualBackup}
-            btnClass={'btn-orange'}
-            universeUUID={currentUniverse.universeUUID}
-          />
-        ];
+        const actions = [];
         if (getTableIcon(row.tableType) === 'YCQL') {
           actions.push([
             <TableAction
@@ -178,9 +236,11 @@ class ListTableGrid extends Component {
               currentRow={row}
               actionType="import"
               disabled={actions_disabled}
+              universeUUID={currentUniverse.universeUUID}
             />
           ]);
         }
+        if (actions.length === 0) return null;
         return (
           <ButtonGroup>
             <DropdownButton
@@ -229,19 +289,18 @@ class ListTableGrid extends Component {
 
     let listItems = [];
     if (isNonEmptyArray(self.props.tables.universeTablesList)) {
-      listItems = self.props.tables.universeTablesList.map(function (item, idx) {
-        return {
-          keySpace: item.keySpace,
-          tableID: item.tableUUID,
-          pgSchemaName: item.pgSchemaName,
-          tableType: item.tableType,
-          tableName: item.tableName,
-          status: 'success',
-          isIndexTable: item.isIndexTable,
-          sizeBytes: item.sizeBytes,
-          walSizeBytes: item.walSizeBytes
-        };
-      });
+      listItems = self.props.tables.universeTablesList.map((ybTable) => ({
+        keySpace: ybTable.keySpace,
+        tableID: getTableUuid(ybTable),
+        pgSchemaName: ybTable.pgSchemaName,
+        tableType: ybTable.tableType,
+        tableName: getTableName(ybTable),
+        status: 'success',
+        isIndexTable: ybTable.isIndexTable,
+        sizeBytes: getIsColocatedChildTable(ybTable) ? '-' : ybTable.sizeBytes,
+        walSizeBytes: getIsColocatedChildTable(ybTable) ? '-' : ybTable.walSizeBytes,
+        isParentTable: getIsColocatedParentTable(ybTable)
+      }));
     }
     const currentUniverseTasks = universeTasks.data[currentUniverse.universeUUID];
     if (getPromiseState(universeTasks).isSuccess() && isNonEmptyArray(currentUniverseTasks)) {
@@ -271,15 +330,11 @@ class ListTableGrid extends Component {
     }
     const sortedListItems = _.sortBy(listItems, 'tableName');
     const tableListDisplay = (
-      <BootstrapTable
-        data={sortedListItems}
-        pagination
-        className="backup-list-table middle-aligned-table"
-      >
+      <BootstrapTable data={sortedListItems} pagination search className="middle-aligned-table">
         <TableHeaderColumn dataField="tableID" isKey={true} hidden={true} />
         <TableHeaderColumn
           dataField={'tableName'}
-          dataFormat={getTableName}
+          dataFormat={formatTableName}
           width="15%"
           columnClassName={'table-name-label yb-table-cell'}
           className={'yb-table-cell'}
@@ -339,16 +394,18 @@ class ListTableGrid extends Component {
         >
           WAL Size
         </TableHeaderColumn>
-        {!universePaused && isNotHidden(currentCustomer.data.features, 'universes.backup') && (
-          <TableHeaderColumn
-            dataField={'actions'}
-            columnClassName={'yb-actions-cell'}
-            width="10%"
-            dataFormat={formatActionButtons}
-          >
-            Actions
-          </TableHeaderColumn>
-        )}
+        {!universePaused &&
+          isNotHidden(currentCustomer.data.features, 'universes.backup') &&
+          sortedListItems.filter((t) => t.tableType === 'YQL_TABLE_TYPE').length > 0 && (
+            <TableHeaderColumn
+              dataField={'actions'}
+              columnClassName={'yb-actions-cell'}
+              width="10%"
+              dataFormat={formatActionButtons}
+            >
+              Actions
+            </TableHeaderColumn>
+          )}
       </BootstrapTable>
     );
     return <Fragment>{tableListDisplay}</Fragment>;

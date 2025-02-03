@@ -9,21 +9,11 @@
  */
 package com.yugabyte.yw.models.filters;
 
-import com.yugabyte.yw.models.Alert;
-import com.yugabyte.yw.models.AlertConfiguration;
-import com.yugabyte.yw.models.AlertConfiguration.Severity;
-import com.yugabyte.yw.models.AlertLabel;
 import com.yugabyte.yw.models.Backup;
-import com.yugabyte.yw.models.helpers.KnownAlertLabels;
-import java.util.Arrays;
-import java.util.Collection;
 import java.util.Date;
-import java.util.EnumSet;
-import java.util.HashSet;
 import java.util.Set;
 import java.util.UUID;
 import lombok.Builder;
-import lombok.NonNull;
 import lombok.Value;
 
 @Value
@@ -38,7 +28,9 @@ public class BackupFilter {
   Set<UUID> storageConfigUUIDList;
   Set<UUID> scheduleUUIDList;
   Set<UUID> universeUUIDList;
+  Set<UUID> backupUUIDList;
   UUID customerUUID;
   boolean onlyShowDeletedUniverses;
   boolean onlyShowDeletedConfigs;
+  boolean showHidden;
 }

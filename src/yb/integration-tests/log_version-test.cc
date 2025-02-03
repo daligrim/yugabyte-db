@@ -16,7 +16,7 @@
 #include <vector>
 
 #include <boost/algorithm/string/predicate.hpp>
-#include <glog/logging.h>
+#include "yb/util/logging.h"
 
 #include "yb/client/client.h"
 
@@ -69,9 +69,9 @@ class LogHeader {
 
 class LogRollingTest : public ExternalMiniClusterITestBase {
  public:
-  void SetUpCluster(ExternalMiniClusterOptions* opts) override {
-    ExternalMiniClusterITestBase::SetUpCluster(opts);
-    opts->log_to_file = true;
+  void SetUpOptions(ExternalMiniClusterOptions& opts) override {
+    ExternalMiniClusterITestBase::SetUpOptions(opts);
+    opts.log_to_file = true;
   }
 };
 

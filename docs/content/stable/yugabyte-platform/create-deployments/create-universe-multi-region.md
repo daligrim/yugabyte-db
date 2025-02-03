@@ -13,23 +13,31 @@ type: docs
 
 YugabyteDB Anywhere allows you to create a universe spanning multiple geographic regions.
 
-For example, you can deploy a universe across Oregon (US-West) and South Carolina (US-East). Once deployed, you can connect to each node and perform a variety of tasks.
+For example, you can deploy a universe across Oregon (US-West), South Carolina (US-East), and Tokyo (Asia-Northeast).
 
-## Create the universe
+## Prerequisites
 
-Before creating a universe, you need to configure a cloud provider, such as [Google Cloud Provider](../../configure-yugabyte-platform/set-up-cloud-provider/gcp/) (GCP). When done, use the YugabyteDB Anywhere UI to navigate to **Universes**, click **Create Universe**, and enter the following sample values:
+Before you start creating a universe, ensure that you have created a provider configuration as described in [Create provider configurations](../../configure-yugabyte-platform/).
+
+## Create a universe
+
+After you have created a provider configuration, such as, for example [Google Cloud Provider](../../configure-yugabyte-platform/gcp/) (GCP), navigate to **Universes**, click **Create Universe**, and enter the following sample values:
 
 - In the **Name** field, enter **helloworld2**.
 
 - In the **Provider** field, select the cloud provider you configured.
 
-- Use the **Regions** field to enter **Oregon** and **South Carolina**.
+- Use the **Regions** field to select the regions where you want to deploy nodes.
 
-- In the **Instance Type** field, select **n1-standard-8**.
+- Choose the **Linux version** to be provisioned on the nodes of the universe.
 
-- Provide any other desired settings.
+- In the **Instance Type** field, select a suitable instance type; these will vary depending on the cloud provider.
 
-- Click **Add Flags** and add the following flags for Master:
+  ![Create multi-region universe1 on GCP](/images/yp/create-deployments/create-multi-region-uni1.png)
+
+- Provide any other desired settings for [Security Configurations](../create-universe-multi-zone/#security-configurations), and [Advanced Configuration](../create-universe-multi-zone/#advanced-configuration).
+
+- For **G-Flags**, click **Add Flags**, **Add to Master**, and add the following flags for Master:
 
   ```properties
   leader_failure_max_missed_heartbeat_periods 5
@@ -45,11 +53,13 @@ Before creating a universe, you need to configure a cloud provider, such as [Goo
   leader_lease_duration_ms 6000
   ```
 
-  Note that since the data is globally replicated, RPC latencies are higher; these flags are used for increasing the failure detection interval in a higher RPC latency deployment.<br><br>
+  Note that because the data is globally replicated, RPC latencies are higher; these flags are used for increasing the failure detection interval in a higher RPC latency deployment.
 
-  ![Create multi-region universe on GCP](/images/ee/multi-region-create-universe3.png)
+  ![Create multi-region universe on GCP](/images/yp/create-deployments/create-multi-region-uni2.png)
 
 - Click **Create**.
+
+Note that all YugabyteDB universes created using YugabyteDB Anywhere have the YB Controller automatically installed on their nodes. The YB Controller works in the background to speed up backup and restore of universes.
 
 ## Examine the universe
 
@@ -106,7 +116,7 @@ With the goal of starting a workload from each node, perform the following on ev
 Run the following command on each of the nodes, substituting *REGION* with the region code for each node:
 
 ```sh
-$ java -jar /home/yugabyte/tserver/java/yb-sample-apps.jar \
+java -jar /home/yugabyte/tserver/java/yb-sample-apps.jar \
             --workload CassandraKeyValue \
             --nodes $YCQL_ENDPOINTS \
             --num_threads_write 1 \

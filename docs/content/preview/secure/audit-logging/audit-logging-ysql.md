@@ -2,7 +2,6 @@
 title: Configure audit logging in YSQL
 headerTitle: Configure audit logging in YSQL
 description: Configure audit logging in YSQL.
-image: /images/section_icons/secure/authentication.png
 menu:
   preview:
     name: Configure audit logging
@@ -27,199 +26,92 @@ type: docs
   </li>
 </ul>
 
-YugabyteDB YSQL uses PostgreSQL Audit Extension (`pgAudit`) to provide detailed session and/or object audit logging via YugabyteDB YB-TServer logging.
+YugabyteDB YSQL uses the PostgreSQL Audit Extension v1.7 ([pgaudit](https://github.com/pgaudit/pgaudit/blob/1.7.0/README.md)) to provide detailed session and/or object audit logging via YugabyteDB YB-TServer logging.
 
-The goal of the YSQL audit logging is to provide YugabyteDB users with capability to produce audit logs often required to comply with government, financial, or ISO certifications. An audit is an official inspection of an individual's or organization's accounts, typically by an independent body.
+The goal of YSQL audit logging is to provide you with the capability to produce audit logs often required to comply with government, financial, or ISO certifications. An audit is an official inspection of an individual's or organization's accounts, typically by an independent body.
 
 ## Enable audit logging
 
-### Step 1. Enable audit logging on YB-TServer
+To enable audit logging, first configure audit logging for the cluster. This is done in one of the following ways:
 
-This can be done in one of the following ways:
+- At cluster startup.
 
-- Use the `--ysql_pg_conf_csv` YB-TServer flag.
+    Use the [--ysql_pg_conf_csv](../../../reference/configuration/yb-tserver/#ysql-pg-conf-csv) YB-TServer flag.
 
-    Database administrators can use `ysql_pg_conf_csv` to set appropriate values for `pgAudit` configuration.
+    Database administrators can use `ysql_pg_conf_csv` to configure audit logging using [pgaudit flags](#customize-audit-logging).
 
-    For example, `ysql_pg_conf_csv="pgaudit.log='DDL',pgaudit.log_level=notice"`
+    Provide the options as comma-separated values. Use double quotation marks to enclose any settings that include commas or single quotation marks. For example:
 
-    These configuration values are set when the YugabyteDB cluster is created and hence are picked up for all users and for every session.
+    ```sh
+    --ysql_pg_conf_csv="log_line_prefix='%m [%p %l %c] %q[%C %R %Z %H] [%r %a %u %d] '","pgaudit.log='all, -misc'",pgaudit.log_parameter=on,pgaudit.log_relation=on,pgaudit.log_catalog=off,suppress_nonpg_logs=on
+    ```
 
-- Use the YugabyteDB `SET` command.
+    These [configuration parameters](../../../reference/configuration/yb-tserver/#postgresql-server-options) are set when the YugabyteDB cluster is restarted, and they apply for all users and for every session. For clusters with replication factor 3 or greater, this can be done with a rolling restart, without interrupting application workloads.
 
-    An alternative is to use the YB `SET` command, which essentially changes the run-time configuration parameters.
+- Per session.
+
+    Use the [SET](../../../api/ysql/the-sql-language/statements/cmd_set/) command in a running session.
+
+    The `SET` command essentially changes the run-time configuration parameters.
 
     For example, `SET pgaudit.log='DDL'`
 
-    `SET` only affects the value used by the current session. For more information, see the [PostgreSQL documentation](https://www.postgresql.org/docs/11/sql-set.html).
+    `SET` only affects the value used by the current session. For more information, see the [PostgreSQL documentation](https://www.postgresql.org/docs/15/sql-set.html).
 
-### Step 2. Load the `pgAudit` extension
+### Create the extension
 
-Enable audit logging in YugabyteDB clusters by creating the `pgAudit` extension. Executing the following statement in a YSQL shell enables Audit logging:
+After configuring the YB-TServer and starting the cluster, create the pgaudit extension by executing the following statement in ysqlsh:
 
 ```sql
 CREATE EXTENSION IF NOT EXISTS pgaudit;
 ```
 
+You only need to run this statement on a single node, and it will apply across your cluster.
+
 ## Customize audit logging
 
-You can further customize YSQL audit logging by configuring the `pgAudit` flags, as per the following table.
+By default, audit logging includes the statement text for all statements in the classes of statements that you specify using the `pgaudit.log` flag. You can customize YSQL audit logging using the pgaudit flags, as per the following table.
 
-<table>
-  <tr>
-   <td><strong>Option</strong>
-   </td>
-   <td><strong>Values notes</strong>
-   </td>
-  </tr>
-  <tr>
-   <td><code>pgaudit.log</code>
-   </td>
-   <td>Specifies which classes of statements are to be logged by <strong>session audit logging</strong>.
-<ul>
+| Option | Description | Default |
+| :----- | :----- | :------ |
+| pgaudit.log | Specifies which classes of statements are logged by session audit logging, as follows:<ul><li>**READ**: SELECT and COPY when the source is a relation or a query.<li>**WRITE**: INSERT, UPDATE, DELETE, TRUNCATE, and COPY when the destination is a relation.<li>**FUNCTION**: Function calls and DO blocks.<li>**ROLE**: Statements related to roles and privileges: GRANT, REVOKE, CREATE/ALTER/DROP ROLE.<li>**DDL**: All DDL that is not included in the ROLE class.<li>**MISC**: Miscellaneous commands, such as DISCARD, FETCH, CHECKPOINT, VACUUM, SET.<li>**ALL**: Include all of the preceding options.</ul>You can specify multiple classes using a comma-separated list. Subtract classes by prefacing the class with a minus (`-`) sign. | none |
+| pgaudit.log_catalog | Log statements for the PostgreSQL system catalog relations in `pg_catalog`. These system catalog tables record system (as opposed to user) activity, such as metadata lookups and from third-party tools performing lookups.<br>These statements aren't required for typical auditing and you can disable this option to reduce noise in the log. | ON |
+| pgaudit.log_client | Enable this option to echo log messages directly to clients such as [ysqlsh](../../../api/ysqlsh/) and psql. Log messages are printed directly to the shell, which can be helpful for debugging.<br>When enabled, you can set the level of logs that are output using `pgaudit.log_level`. | OFF |
+| pgaudit.log_level | Sets the [severity level](https://www.postgresql.org/docs/16/runtime-config-logging.html#RUNTIME-CONFIG-SEVERITY-LEVELS) of logs written to clients when `pgaudit.log_client` is on. Use this setting for debugging and testing.<br>Values: DEBUG1 .. DEBUG5, INFO, NOTICE, WARNING, LOG.<br>ERROR, FATAL, and PANIC are not allowed.<br>`pgaudit.log_level` only applies when `pgaudit.log_client` is on; otherwise the default LOG level is used. | LOG |
+| pgaudit.log_parameter | Include the parameters that were passed with the statement in the logs. When parameters are present, they are included in CSV format after the statement text. | OFF |
+| pgaudit.log_relation | Create separate log entries for each relation (TABLE, VIEW, and so on) referenced in a SELECT or DML statement. This is a shortcut for exhaustive logging without using [object audit logging](../object-audit-logging-ysql/). | OFF |
+| pgaudit.log_rows | Include the rows retrieved or affected by a statement. The rows field is included after the parameter field. | OFF |
+| pgaudit.log_statement | Include the statement text and parameters. Depending on requirements, an audit log might not require this and it makes the logs less verbose. | ON |
+| pgaudit.log_statement_once | Ordinarily, statement text (and, if enabled, parameters) are included with every log entry. Enable this setting to only include statement text and parameters for the first entry for a statement or sub-statement combination. This makes for less verbose logging, but can make it more difficult to determine the statement that generated a log entry. | OFF |
+| pgaudit.role | Specifies the master role to use for object audit logging. To define multiple audit roles, grant the roles to the master role; this allows multiple groups to be in charge of different aspects of audit logging. | None |
+<!--
+| pgaudit.log_parameter_max_size | Specifies the size, in bytes, of parameters to include in the logs if `pgaudit.log_parameter` is on. Parameters longer than this value are not logged and replaced with `<long param suppressed>`. The default of 0 indicates that all parameters are logged regardless of length. | 0 |
+-->
 
-<li><strong><code>READ</code></strong>: <code>SELECT</code> and <code>COPY</code> when the source is a relation or a query.
+## Examples
 
-<li><strong><code>WRITE</code></strong>: <code>INSERT</code>, <code>UPDATE</code>, <code>DELETE</code>, <code>TRUNCATE</code>, and <code>COPY</code> when the destination is a relation.
+{{% explore-setup-single %}}
 
-<li><strong><code>FUNCTION</code></strong>: Function calls and <code>DO</code> blocks.
+Using ysqlsh, connect to the database and enable the pgaudit extension on the YugabyteDB cluster as follows:
 
-<li><strong><code>ROLE</code></strong>: Statements related to roles and privileges: <code>GRANT</code>, <code>REVOKE</code>, <code>CREATE/ALTER/DROP ROLE</code>.
-
-<li><strong><code>DDL</code></strong>: All <code>DDL</code> that is not included in the <code>ROLE</code> class.
-
-<li><strong><code>MISC</code></strong>: Miscellaneous commands, such as <code>DISCARD, FETCH, CHECKPOINT, VACUUM, SET</code>.
-
-<li><strong><code>MISC_SET</code></strong>: Miscellaneous <code>SET</code> commands, such as <code>SET ROLE</code>.
-
-<li><strong><code>ALL</code></strong>: Include all of the preceding options.
-
-Multiple classes can be provided using a comma-separated list and classes can be subtracted by prefacing the class with a `-` (minus) sign.
-
-</li>
-</ul>
-
-The default is none.
-   </td>
-  </tr>
-  <tr>
-   <td><code>pgaudit.log_catalog</code>
-   </td>
-   <td><strong><code>ON</code></strong>: <strong>Session logging</strong> would be enabled in the case for all relations in a statement that are in pg_catalog.
-<strong><code>OFF</code></strong>: Disabling this setting will reduce noise in the log from tools.<p>
-The default is <strong><code>ON</code></strong>.
-   </td>
-  </tr>
-  <tr>
-   <td><code>pgaudit.log_client</code>
-   </td>
-   <td><strong><code>ON</code></strong>: Log messages are to be visible to a client process such as psql. Helpful for debugging.
-<strong><code>OFF</code></strong>: Reverse.
-Note that `pgaudit.log_level` is only enabled when pgaudit.log_client is <strong><code>ON</code></strong>.<p>
-The default is <strong><code>OFF</code></strong>.
-   </td>
-  </tr>
-  <tr>
-   <td><code>pgaudit.log_level</code>
-   </td>
-   <td>Values: <strong><code>DEBUG1 .. DEBUG5, INFO, NOTICE, WARNING, LOG</code></strong>.
-Log level to be used for log entries (<code>ERROR</code>, <code>FATAL</code>, and <code>PANIC</code> are not allowed). This setting is used for testing.
-
-<p>
-Note that <code>pgaudit.log_level</code> is only enabled when pgaudit.log_client is <strong><code>ON</code></strong>; otherwise the default will be used.<br><br>
-The default is <strong><code>LOG</code></strong>.
-   </td>
-  </tr>
-  <tr>
-   <td><code>pgaudit.log_parameter</code>
-   </td>
-   <td><strong><code>ON</code></strong>: Audit logging includes the parameters that were passed with the statement. When parameters are present they will be included in CSV format after the statement text.
-<p>
-The default is <strong><code>OFF</code></strong>.
-   </td>
-  </tr>
-  <tr>
-   <td><code>pgaudit.log_relation</code>
-   </td>
-   <td><strong><code>ON</code></strong>: Session audit logging creates separate log entries for each relation (<code>TABLE</code>, <code>VIEW</code>, etc.) referenced in a <code>SELECT</code> or <code>DML</code> statement. This is a shortcut for exhaustive logging without using <strong>object audit logging</strong>.
-<p>
-The default is <strong><code>OFF</code></strong>.
-   </td>
-  </tr>
-  <tr>
-   <td><code>pgaudit.log_statement_once</code>
-   </td>
-   <td><strong><code>ON</code></strong>: Specifies whether logging will include the statement text and parameters with the first log entry for a statement/substatement combination or with every entry. Disabling this setting will result in less verbose logging but may make it more difficult to determine the statement that generated a log entry.
-<p>
-The default is <strong><code>OFF</code></strong>.
-   </td>
-  </tr>
-  <tr>
-   <td><code>pgaudit.role</code>
-   </td>
-   <td>Specifies the master role to use for <strong>object audit logging</strong>. Multiple audit roles can be defined by granting them to the master role. This allows multiple groups to be in charge of different aspects of audit logging.
-<p>
-There is no default.
-   </td>
-  </tr>
-</table>
-
-## Example
-
-Use these steps to configure audit logging in a YugabyteDB cluster with bare minimum configurations.
-
-### 1. Enable audit logging
-
-Start the YugabyteDB Cluster with the following Audit logging configuration:
-
-```shell
---ysql_pg_conf_csv="pgaudit.log='DDL',pgaudit.log_level=notice,pgaudit.log_client=ON"
+```sql
+\c yugabyte yugabyte;
+CREATE EXTENSION IF NOT EXISTS pgaudit;
 ```
 
-Alternatively, open the YSQL shell and execute the following commands:
+### Basic audit logging
 
-```shell
+In ysqlsh, execute the following commands:
+
+```sql
 SET pgaudit.log='DDL';
 SET pgaudit.log_client=ON;
 SET pgaudit.log_level=notice;
 ```
 
-### 2. Load `pgAudit` extension
+#### Create a table and verify the log
 
-Open the YSQL shell (ysqlsh), specifying the `yugabyte` user, as follows:
-
-```shell
-$ ./ysqlsh -U yugabyte -W
-```
-
-When prompted, enter the password for the `yugabyte` user.
-
-You should be able to login and see an output similar to the following:
-
-```output
-ysqlsh (11.2-YB-2.5.0.0-b0)
-Type "help" for help.
-
-yugabyte=#
-```
-
-To enable the `pgAudit` extension on the YugabyteDB cluster, connect to the database by using the following:
-
-```shell
-yugabyte=> \c yugabyte yugabyte;
-```
-
-You are now connected to the database `yugabyte` as user `yugabyte`.
-
-Finally, create the `pgAudit` extension as follows:
-
-```sql
-CREATE EXTENSION IF NOT EXISTS pgaudit;
-```
-
-### 3. Create a table and verify log
-
-As `pgaudit.log='DDL'` is configured, `CREATE TABLE` YSQL statements are logged and the corresponding log is shown in the YSQL client:
+As `pgaudit.log='DDL'` is configured, `CREATE TABLE` YSQL statements are logged and the corresponding log is shown in ysqlsh:
 
 ```sql
 CREATE TABLE employees (empno int, ename text, address text,
@@ -234,3 +126,104 @@ CREATE TABLE
 ```
 
 Notice that audit logs are generated for DDL statements.
+
+### Advanced audit logging
+
+For this example, start a new cluster with the following audit logging configuration:
+
+```shell
+--ysql_pg_conf_csv="log_line_prefix='%m [%p %l %c] %q[%C %R %Z %H] [%r %a %u %d] ',pgaudit.log='all',pgaudit.log_parameter=on,pgaudit.log_relation=on,pgaudit.log_catalog=off,suppress_nonpg_logs=on"
+```
+
+Enable the pgaudit extension on any node as follows:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS pgaudit;
+CREATE TABLE IF NOT EXISTS my_table ( h int, r int, v int, primary key(h,r));
+```
+
+Start two sessions and execute transactions concurrently as follows:
+
+<table class="no-alter-colors">
+  <thead>
+    <tr>
+    <th>
+    Client 1
+    </th>
+    <th>
+    Client 2
+    </th>
+    </tr>
+  </thead>
+  <tbody>
+  <tr>
+   <td>
+
+```sql
+BEGIN;
+INSERT INTO my_table VALUES (5,2,2);
+```
+
+   </td>
+   <td>
+   </td>
+  </tr>
+  <tr>
+   <td>
+   </td>
+   <td>
+
+```sql
+BEGIN;
+INSERT INTO my_table VALUES (6,2,2);
+COMMIT;
+```
+
+   </td>
+  </tr>
+  <tr>
+   <td>
+
+```sql
+INSERT INTO my_table VALUES (7,2,2);
+COMMIT;
+```
+
+   </td>
+   <td>
+   </td>
+  </tr>
+
+</tbody>
+</table>
+
+Your PostgreSQL log should include interleaved output similar to the following:
+
+```output
+2022-12-08 14:11:24.190 EST [93243 15 639235e1.16c3b] [cloud1 datacenter1 rack1 node1] [127.0.0.1(49823) ysqlsh yugabyte yugabyte] LOG:  AUDIT: SESSION,6,1,MISC,BEGIN,,,begin;,<none>
+2022-12-08 14:11:34.309 EST [93243 16 639235e1.16c3b] [cloud1 datacenter1 rack1 node1] [127.0.0.1(49823) ysqlsh yugabyte yugabyte] LOG:  AUDIT: SESSION,7,1,WRITE,INSERT,TABLE,public.my_table,"INSERT INTO my_table VALUES (5,2,2);",<none>
+2022-12-08 14:11:38.294 EST [92937 8 639233f7.16b09] [cloud1 datacenter1 rack1 node1] [127.0.0.1(49633) ysqlsh yugabyte yugabyte] LOG:  AUDIT: SESSION,6,1,MISC,BEGIN,,,begin;,<none>
+2022-12-08 14:11:42.976 EST [92937 9 639233f7.16b09] [cloud1 datacenter1 rack1 node1] [127.0.0.1(49633) ysqlsh yugabyte yugabyte] LOG:  AUDIT: SESSION,7,1,WRITE,INSERT,TABLE,public.my_table,"INSERT INTO my_table VALUES (6,2,2);",<none>
+2022-12-08 14:11:46.596 EST [92937 10 639233f7.16b09] [cloud1 datacenter1 rack1 node1] [127.0.0.1(49633) ysqlsh yugabyte yugabyte] LOG:  AUDIT: SESSION,8,1,MISC,COMMIT,,,COMMIT;,<none>
+2022-12-08 14:11:52.317 EST [93243 17 639235e1.16c3b] [cloud1 datacenter1 rack1 node1] [127.0.0.1(49823) ysqlsh yugabyte yugabyte] LOG:  AUDIT: SESSION,8,1,WRITE,INSERT,TABLE,public.my_table,"INSERT INTO my_table VALUES (7,2,2);",<none>
+2022-12-08 14:11:54.374 EST [93243 18 639235e1.16c3b] [cloud1 datacenter1 rack1 node1] [127.0.0.1(49823) ysqlsh yugabyte yugabyte] LOG:  AUDIT: SESSION,9,1,MISC,COMMIT,,,commit;,<none>
+```
+
+Sorting by session identifier and timestamp, and including the node information for uniqueness in the cluster, you can group the transactions:
+
+```output
+cloud1 datacenter1 rack1 node1 639233f7.16b09 2022-12-08 14:11:38.294 SESSION,6,1,MISC,BEGIN,,,begin;,<none>
+cloud1 datacenter1 rack1 node1 639233f7.16b09 2022-12-08 14:11:42.976 SESSION,7,1,WRITE,INSERT,TABLE,public.my_table,"INSERT INTO my_table VALUES (6,2,2);",<none>
+cloud1 datacenter1 rack1 node1 639233f7.16b09 2022-12-08 14:11:46.596 SESSION,8,1,MISC,COMMIT,,,COMMIT;,<none>
+
+cloud1 datacenter1 rack1 node1 639235e1.16c3b 2022-12-08 14:11:24.190 SESSION,6,1,MISC,BEGIN,,,begin;,<none>
+cloud1 datacenter1 rack1 node1 639235e1.16c3b 2022-12-08 14:11:34.309 SESSION,7,1,WRITE,INSERT,TABLE,public.my_table,"INSERT INTO my_table VALUES (5,2,2);",<none>
+cloud1 datacenter1 rack1 node1 639235e1.16c3b 2022-12-08 14:11:52.317 SESSION,8,1,WRITE,INSERT,TABLE,public.my_table,"INSERT INTO my_table VALUES (7,2,2);",<none>
+cloud1 datacenter1 rack1 node1 639235e1.16c3b 2022-12-08 14:11:54.374 SESSION,9,1,MISC,COMMIT,,,commit;,<none>
+```
+
+## Learn more
+
+- [Audit logging in YugabyteDB](https://www.youtube.com/watch?v=ecYN9Z5_Hzc)
+- [pgaudit GitHub project](https://github.com/pgaudit/pgaudit/)
+- [PostgreSQL Extensions](../../../explore/ysql-language-features/pg-extensions/)

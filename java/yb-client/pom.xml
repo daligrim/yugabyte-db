@@ -25,12 +25,11 @@
   <parent>
     <groupId>org.yb</groupId>
     <artifactId>yb-parent</artifactId>
-    <version>0.8.28-SNAPSHOT</version>
+    <version>0.8.98-SNAPSHOT</version>
   </parent>
 
   <artifactId>yb-client</artifactId>
   <name>YB Java Client</name>
-  <version>0.8.28-SNAPSHOT</version>
   <properties>
     <yb.thirdparty.dir>${project.basedir}/../../thirdparty</yb.thirdparty.dir>
   </properties>
@@ -47,7 +46,7 @@
     <dependency>
       <groupId>org.yb</groupId>
       <artifactId>interface-annotations</artifactId>
-      <version>${project.parent.version}</version>
+      <version>${project.version}</version>
     </dependency>
     <dependency>
       <groupId>com.google.protobuf</groupId>
@@ -63,7 +62,7 @@
     </dependency>
     <dependency>
       <groupId>org.mockito</groupId>
-      <artifactId>mockito-all</artifactId>
+      <artifactId>mockito-inline</artifactId>
       <scope>test</scope>
     </dependency>
     <dependency>
@@ -119,6 +118,12 @@
       <groupId>joda-time</groupId>
       <artifactId>joda-time</artifactId>
     </dependency>
+    <!-- dependency for smart jdbc driver yugabyte -->
+    <dependency>
+      <groupId>com.yugabyte</groupId>
+      <artifactId>jdbc-yugabytedb</artifactId>
+      <version>42.3.5-yb-1</version>
+    </dependency>
   </dependencies>
 
   <build>
@@ -132,11 +137,6 @@
           <checkStaleness>true</checkStaleness>
           <protoSourceRoot>${project.basedir}/../../src</protoSourceRoot>
           <protocExecutable>${project.basedir}/dev-support/build-proto.sh</protocExecutable>
-          <additionalProtoPathElements>
-            <additionalProtoPathElement>
-              ${yb.thirdparty.dir}/installed/uninstrumented/include
-            </additionalProtoPathElement>
-          </additionalProtoPathElements>
           <excludes>
             <exclude>**/*test*.proto</exclude>
           </excludes>

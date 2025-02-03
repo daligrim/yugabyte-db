@@ -17,6 +17,7 @@ package yb.master;
 option java_package = "org.yb.master";
 
 import "yb/common/common_types.proto";
+import "yb/common/version_info.proto";
 import "yb/common/wire_protocol.proto";
 
 enum RelationType {
@@ -24,6 +25,7 @@ enum RelationType {
   USER_TABLE_RELATION = 2;
   INDEX_TABLE_RELATION = 3;
   MATVIEW_TABLE_RELATION = 4;
+  COLOCATED_PARENT_TABLE_RELATION = 5;
 }
 
 enum SysRowEntryType {
@@ -43,6 +45,15 @@ enum SysRowEntryType {
   DDL_LOG_ENTRY = 13;
   SNAPSHOT_RESTORATION = 14;
   XCLUSTER_SAFE_TIME = 15;
+  XCLUSTER_CONFIG = 16;
+  UNIVERSE_REPLICATION_BOOTSTRAP = 17;
+  XCLUSTER_OUTBOUND_REPLICATION_GROUP = 18;
+  CLONE_STATE = 19;
+  TSERVER_REGISTRATION = 20;
+  OBJECT_LOCK_ENTRY = 21;
+
+  // Each value must have a corresponding entry in CATALOG_ENTITY_TYPE_MAP of
+  // catalog_entity_types.h
 }
 
 // Master specific errors use this protobuf.
@@ -141,6 +152,13 @@ message MasterErrorPB {
     TABLET_NOT_RUNNING = 38;
 
     TABLE_NOT_RUNNING = 39;
+
+    TABLE_SCHEMA_CHANGE_IN_PROGRESS = 40;
+
+    // The number of existing replication slots have reached `max_replication_slots`.
+    REPLICATION_SLOT_LIMIT_REACHED = 41;
+
+    TABLET_SERVER_NOT_FOUND = 42;
   }
 
   // The error code.
@@ -174,14 +192,25 @@ message TableIdentifierPB {
   optional NamespaceIdentifierPB namespace = 3;
 }
 
+message ResourcesPB {
+  optional int64 core_count = 1;
+  // The amount of memory the TServer has reserved for tablet overheads.
+  optional int64 tablet_overhead_ram_in_bytes = 2;
+}
+
 // Sent by the TS when it first heartbeats with a master. This sends the
 // master all of the necessary information about the current instance
 // of the TS.
 message TSRegistrationPB {
   optional ServerRegistrationPB common = 1;
 
-  // Capabilities supported byt this TS.
-  repeated fixed32 capabilities = 2;
+  // DEPRECATED Capabilities of tablet server.
+  reserved 2;
+
+  // Resources available at the tserver.
+  optional ResourcesPB resources = 3;
+
+  optional VersionInfoPB version_info = 4;
 }
 
 message TServerMetricsPB {

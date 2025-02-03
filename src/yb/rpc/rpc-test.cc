@@ -43,11 +43,6 @@
 
 #include <gtest/gtest.h>
 
-#if defined(TCMALLOC_ENABLED)
-#include <gperftools/heap-profiler.h>
-#endif
-
-
 #include "yb/gutil/map-util.h"
 #include "yb/gutil/strings/human_readable.h"
 
@@ -74,14 +69,15 @@
 #include "yb/util/thread.h"
 
 #include "yb/util/memory/memory_usage_test_util.h"
+#include "yb/util/flags.h"
 
 METRIC_DECLARE_histogram(handler_latency_yb_rpc_test_CalculatorService_Sleep);
-METRIC_DECLARE_histogram(rpc_incoming_queue_time);
+METRIC_DECLARE_event_stats(rpc_incoming_queue_time);
 METRIC_DECLARE_counter(tcp_bytes_sent);
 METRIC_DECLARE_counter(tcp_bytes_received);
 METRIC_DECLARE_counter(rpcs_timed_out_early_in_queue);
 
-DEFINE_int32(rpc_test_connection_keepalive_num_iterations, 1,
+DEFINE_NON_RUNTIME_int32(rpc_test_connection_keepalive_num_iterations, 1,
   "Number of iterations in TestRpc.TestConnectionKeepalive");
 
 DECLARE_bool(TEST_pause_calculator_echo_request);
@@ -94,6 +90,7 @@ DECLARE_int64(memory_limit_hard_bytes);
 DECLARE_string(vmodule);
 DECLARE_uint64(rpc_connection_timeout_ms);
 DECLARE_uint64(rpc_read_buffer_size);
+DECLARE_uint64(rpc_max_message_size);
 
 using namespace std::chrono_literals;
 using std::string;
@@ -359,7 +356,7 @@ TEST_F(TestRpc, TestHighFDs) {
 }
 
 // Test that connections are kept alive by ScanIdleConnections between calls.
-TEST_F(TestRpc, TestConnectionKeepalive) {
+TEST_F(TestRpc, YB_DISABLE_TEST_ON_MACOS(TestConnectionKeepalive)) {
   google::FlagSaver saver;
 
   // Only run one reactor per messenger, so we can grab the metrics from that
@@ -370,9 +367,10 @@ TEST_F(TestRpc, TestConnectionKeepalive) {
   options.messenger_options = messenger_options;
   // RPC heartbeats shouldn't prevent idle connections from being GCed. To test that we set
   // rpc_connection_timeout less than kGcTimeout.
-  FLAGS_rpc_connection_timeout_ms = MonoDelta(kGcTimeout).ToMilliseconds() / 2;
-  FLAGS_enable_rpc_keepalive = true;
-  EnableVerboseLoggingForModule("yb_rpc", 5);
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_rpc_connection_timeout_ms) =
+      MonoDelta(kGcTimeout).ToMilliseconds() / 2;
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_enable_rpc_keepalive) = true;
+  google::SetVLOGLevel("yb_rpc", 5);
   // Set up server.
   HostPort server_addr;
   StartTestServer(&server_addr, options);
@@ -441,8 +439,9 @@ TEST_F(TestRpc, TestConnectionHeartbeating) {
   MessengerOptions messenger_options = { 1, kTestTimeout * 100 };
   TestServerOptions options;
   options.messenger_options = messenger_options;
-  FLAGS_num_connections_to_server = 1;
-  FLAGS_rpc_connection_timeout_ms = MonoDelta(kTestTimeout).ToMilliseconds();
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_num_connections_to_server) = 1;
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_rpc_connection_timeout_ms) =
+      MonoDelta(kTestTimeout).ToMilliseconds();
 
   // Set up server.
   HostPort server_addr;
@@ -543,7 +542,7 @@ TEST_F(TestRpc, TestNegotiationTimeout) {
 
 // Test that client calls get failed properly when the server they're connected to
 // shuts down.
-TEST_F(TestRpc, TestServerShutsDown) {
+TEST_F(TestRpc, YB_DISABLE_TEST_ON_MACOS(TestServerShutsDown)) {
   // Set up a simple socket server which accepts a connection.
   HostPort server_addr;
   Socket listen_sock;
@@ -635,6 +634,41 @@ TEST_F(TestRpc, TestServerShutsDown) {
   }
 }
 
+TEST_F(TestRpc, TestSendingReceivingMemTrackers) {
+  // Set up server.
+  HostPort server_addr;
+  StartTestServerWithGeneratedCode(&server_addr);
+
+  // Set up client.
+  auto client_messenger = CreateAutoShutdownMessengerHolder("Client");
+  Proxy p(client_messenger.get(), server_addr);
+
+  RpcController controller;
+  rpc_test::EchoRequestPB req;
+  req.set_data(std::string(1_MB, 'X'));
+  rpc_test::EchoResponsePB resp;
+  ASSERT_OK(p.SyncRequest(
+      CalculatorServiceMethods::EchoMethod(), /* method_metrics= */ nullptr, req, &resp,
+      &controller));
+  auto root_mem_tracker = MemTracker::GetRootTracker();
+
+  auto call_tracker = root_mem_tracker->FindChild("Call");
+  // Call tracker tracks input data, searialized PB and sidecars etc. Since we have two copies of
+  // the data, we are checking that the peak consumption is greater than 2 times of request input
+  // and 16K for other metadata.
+  ASSERT_LE(call_tracker->peak_consumption(), 1_MB * 2 + 16_KB);
+  ASSERT_GT(call_tracker->peak_consumption(), 1_MB * 2);
+
+  auto read_buffer_tracker = root_mem_tracker->FindChild("Read Buffer");
+  auto inbound_buffer_tracker = read_buffer_tracker->FindChild("Inbound RPC");
+  auto sending_tracker = inbound_buffer_tracker->FindChild("Sending");
+
+  // Make sure that sending buffer is only tracking the output buffer and additional metadata
+  // (16_KB)
+  ASSERT_LE(sending_tracker->peak_consumption(), 1_MB + 16_KB);
+  ASSERT_GT(sending_tracker->peak_consumption(), 1_MB);
+}
+
 Result<MetricPtr> GetMetric(
     const MetricEntityPtr& metric_entity, const MetricPrototype& prototype) {
   const auto& metric_map = metric_entity->UnsafeMetricsMapForTests();
@@ -650,6 +684,11 @@ Result<MetricPtr> GetMetric(
 Result<HistogramPtr> GetHistogram(
     const MetricEntityPtr& metric_entity, const HistogramPrototype& prototype) {
   return down_cast<Histogram*>(VERIFY_RESULT(GetMetric(metric_entity, prototype)).get());
+}
+
+Result<EventStatsPtr> GetEventStats(
+    const MetricEntityPtr& metric_entity, const EventStatsPrototype& prototype) {
+  return down_cast<EventStats*>(VERIFY_RESULT(GetMetric(metric_entity, prototype)).get());
 }
 
 Result<CounterPtr> GetCounter(
@@ -683,18 +722,18 @@ TEST_F(TestRpc, TestRpcHandlerLatencyMetric) {
   auto latency_histogram = ASSERT_RESULT(GetHistogram(
       metric_entity(), METRIC_handler_latency_yb_rpc_test_CalculatorService_Sleep));
 
-  LOG(INFO) << "Sleep() min lat: " << latency_histogram->MinValueForTests();
-  LOG(INFO) << "Sleep() mean lat: " << latency_histogram->MeanValueForTests();
-  LOG(INFO) << "Sleep() max lat: " << latency_histogram->MaxValueForTests();
+  LOG(INFO) << "Sleep() min lat: " << latency_histogram->MinValue();
+  LOG(INFO) << "Sleep() mean lat: " << latency_histogram->MeanValue();
+  LOG(INFO) << "Sleep() max lat: " << latency_histogram->MaxValue();
   LOG(INFO) << "Sleep() #calls: " << latency_histogram->TotalCount();
 
   ASSERT_EQ(1, latency_histogram->TotalCount());
-  ASSERT_GE(latency_histogram->MaxValueForTests(), sleep_micros);
-  ASSERT_TRUE(latency_histogram->MinValueForTests() == latency_histogram->MaxValueForTests());
+  ASSERT_GE(latency_histogram->MaxValue(), sleep_micros);
+  ASSERT_TRUE(latency_histogram->MinValue() == latency_histogram->MaxValue());
 
   // TODO: Implement an incoming queue latency test.
   // For now we just assert that the metric exists.
-  ASSERT_OK(GetHistogram(metric_entity(), METRIC_rpc_incoming_queue_time));
+  ASSERT_OK(GetEventStats(metric_entity(), METRIC_rpc_incoming_queue_time));
 }
 
 TEST_F(TestRpc, TestRpcCallbackDestroysMessenger) {
@@ -824,7 +863,7 @@ class DisconnectTask {
   void Done() {
     bool notify;
     {
-      std::lock_guard<std::mutex> lock(share_->mutex);
+      std::lock_guard lock(share_->mutex);
       ++share_->counts[controller_.status().ToString()];
       notify = 0 == --share_->left;
     }
@@ -919,7 +958,37 @@ TEST_F(TestRpc, DumpTimedOutCall) {
   thread.join();
 }
 
-#if defined(TCMALLOC_ENABLED)
+TEST_F(TestRpc, DumpLocalCall) {
+  HostPort server_addr;
+  StartTestServer(&server_addr);
+  auto* messenger = server_messenger();
+  HostPort empty_addr;
+  Proxy p(messenger, empty_addr);
+
+  // Make a call which sleeps longer than the keepalive.
+  RpcController controller;
+  rpc_test::SleepRequestPB req;
+  req.set_sleep_micros(2 * 1000000);
+  req.set_deferred(true);
+  rpc_test::SleepResponsePB resp;
+  CountDownLatch latch(1);
+  p.AsyncRequest(
+      CalculatorServiceMethods::SleepMethod(), nullptr, req, &resp, &controller,
+      latch.CountDownCallback());
+
+  DumpRunningRpcsRequestPB dump_req;
+  dump_req.set_get_local_calls(true);
+  DumpRunningRpcsResponsePB dump_resp;
+  ASSERT_OK(messenger->DumpRunningRpcs(dump_req, &dump_resp));
+  LOG(INFO) << " Got " << yb::ToString(dump_resp);
+  ASSERT_TRUE(dump_resp.has_local_calls());
+  ASSERT_EQ(dump_resp.local_calls().calls_in_flight_size(), 1);
+  ASSERT_EQ(
+      dump_resp.local_calls().calls_in_flight(0).header().remote_method().method_name(), "Sleep");
+  latch.Wait();
+}
+
+#if YB_GPERFTOOLS_TCMALLOC
 
 namespace {
 
@@ -937,14 +1006,14 @@ TEST_F(TestRpc, SendingQueueMemoryUsage) {
   MemoryUsage current, latest_before_realloc;
 
   StartAllocationsTracking();
-  const auto heap_allocated_bytes_initial = MemTracker::GetTCMallocCurrentAllocatedBytes();
+  const auto heap_allocated_bytes_initial = GetTCMallocCurrentAllocatedBytes();
   while (current.heap_allocated_bytes < 1_MB) {
     auto data_ptr = std::make_shared<StringOutboundData>(
         kEmptyMsgLengthPrefix, kMsgLengthPrefixLength, "Empty message");
     sending.emplace_back(data_ptr, tracker);
 
     const size_t heap_allocated_bytes =
-        MemTracker::GetTCMallocCurrentAllocatedBytes() - heap_allocated_bytes_initial;
+        GetTCMallocCurrentAllocatedBytes() - heap_allocated_bytes_initial;
     if (heap_allocated_bytes != current.heap_allocated_bytes) {
       latest_before_realloc = current;
     }
@@ -977,16 +1046,16 @@ TEST_F(TestRpc, SendingQueueMemoryUsage) {
       latest_before_realloc.heap_requested_bytes * kMemoryAllocationAccuracyHighLimit);
 }
 
-#endif
+#endif // YB_GPERFTOOLS_TCMALLOC
 
 namespace {
 
 constexpr auto kMemoryLimitHardBytes = 100_MB;
 
 TestServerOptions SetupServerForTestCantAllocateReadBuffer() {
-  FLAGS_binary_call_parser_reject_on_mem_tracker_hard_limit = true;
-  FLAGS_memory_limit_hard_bytes = kMemoryLimitHardBytes;
-  FLAGS_rpc_throttle_threshold_bytes = -1;
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_binary_call_parser_reject_on_mem_tracker_hard_limit) = true;
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_memory_limit_hard_bytes) = kMemoryLimitHardBytes;
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_rpc_throttle_threshold_bytes) = -1;
   TestServerOptions options;
   options.messenger_options.n_reactors = 1;
   options.messenger_options.num_connections_to_server = 1;
@@ -1000,7 +1069,7 @@ void TestCantAllocateReadBuffer(CalculatorServiceProxy* proxy) {
   // can have other random slow downs in this tests due to large requests processing in reactor
   // thread, so we turn off application level RPC keepalive mechanism to prevent connections from
   // being closed.
-  FLAGS_enable_rpc_keepalive = false;
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_enable_rpc_keepalive) = false;
 
   rpc_test::EchoRequestPB req;
   rpc_test::EchoResponsePB resp;
@@ -1056,10 +1125,10 @@ void TestCantAllocateReadBuffer(CalculatorServiceProxy* proxy) {
     constexpr auto target_memory_consumption = kMemoryLimitHardBytes * 0.6;
     wait_status = LoggedWaitFor(
         [] {
-#if defined(TCMALLOC_ENABLED)
+#if YB_TCMALLOC_ENABLED
           // Don't rely on root mem tracker consumption, since it includes memory released by
           // the application, but not yet released by TCMalloc.
-          const auto consumption = MemTracker::GetTCMallocCurrentAllocatedBytes();
+          const auto consumption = GetTCMallocCurrentAllocatedBytes();
 #else
           // For TSAN/ASAN we don't have TCMalloc and rely on root mem tracker consumption.
           const auto consumption = MemTracker::GetRootTracker()->consumption();
@@ -1099,8 +1168,56 @@ void TestCantAllocateReadBuffer(CalculatorServiceProxy* proxy) {
 
 }  // namespace
 
-TEST_F(TestRpc, CantAllocateReadBuffer) {
+TEST_F(TestRpc, YB_DISABLE_TEST_ON_MACOS(CantAllocateReadBuffer)) {
   RunPlainTest(&TestCantAllocateReadBuffer, SetupServerForTestCantAllocateReadBuffer());
+}
+
+namespace {
+
+void TestMaxSizeRpcResponse(CalculatorServiceProxy* proxy) {
+  using google::protobuf::io::CodedOutputStream;
+
+  const size_t rpc_max_size = FLAGS_rpc_max_message_size;
+  const size_t rpc_max_size_varint_size =
+      CodedOutputStream::VarintSize32(narrow_cast<uint32_t>(rpc_max_size));
+
+  ResponseHeader resp_header;
+  resp_header.set_call_id(1);
+  resp_header.set_is_error(false);
+
+  const size_t header_pb_len = resp_header.ByteSize();
+  const size_t header_tot_len = OutboundCall::HeaderTotalLength(header_pb_len);
+
+  // We assume that length of data field/entire message is close enough to rpc_max_size for
+  // simplicity; this should hold for the values we use for rpc_max_size.
+  const size_t msg_len_without_data = 1                       // Field tag.
+      + rpc_max_size_varint_size                              // Length of data field.
+      + rpc_max_size_varint_size;                             // Length of entire message.
+
+  const size_t data_length = rpc_max_size - header_tot_len - msg_len_without_data;
+
+  RpcController controller;
+  controller.set_timeout(5s * kTimeMultiplier);
+
+  rpc_test::RepeatedEchoRequestPB req;
+  req.set_character('0');
+  req.set_count(data_length);
+
+  rpc_test::RepeatedEchoResponsePB resp;
+  ASSERT_OK(proxy->RepeatedEcho(req, &resp, &controller));
+
+  controller.Reset();
+
+  req.set_character('0');
+  req.set_count(data_length + 1);
+  ASSERT_NOK(proxy->RepeatedEcho(req, &resp, &controller));
+}
+
+} // namespace
+
+TEST_F(TestRpc, MaxSizeResponse) {
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_rpc_max_message_size) = 10_MB;
+  RunPlainTest(&TestMaxSizeRpcResponse);
 }
 
 class TestRpcSecure : public RpcTestBase {
@@ -1109,7 +1226,7 @@ class TestRpcSecure : public RpcTestBase {
     RpcTestBase::SetUp();
     secure_context_ = std::make_unique<SecureContext>(
         RequireClientCertificate::kFalse, UseClientCertificate::kFalse);
-    EXPECT_OK(secure_context_->TEST_GenerateKeys(1024, "127.0.0.1", MatchingCertKeyPair::kTrue));
+    EXPECT_OK(secure_context_->TEST_GenerateKeys(2048, "127.0.0.1", MatchingCertKeyPair::kTrue));
   }
 
  protected:
@@ -1155,6 +1272,32 @@ TEST_F(TestRpcSecure, TLS) {
   RunSecureTest(&TestSimple);
 }
 
+TEST_F(TestRpcSecure, Timeout) {
+  RunSecureTest([](auto* proxy) {
+    for (uint32_t delay_us = 20; delay_us < 100ul * 1000; delay_us *= 2) {
+      auto timeout = MonoDelta::FromMicroseconds(delay_us);
+      rpc_test::SleepRequestPB req;
+      rpc_test::SleepResponsePB resp;
+      req.set_sleep_micros(1000000ul);
+
+      Status s;
+      {
+        // dynamically allocate RpcController to it would NOT get recreated at the same address
+        // on the next iteration.
+        auto c = std::make_unique<RpcController>();
+
+        // Add some trash to instantiate sidecars.
+        c->outbound_sidecars().Start().Append(
+            pointer_cast<const char*>(&delay_us), sizeof(delay_us));
+
+        c->set_timeout(timeout);
+        s = proxy->Sleep(req, &resp, c.get());
+      }
+      ASSERT_NOK(s);
+    }
+  });
+}
+
 void TestBigOp(CalculatorServiceProxy* proxy) {
   RpcController controller;
   controller.set_timeout(5s * kTimeMultiplier);
@@ -1170,7 +1313,7 @@ TEST_F(TestRpcSecure, BigOp) {
 }
 
 TEST_F(TestRpcSecure, BigOpWithSmallBuffer) {
-  FLAGS_rpc_read_buffer_size = 128;
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_rpc_read_buffer_size) = 128;
   RunSecureTest(&TestBigOp);
 }
 
@@ -1223,7 +1366,7 @@ TEST_F(TestRpcSecure, CantAllocateReadBuffer) {
 class TestRpcCompression : public RpcTestBase, public testing::WithParamInterface<int> {
  public:
   void SetUp() override {
-    FLAGS_stream_compression_algo = GetParam();
+    ANNOTATE_UNPROTECTED_WRITE(FLAGS_stream_compression_algo) = GetParam();
     RpcTestBase::SetUp();
   }
 
@@ -1256,7 +1399,7 @@ TEST_P(TestRpcCompression, BigOp) {
 }
 
 TEST_P(TestRpcCompression, BigOpWithSmallBuffer) {
-  FLAGS_rpc_read_buffer_size = 128;
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_rpc_read_buffer_size) = 128;
   RunCompressionTest(&TestBigOp);
 }
 
@@ -1272,39 +1415,46 @@ TEST_P(TestRpcCompression, CantAllocateReadBuffer) {
   RunCompressionTest(&TestCantAllocateReadBuffer, SetupServerForTestCantAllocateReadBuffer());
 }
 
-void TestCompression(CalculatorServiceProxy* proxy, const MetricEntityPtr& metric_entity) {
-  constexpr size_t kStringLen = 4_KB;
+void TestCompression(
+    CalculatorServiceProxy* proxy, const MetricEntityPtr& metric_entity) {
+  CounterPtr sent_counter;
+  CounterPtr received_counter;
+  size_t string_len = 4_KB;
 
-  size_t prev_sent = 0;
-  size_t prev_received = 0;
   for (int i = 0;; ++i) {
+    auto prev_sent = sent_counter ? sent_counter->value() : 0;
+    auto prev_received = received_counter ? received_counter->value() : 0;
+
     RpcController controller;
     controller.set_timeout(5s * kTimeMultiplier);
     rpc_test::EchoRequestPB req;
-    req.set_data(std::string(kStringLen, 'Y'));
+    req.set_data(std::string(string_len, 'Y'));
     rpc_test::EchoResponsePB resp;
     ASSERT_OK(proxy->Echo(req, &resp, &controller));
     ASSERT_EQ(req.data(), resp.data());
 
-    auto sent_counter = ASSERT_RESULT(GetCounter(metric_entity, METRIC_tcp_bytes_sent));
-    auto received_counter = ASSERT_RESULT(GetCounter(metric_entity, METRIC_tcp_bytes_received));
+    if (!sent_counter) {
+      sent_counter = ASSERT_RESULT(GetCounter(metric_entity, METRIC_tcp_bytes_sent));
+      received_counter = ASSERT_RESULT(GetCounter(metric_entity, METRIC_tcp_bytes_received));
+    }
 
     // First FLAGS_num_connections_to_server runs were warmup.
     // To avoid counting handshake bytes.
-    if (i == FLAGS_num_connections_to_server) {
+    if (i >= FLAGS_num_connections_to_server) {
       auto sent = sent_counter->value() - prev_sent;
       auto received = received_counter->value() - prev_received;
-      LOG(INFO) << "Sent: " << sent << ", received: " << received;
+      LOG(INFO) << "Sent: " << sent << ", received: " << received << ", string len: " << string_len;
 
       ASSERT_GT(sent, 10); // Check that metric even work.
-      ASSERT_LE(sent, kStringLen / 5); // Check that compression work.
+      ASSERT_LE(sent, string_len / 5); // Check that compression work.
       ASSERT_GT(received, 10); // Check that metric even work.
-      ASSERT_LE(received, kStringLen / 5); // Check that compression work.
-      break;
-    }
+      ASSERT_LE(received, string_len / 5); // Check that compression work.
 
-    prev_sent = sent_counter->value();
-    prev_received = received_counter->value();
+      string_len += 1_KB;
+      if (string_len > 1_MB) {
+        break;
+      }
+    }
   }
 }
 
@@ -1328,7 +1478,7 @@ INSTANTIATE_TEST_CASE_P(, TestRpcCompression, testing::Range(1, 4), CompressionN
 class TestRpcSecureCompression : public TestRpcSecure {
  public:
   void SetUp() override {
-    FLAGS_stream_compression_algo = 1;
+    ANNOTATE_UNPROTECTED_WRITE(FLAGS_stream_compression_algo) = 1;
     TestRpcSecure::SetUp();
   }
 
@@ -1361,7 +1511,7 @@ TEST_F(TestRpcSecureCompression, BigOp) {
 }
 
 TEST_F(TestRpcSecureCompression, BigOpWithSmallBuffer) {
-  FLAGS_rpc_read_buffer_size = 128;
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_rpc_read_buffer_size) = 128;
   RunSecureCompressionTest(&TestBigOp);
 }
 
@@ -1373,7 +1523,7 @@ TEST_F(TestRpcSecureCompression, ConcurrentOps) {
   RunSecureCompressionTest(&TestConcurrentOps);
 }
 
-TEST_F(TestRpcSecureCompression, CantAllocateReadBuffer) {
+TEST_F(TestRpcSecureCompression, YB_DISABLE_TEST_ON_MACOS(CantAllocateReadBuffer)) {
   RunSecureCompressionTest(&TestCantAllocateReadBuffer, SetupServerForTestCantAllocateReadBuffer());
 }
 

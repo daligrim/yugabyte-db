@@ -27,18 +27,19 @@ DROP TABLEGROUP name
             Table "pg_catalog.pg_yb_tablegroup"
     Column     |   Type    | Collation | Nullable | Default
 ---------------+-----------+-----------+----------+---------
+ oid           | oid       |           | not null |
  grpname       | name      |           | not null |
  grpowner      | oid       |           | not null |
  grptablespace | oid       |           | not null |
  grpacl        | aclitem[] |           |          |
- grpoptions    | text[]    |           |          |
+ grpoptions    | text[]    | C         |          |
 Indexes:
     "pg_yb_tablegroup_oid_index" PRIMARY KEY, lsm (oid ASC)
 
 SELECT oid, relname, reltype, relnatts FROM pg_class WHERE relname IN ('pg_yb_tablegroup', 'pg_yb_tablegroup_oid_index');
  oid  |          relname           | reltype | relnatts
 ------+----------------------------+---------+----------
- 8036 | pg_yb_tablegroup           |    8038 |        5
+ 8036 | pg_yb_tablegroup           |    8038 |        6
  8037 | pg_yb_tablegroup_oid_index |       0 |        1
 (2 rows)
 
@@ -106,14 +107,14 @@ CREATE TABLEGROUP tgroup1;
 ERROR:  tablegroup "tgroup1" already exists
 CREATE TABLE tgroup_test (col1 int, col2 int) TABLEGROUP bad_tgroupname;
 ERROR:  tablegroup "bad_tgroupname" does not exist
-CREATE TABLE tgroup_optout (col1 int, col2 int) WITH (colocated=false) TABLEGROUP tgroup1;
-ERROR:  cannot use 'colocated=true/false' with tablegroup
-CREATE TABLE tgroup_optout (col1 int, col2 int) WITH (colocated=true) TABLEGROUP tgroup1;
-ERROR:  cannot use 'colocated=true/false' with tablegroup
-CREATE TABLE tgroup_optout (col1 int, col2 int) WITH (colocated=false) TABLEGROUP bad_tgroupname;
+CREATE TABLE tgroup_optout (col1 int, col2 int) WITH (colocation=false) TABLEGROUP tgroup1;
+ERROR:  cannot use 'colocation=true/false' with tablegroup
+CREATE TABLE tgroup_optout (col1 int, col2 int) WITH (colocation=true) TABLEGROUP tgroup1;
+ERROR:  cannot use 'colocation=true/false' with tablegroup
+CREATE TABLE tgroup_optout (col1 int, col2 int) WITH (colocation=false) TABLEGROUP bad_tgroupname;
 ERROR:  tablegroup "bad_tgroupname" does not exist
 CREATE TEMP TABLE tgroup_temp (col1 int, col2 int) TABLEGROUP tgroup1;
-ERROR:  Cannot use TABLEGROUP with TEMP table.
+ERROR:  cannot use TABLEGROUP with TEMP table
 CREATE INDEX ON tgroup_test3(col1) TABLEGROUP tgroup1; -- fail
 ERROR:  syntax error at or near "TABLEGROUP"
 LINE 1: CREATE INDEX ON tgroup_test3(col1) TABLEGROUP tgroup1;
@@ -181,11 +182,11 @@ ERROR:  unrecognized parameter "tablegroup_oid"
 -- Usage of SPLIT clause with TABLEGROUP should fail
 --
 CREATE TABLE tgroup_split (col1 int PRIMARY KEY) SPLIT INTO 3 TABLETS TABLEGROUP tgroup1;
-ERROR:  Cannot use TABLEGROUP with SPLIT.
+ERROR:  cannot use TABLEGROUP with SPLIT
 CREATE TABLE tgroup_split (col1 int, col2 text) SPLIT INTO 3 TABLETS TABLEGROUP tgroup1;
-ERROR:  Cannot use TABLEGROUP with SPLIT.
+ERROR:  cannot use TABLEGROUP with SPLIT
 CREATE INDEX ON tgroup_test1(col1) SPLIT AT VALUES((10), (20), (30));
-ERROR:  Cannot use TABLEGROUP with SPLIT.
+ERROR:  cannot use TABLEGROUP with SPLIT
 --
 -- Test CREATE INDEX with hash columns
 --
@@ -421,7 +422,7 @@ CREATE TABLE tgroup_test6 (col1 int, col2 int) TABLEGROUP grp3;
 --
 -- Interactions with colocated database.
 --
-CREATE DATABASE db_colocated colocated=true;
+CREATE DATABASE db_colocated colocation=true;
 \c db_colocated
 -- This should fail.
 CREATE TABLEGROUP tgroup1;

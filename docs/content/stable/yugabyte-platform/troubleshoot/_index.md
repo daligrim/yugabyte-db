@@ -1,41 +1,41 @@
 ---
-title: Troubleshoot
+title: Troubleshoot YugabyteDB Anywhere
+headerTitle: Troubleshoot
 linkTitle: Troubleshoot
-description: Troubleshoot
-image: /images/section_icons/troubleshoot/troubleshoot.png
-headcontent: Diagnose and troubleshoot issues that arise from YugabyteDB universes and YugabyteDB Anywhere.
+description: Troubleshoot issues in YugabyteDB Anywhere
+headcontent: Diagnose and troubleshoot issues that arise from YugabyteDB universes and YugabyteDB Anywhere
 menu:
   stable_yugabyte-platform:
     parent: yugabytedb-anywhere
     identifier: troubleshoot-yp
-    weight: 648
+    weight: 710
 type: indexpage
 ---
 
-<div class="row">
+{{<index/block>}}
 
-  <div class="col-12 col-md-6 col-lg-12 col-xl-6">
-    <a class="section-link icon-offset" href="install-upgrade-yp-issues/">
-      <div class="head">
-        <img class="icon" src="/images/section_icons/quick_start/install.png" aria-hidden="true" />
-        <div class="title">Install and upgrade issues</div>
-      </div>
-      <div class="body">
-        Troubleshoot issues encountered when installing or upgrading YugabyteDB Anywhere.
-      </div>
-    </a>
-  </div>
+  {{<index/item
+    title="Install and upgrade issues"
+    body="Troubleshoot issues encountered when installing or upgrading YugabyteDB Anywhere."
+    href="install-upgrade-issues/installer/"
+    icon="/images/section_icons/quick_start/install.png">}}
 
-  <div class="col-12 col-md-6 col-lg-12 col-xl-6">
-    <a class="section-link icon-offset" href="universe-issues/">
-      <div class="head">
-        <img class="icon" src="/images/section_icons/quick_start/create_cluster.png" aria-hidden="true" />
-        <div class="title">Universe issues</div>
-      </div>
-      <div class="body">
-        Troubleshoot a YugabyteDB universe.
-      </div>
-    </a>
-  </div>
+  {{<index/item
+    title="Universe issues"
+    body="Troubleshoot a YugabyteDB universe."
+    href="universe-issues/"
+    icon="/images/section_icons/quick_start/create_cluster.png">}}
 
-</div>
+  {{<index/item
+    title="Cloud provider configuration issues"
+    body="Troubleshoot issues encountered when configuring cloud providers."
+    href="cloud-provider-config-issues/"
+    icon="/images/section_icons/quick_start/create_cluster.png">}}
+
+  {{<index/item
+    title="LDAP issues"
+    body="Troubleshoot LDAP issues."
+    href="ldap-issues/"
+    icon="/images/section_icons/secure/authentication.png">}}
+
+{{</index/block>}}

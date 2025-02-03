@@ -1,6 +1,6 @@
 // Copyright (c) YugaByte, Inc.
 
-import React, { Component } from 'react';
+import { Component } from 'react';
 import { getPromiseState } from '../../../utils/PromiseUtils';
 import 'react-bootstrap-multiselect/css/bootstrap-multiselect.css';
 import { browserHistory } from 'react-router';
@@ -8,12 +8,17 @@ import { Alert } from 'react-bootstrap';
 import { YBModal, YBCheckBox, YBTextInput } from '../../common/forms/fields';
 import { isEmptyObject } from '../../../utils/ObjectUtils';
 import { getReadOnlyCluster } from '../../../utils/UniverseUtils';
+import {
+  RbacValidator,
+  hasNecessaryPerm
+} from '../../../redesign/features/rbac/common/RbacApiPermValidator';
+import { ApiPermissionMap } from '../../../redesign/features/rbac/ApiAndUserPermMapping';
 
 export default class DeleteUniverse extends Component {
   constructor(props) {
     super(props);
     this.state = {
-      isForceDelete: false,
+      isForceDelete: !!props.showForceDelete,
       isDeleteBackups: false,
       universeName: false
     };
@@ -41,6 +46,7 @@ export default class DeleteUniverse extends Component {
       universe: {
         currentUniverse: { data }
       },
+      showForceDelete,
       focusedUniverse = null
     } = this.props;
     const { name, universeDetails } = focusedUniverse ? focusedUniverse : data;
@@ -51,10 +57,15 @@ export default class DeleteUniverse extends Component {
       <>
         {universePaused ? (
           <>
-            Are you sure you want to delete the universe?
+            {`Are you sure you want to ${
+              showForceDelete ? 'force delete' : 'delete'
+            } the universe?`}
             <Alert bsStyle="danger">
-              <strong>Note: </strong>Terminating paused universes won't delete backup objects. If
-              you want to delete backup objects, resume this universe and then delete it.
+              <strong>Note: </strong>
+              {
+                "Terminating paused universes won't delete backup objects. If \
+              you want to delete backup objects, resume this universe and then delete it."
+              }
             </Alert>
           </>
         ) : (
@@ -117,11 +128,14 @@ export default class DeleteUniverse extends Component {
       universe: {
         currentUniverse: { data }
       },
-      focusedUniverse
+      focusedUniverse,
+      showForceDelete,
+      showDeleteBackups
     } = this.props;
     const { name, universeDetails } = focusedUniverse ? focusedUniverse : data;
 
     const universePaused = universeDetails?.universePaused;
+    const updateInProgress = universeDetails?.updateInProgress;
 
     return (
       <YBModal
@@ -136,20 +150,38 @@ export default class DeleteUniverse extends Component {
         error={error}
         footerAccessory={
           <div className="force-delete">
-            <YBCheckBox
-              label="Ignore Errors and Force Delete"
-              className="footer-accessory"
-              input={{ checked: this.state.isForceDelete, onChange: this.toggleForceDelete }}
-            />
-            <YBCheckBox
-              label="Delete Backups"
-              className="footer-accessory"
-              disabled={universePaused}
-              input={{ checked: this.state.isDeleteBackups, onChange: this.toggleDeleteBackups }}
-            />
+            {showForceDelete && (
+              <YBCheckBox
+                label="Ignore Errors and Force Delete"
+                className="footer-accessory"
+                disabled={showForceDelete}
+                input={{ checked: this.state.isForceDelete, onChange: this.toggleForceDelete }}
+              />
+            )}
+            {showDeleteBackups && (
+              <RbacValidator
+                accessRequiredOn={ApiPermissionMap.DELETE_BACKUP}
+                isControl
+                popOverOverrides={{ zIndex: 10000 }}
+              >
+                <YBCheckBox
+                  label="Delete Backups"
+                  className="footer-accessory"
+                  disabled={universePaused || !hasNecessaryPerm(ApiPermissionMap.DELETE_BACKUP)}
+                  input={{
+                    checked: this.state.isDeleteBackups,
+                    onChange: this.toggleDeleteBackups
+                  }}
+                />
+              </RbacValidator>
+            )}
           </div>
         }
-        asyncValidating={this.state.universeName !== name}
+        asyncValidating={
+          updateInProgress
+            ? this.state.universeName !== name || !this.state.isForceDelete
+            : this.state.universeName !== name
+        }
       >
         {this.getModalBody()}
       </YBModal>

@@ -2,23 +2,17 @@ package models
 
 type ClusterDataInfo struct {
 
-	// The UUID of the cluster
-	Id string `json:"id"`
+    // The UUID of the universe
+    UniverseUuid string `json:"universe_uuid"`
 
-	// The current state of the cluster
-	State string `json:"state"`
+    // The UUID of the cluster
+    ClusterUuid string `json:"cluster_uuid"`
 
-	// Endpoint to connect to the cluster
-	Endpoint *string `json:"endpoint"`
+    // The current state of the cluster
+    State string `json:"state"`
 
-	// Endpoints to connect to the cluster by region
-	Endpoints *map[string]string `json:"endpoints"`
+    // The current version of YugabyteDB installed on the cluster
+    SoftwareVersion string `json:"software_version"`
 
-	// ID of the associated project
-	ProjectId string `json:"project_id"`
-
-	// The current version of YugabyteDB installed on the cluster
-	SoftwareVersion string `json:"software_version"`
-
-	Metadata EntityMetadata `json:"metadata"`
+    Metadata EntityMetadata `json:"metadata"`
 }

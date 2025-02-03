@@ -4,14 +4,14 @@ linkTitle: KairosDB
 description: Use KairosDB with YCQL API
 aliases:
 menu:
-  preview:
+  preview_integrations:
     identifier: kairosdb
-    parent: integrations
+    parent: integrations-other
     weight: 571
 type: docs
 ---
 
-[KairosDB](http://kairosdb.github.io/) is a Java-based time-series metrics API that leverages Cassandra as its underlying distributed database. This page shows how it can be integrated with YugabyteDB's Cassandra-compatible YCQL API.
+[KairosDB](http://kairosdb.github.io/) is a Java-based time series metrics API that leverages Cassandra as its underlying distributed database. This page shows how it can be integrated with YugabyteDB's Cassandra-compatible YCQL API.
 
 ## Prerequisites
 
@@ -20,7 +20,7 @@ Before you start using the KairosDB plugin, ensure that you have:
 - Java version 1.8 or later.
 - The latest version of [KairosDB](https://kairosdb.github.io/docs/GettingStarted.html).
 - The latest version of [YugabyteDB plugin for KairosDB](https://github.com/yugabyte/kairosdb-yb-plugin/releases/); read the README for details about the plugin.
-- A YugabyteDB cluster. Refer to [YugabyteDB Quick start guide](/preview/quick-start/) to install and start a local cluster.
+- A YugabyteDB cluster. Refer to [YugabyteDB Quick start guide](/preview/tutorials/quick-start/macos/) to install and start a local cluster.
 - [Postman API Platform](https://www.postman.com/downloads/).
 - (Optional) YugabyteDB [cassandra-driver-core-3.10.3-yb-2.jar](https://repo1.maven.org/maven2/com/yugabyte/cassandra-driver-core/3.10.3-yb-2/cassandra-driver-core-3.10.3-yb-2.jar), for better performance.
 
@@ -58,7 +58,7 @@ The KairosDB API server should be available at `localhost:8080`.
 
 ## Verify the integration using ycqlsh
 
-Run [ycqlsh](/preview/admin/ycqlsh/) to connect to your database using the YCQL API as follows:
+Run [ycqlsh](/preview/api/ycqlsh/) to connect to your database using the YCQL API as follows:
 
 ```sh
 $ ./bin/ycqlsh localhost

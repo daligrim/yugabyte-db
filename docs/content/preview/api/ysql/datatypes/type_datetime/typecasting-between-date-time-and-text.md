@@ -4,7 +4,7 @@ headerTitle: Typecasting between date-time values and text values
 linkTitle: Typecasting between date-time and text-values
 description: Describes how to typecast date-time values to text values, and vice versa. [YSQL]
 menu:
-  preview:
+  preview_api:
     identifier: typecasting-between-date-time-and-text
     parent: api-ysql-datatypes-datetime
     weight: 50
@@ -110,22 +110,22 @@ $body$;
 select z from to_char_demo();
 ```
 
-Because this uses the _to_char()_ function, and not typecasting, the result is not sensitive to the _DateStyle_ setting. PostgreSQL documents the various components, like _'TMDay'_, _'TMMonth'_, _'yyyy'_, _dd_, and so on that define the format that _to_char()_ produces in [Table 9.24. Template Patterns for Date/Time Formatting](https://www.postgresql.org/docs/11/functions-formatting.html#FUNCTIONS-FORMATTING-DATETIME-TABLE).
+Because this uses the _to_char()_ function, and not typecasting, the result is not sensitive to the _DateStyle_ setting. PostgreSQL documents the various components, like _'TMDay'_, _'TMMonth'_, _'yyyy'_, _dd_, and so on that define the format that _to_char()_ produces in [Table 9.24. Template Patterns for Date/Time Formatting](https://www.postgresql.org/docs/15/functions-formatting.html#FUNCTIONS-FORMATTING-DATETIME-TABLE).
 
 And because _to_char_demo()_ uses the _at time zone_ operator, it is not sensitive to the current _TimeZone_ setting. This is the result:
 
 ```output
  Friday / September
  Fri 07-Sep-1042 11:59:59.543216 BC
- 
+
  Venerdì / Settembre
  Ven 07-Set-1042 11:59:59.543216 BC
- 
+
  Perjantai / Syyskuu
  Pe 07-Syy-1042 11:59:59.543216 BC
 ```
 
-As you see, the _lc_time_ session parameter determines the national language that is used for the spellings of the short and long day and month names. The PostgreSQL documentation describes this parameter in the section [23.1. Locale Support](https://www.postgresql.org/docs/11/locale.html). Notice that this section, in turn, references the section [19.11.2. Locale and Formatting](https://www.postgresql.org/docs/11/runtime-config-client.html#RUNTIME-CONFIG-CLIENT-FORMAT).
+As you see, the _lc_time_ session parameter determines the national language that is used for the spellings of the short and long day and month names. The PostgreSQL documentation describes this parameter in the section [23.1. Locale Support](https://www.postgresql.org/docs/15/locale.html). Notice that this section, in turn, references the section [19.11.2. Locale and Formatting](https://www.postgresql.org/docs/15/runtime-config-client.html#RUNTIME-CONFIG-CLIENT-FORMAT).
 
 In short, a setting like _'fi_FI'_ is operating-system-dependent and may, or may not, be available according to what local support files have been installed. You can see what's available on a Unix-like system with this shell command:
 
@@ -205,7 +205,7 @@ Approach One is used consistently throughout the whole of the [Date and time dat
 
 ## The DateStyle session parameter
 
-See the PostgreSQL documentation section [19.11.2. Locale and Formatting](https://www.postgresql.org/docs/11/runtime-config-client.html#RUNTIME-CONFIG-CLIENT-FORMAT). The _DateStyle_ session parameter determines the format of the _::text_ typecast of a _date-time_ value. It also, but in a subtle fashion, determines how a _text_ value is interpreted when it's typecast to a _date-time_ value. It has two orthogonal components: the _style_ and the _substyle_. The _style_ has these legal values:
+See the PostgreSQL documentation section [19.11.2. Locale and Formatting](https://www.postgresql.org/docs/15/runtime-config-client.html#RUNTIME-CONFIG-CLIENT-FORMAT). The _DateStyle_ session parameter determines the format of the _::text_ typecast of a _date-time_ value. It also, but in a subtle fashion, determines how a _text_ value is interpreted when it's typecast to a _date-time_ value. It has two orthogonal components: the _style_ and the _substyle_. The _style_ has these legal values:
 
 ```output
 ISO
@@ -380,22 +380,22 @@ Yugabyte recommends that application code should convert between _text_ values a
   drop table if exists t cascade;
   create table t(k int primary key, t1 time not null, t2 time not null);
   insert into t(k, t1, t2) values(1, '00:00:00'::time, '00:00:00'::time);
-  
+
   deallocate all;
   prepare s_1(text) as
   update t set t1 = to_timestamp($1, 'hh24:mi:ss')::time
   where k = 1;
-  
+
   prepare s_2(text) as
   update t set t2 = to_timestamp($1, 'hh24:mi:ss')::time
   where k = 1;
-  
+
   set timezone = 'UTC';
   execute s_1('13:00:56');
-  
+
   set timezone = 'America/Los_Angeles';
   execute s_2('13:00:56');
-  
+
   select (t1 = t2)::text from t where k = 1;
 ```
 

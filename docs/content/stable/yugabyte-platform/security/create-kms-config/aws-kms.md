@@ -1,27 +1,41 @@
 ---
 title: Create a KMS configuration using AWS KMS
-headerTitle: Create a KMS configuration using AWS KMS
+headerTitle: Create a KMS configuration
 linkTitle: Create a KMS configuration
 description: Use YugabyteDB Anywhere to create a KMS configuration for Amazon Web Services (AWS) KMS.
 menu:
   stable_yugabyte-platform:
     parent: security
     identifier: create-kms-config-1-aws-kms
-    weight: 27
+    weight: 50
 type: docs
 ---
 
-<ul class="nav nav-tabs-alt nav-tabs-yb">
+Encryption at rest uses a master key to encrypt and decrypt universe keys. The master key details are stored in YugabyteDB Anywhere in key management service (KMS) configurations. You enable encryption at rest for a universe by assigning the universe a KMS configuration. The master key designated in the configuration is then used for generating the universe keys used for encrypting the universe data.
 
+<ul class="nav nav-tabs-alt nav-tabs-yb">
   <li >
-    <a href="{{< relref "./aws-kms.md" >}}" class="nav-link active">
-      <i class="icon-postgres" aria-hidden="true"></i>
+    <a href="../aws-kms/" class="nav-link active">
+      <i class="fa-brands fa-aws" aria-hidden="true"></i>
       AWS KMS
+    </a>
+  </li>
+  <li >
+    <a href="../google-kms/" class="nav-link">
+      <i class="fa-brands fa-google" aria-hidden="true"></i>
+      Google KMS
     </a>
   </li>
 
   <li >
-    <a href="{{< relref "./hashicorp-kms.md" >}}" class="nav-link">
+    <a href="../azure-kms/" class="nav-link">
+      <i class="icon-azure" aria-hidden="true"></i>
+      Azure Key Vault
+    </a>
+  </li>
+
+  <li >
+    <a href="../hashicorp-kms/" class="nav-link">
       <i class="icon-postgres" aria-hidden="true"></i>
       HashiCorp Vault
     </a>
@@ -29,25 +43,21 @@ type: docs
 
 </ul>
 
-Encryption at rest uses universe keys to encrypt and decrypt universe data keys. You can use the YugabyteDB Anywhere UI to create key management service (KMS) configurations for generating the required universe keys for one or more YugabyteDB universes. Encryption at rest in YugabyteDB Anywhere supports the use of [Amazon Web Services (AWS) KMS](https://aws.amazon.com/kms/).
+Encryption at rest in YugabyteDB Anywhere supports the use of [Amazon Web Services (AWS) KMS](https://aws.amazon.com/kms/).
 
-The AWS user associated with a KMS configuration requires the following minimum Identity and Access Management (IAM) KMS-related permissions:
+## Prerequisites
 
-- `kms:CreateKey`
-- `kms:ListAliases`
-- `kms:ListKeys`
-- `kms:CreateAlias`
-- `kms:DeleteAlias`
-- `kms:UpdateAlias`
-- `kms:TagResource`
+The master key resource policy and AWS user associated with a KMS configuration require specific permissions. Refer to [To use encryption at rest with YugabyteDB Anywhere](../../../prepare/cloud-permissions/cloud-permissions-ear/).
 
-You can create a KMS configuration that uses AWS KMS as follows:
+## Create a KMS configuration
 
-1. Use the YugabyteDB Anywhere UI to navigate to **Configs > Security > Encryption At Rest** to access the list of existing configurations.
+You can create a KMS configuration that uses AWS KMS, as follows:
 
-2. Click **Create New Config**.
+1. Navigate to **Integrations > Security > Encryption At Rest** to access the list of existing configurations.
 
-3. Enter the following configuration details in the form:
+1. Click **Create New Config**.
+
+1. Enter the following configuration details in the form:
 
     - **Configuration Name** — Enter a meaningful name for your configuration.
     - **KMS Provider** — Select **AWS KMS**.
@@ -55,40 +65,62 @@ You can create a KMS configuration that uses AWS KMS as follows:
     - **Access Key Id** — Enter the identifier for the access key.
     - **Secret Key Id** — Enter the identifier for the secret key.
     - **Region** — Select the AWS region where the customer master key (CMK) that was used for generating the universe keys is to be located. This setting does not need to match the region where the encrypted universe resides on AWS.
-    - **Customer Master Key ID** — Enter the identifier for the CMK. If an identifier is not entered, a CMK ID will be auto-generated.
+    - **Customer Master Key ID** — Enter the identifier for the CMK. If an identifier is not entered, a CMK ID will be automatically generated.
     - **AWS KMS Endpoint** — Specify the KMS endpoint to ensure that the encryption traffic is routed across your internal links without crossing into an external network.
 
-4. Optionally, click **Upload CMK Policy** to select a custom policy file. The following is the default policy:
+1. Optionally, click **Upload CMK Policy** to select a custom policy file. The following is the default policy:
 
     ```json
-        {
-            "Version": "2012-10-17",
-            "Id": "key-default-1",
-            "Statement": [
-                {
-                    "Sid": "Enable IAM User Permissions",
-                    "Effect": "Allow",
-                    "Principal": {
-                        "AWS": "arn:aws:iam::<AWS_ACCOUNT_ID>:root"
-                    },
-                    "Action": "kms:*",
-                    "Resource": "*"
-                },
-                {
-                    "Sid": "Allow access for Key Administrators",
-                    "Effect": "Allow",
-                    "Principal": {
-                        "AWS": "arn:aws:iam::<AWS_ACCOUNT_ID>:[user|role]{1}/[<USER_NAME>|<ROLE_NAME>]{1}"
-                    },
-                    "Action": "kms:*",
-                    "Resource": "*"
-                }
-            ]
-        }
+      {
+          "Version": "2012-10-17",
+          "Id": "key-default-1",
+          "Statement": [
+              {
+                  "Sid": "Enable IAM User Permissions",
+                  "Effect": "Allow",
+                  "Principal": {
+                      "AWS": "arn:aws:iam::<AWS_ACCOUNT_ID>:root"
+                  },
+                  "Action": "kms:*",
+                  "Resource": "*"
+              },
+              {
+                  "Sid": "Allow access for Key Administrators",
+                  "Effect": "Allow",
+                  "Principal": {
+                      "AWS": "arn:aws:iam::<AWS_ACCOUNT_ID>:[user|role]{1}/[<USER_NAME>|<ROLE_NAME>]{1}"
+                  },
+                  "Action": "kms:*",
+                  "Resource": "*"
+              }
+          ]
+      }
     ```
 
-5. Click **Save**.<br>
+1. Click **Save**.
 
-    Your new configuration should appear in the list of configurations. A saved KMS configuration can only be deleted if it is not in use by any existing universes.
+    Your new configuration should appear in the list of configurations.
 
-6. Optionally, to confirm that the information is correct, click **Show details**. Note that sensitive configuration values are displayed partially masked.
+1. Optionally, to confirm that the information is correct, click **Show details**. Note that sensitive configuration values are displayed partially masked.
+
+## Modify a KMS configuration
+
+You can modify an existing KMS configuration as follows:
+
+1. Navigate to **Integrations > Security > Encryption At Rest** to open a list of existing configurations.
+
+1. Find the configuration you want to modify and click its corresponding **Actions > Edit Configuration**.
+
+1. Provide new values for the **Vault Address** and **Secret Token** fields.
+
+1. Click **Save**.
+
+1. Optionally, to confirm that the information is correct, click **Show details** or **Actions > Details**.
+
+## Delete a KMS configuration
+
+{{<note title="Note">}}
+Without a KMS configuration, you would longer be able to decrypt universe keys that were encrypted using the master key in the KMS configuration. Even after a key is rotated out of service, it may still be needed to decrypt data in backups and snapshots that were created while it was active. For this reason, you can only delete a KMS configuration if it has never been used by any universes.
+{{</note>}}
+
+To delete a KMS configuration, click its corresponding **Actions > Delete Configuration**.

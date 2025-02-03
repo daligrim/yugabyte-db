@@ -11,16 +11,16 @@
 // under the License.
 //
 
-#ifndef YB_TABLET_RUNNING_TRANSACTION_CONTEXT_H
-#define YB_TABLET_RUNNING_TRANSACTION_CONTEXT_H
+#pragma once
 
 #include <stdint.h>
 
 #include <functional>
 #include <mutex>
+#include <span>
 #include <type_traits>
 
-#include <gflags/gflags_declare.h>
+#include "yb/util/flags.h"
 
 #include "yb/gutil/callback.h"
 #include "yb/gutil/integral_types.h"
@@ -60,9 +60,6 @@ class RunningTransaction;
 
 typedef std::shared_ptr<RunningTransaction> RunningTransactionPtr;
 
-YB_DEFINE_ENUM(RemoveReason,
-               (kApplied)(kLargeApplied)(kProcessCleanup)(kStatusReceived)(kAbortReceived));
-
 class RunningTransactionContext {
  public:
   RunningTransactionContext(TransactionParticipantContext* participant_context,
@@ -76,17 +73,27 @@ class RunningTransactionContext {
       const TransactionId& id, RemoveReason reason, MinRunningNotifier* min_running_notifier) = 0;
 
   virtual void EnqueueRemoveUnlocked(
-      const TransactionId& id, RemoveReason reason, MinRunningNotifier* min_running_notifier) = 0;
+      const TransactionId& id, RemoveReason reason, MinRunningNotifier* min_running_notifier,
+      const Status& expected_deadlock_status) = 0;
+
+  virtual void NotifyAbortedTransactionIncrement(const TransactionId& id) = 0;
+
+  virtual void NotifyAbortedTransactionDecrement(const TransactionId& id) = 0;
 
   int64_t NextRequestIdUnlocked() {
     return ++request_serial_;
   }
+
+  // Used tp signal the wait-queue that the transaction has been aborted.
+  virtual void SignalAborted(const TransactionId& id) = 0;
 
   virtual const std::string& LogPrefix() const = 0;
 
   Delayer& delayer() {
     return delayer_;
   }
+
+  virtual std::weak_ptr<void> RetainWeak() = 0;
 
   virtual bool Closing() const = 0;
 
@@ -105,5 +112,3 @@ class RunningTransactionContext {
 
 } // namespace tablet
 } // namespace yb
-
-#endif // YB_TABLET_RUNNING_TRANSACTION_CONTEXT_H

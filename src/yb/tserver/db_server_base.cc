@@ -13,18 +13,19 @@
 
 #include "yb/tserver/db_server_base.h"
 
-#include "yb/client/async_initializer.h"
+#include "yb/client/client.h"
 #include "yb/client/transaction_manager.h"
 #include "yb/client/transaction_pool.h"
 
+#include "yb/common/init.h"
+
+#include "yb/server/async_client_initializer.h"
 #include "yb/server/clock.h"
 
 #include "yb/tserver/tserver_util_fwd.h"
 #include "yb/tserver/tserver_shared_mem.h"
 
-#include "yb/util/init.h"
 #include "yb/util/mem_tracker.h"
-#include "yb/util/scope_exit.h"
 #include "yb/util/shared_mem.h"
 #include "yb/util/status_log.h"
 
@@ -46,7 +47,7 @@ DbServerBase::~DbServerBase() {
 Status DbServerBase::Init() {
   RETURN_NOT_OK(RpcAndWebServerBase::Init());
 
-  async_client_init_ = std::make_unique<client::AsyncClientInitialiser>(
+  async_client_init_ = std::make_unique<client::AsyncClientInitializer>(
       "server_client", default_client_timeout(), permanent_uuid(), &options(), metric_entity(),
       mem_tracker(), messenger());
   SetupAsyncClientInit(async_client_init_.get());
@@ -56,7 +57,7 @@ Status DbServerBase::Init() {
 
 Status DbServerBase::Start() {
   RETURN_NOT_OK(RpcAndWebServerBase::Start());
-  async_client_init_->Start();
+  async_client_init_->Start(clock_);
 
   std::string host_name;
   RETURN_NOT_OK(GetHostname(&host_name));
@@ -104,7 +105,7 @@ client::TransactionPool& DbServerBase::TransactionPool() {
 }
 
 void DbServerBase::EnsureTransactionPoolCreated() {
-  std::lock_guard<decltype(transaction_pool_mutex_)> lock(transaction_pool_mutex_);
+  std::lock_guard lock(transaction_pool_mutex_);
   if (transaction_pool_holder_) {
     return;
   }
@@ -122,6 +123,13 @@ tserver::TServerSharedData& DbServerBase::shared_object() {
 
 int DbServerBase::GetSharedMemoryFd() {
   return shared_object_->GetFd();
+}
+
+void DbServerBase::WriteMainMetaCacheAsJson(JsonWriter* writer) {
+  writer->String("MainMetaCache");
+  auto local_client_future = client_future();
+  auto local_client = local_client_future.get();
+  local_client->AddMetaCacheInfo(writer);
 }
 
 }  // namespace tserver

@@ -15,7 +15,10 @@
 
 #include "yb/rpc/scheduler.h"
 
+#include "yb/util/callsite_profiling.h"
+#include "yb/util/locks.h"
 #include "yb/util/logging.h"
+#include "yb/util/unique_lock.h"
 
 using namespace std::placeholders;
 
@@ -28,17 +31,19 @@ Poller::Poller(const std::string& log_prefix, std::function<void()> callback)
 }
 
 void Poller::Start(Scheduler* scheduler, MonoDelta interval) {
+  std::lock_guard lock(mutex_);
+  if (closing_) {
+    return;
+  }
   scheduler_ = scheduler;
   interval_ = interval;
-
-  std::lock_guard<std::mutex> lock(mutex_);
-  if (!closing_) {
+  if (!paused_) {
     Schedule();
   }
 }
 
-void Poller::Shutdown() NO_THREAD_SAFETY_ANALYSIS {
-  std::unique_lock<std::mutex> lock(mutex_);
+void Poller::Shutdown() {
+  UniqueLock lock(mutex_);
   if (!closing_) {
     closing_ = true;
     if (scheduler_ == nullptr) {
@@ -49,7 +54,7 @@ void Poller::Shutdown() NO_THREAD_SAFETY_ANALYSIS {
       scheduler_->Abort(poll_task_id_);
     }
   }
-  cond_.wait(lock, [this]() NO_THREAD_SAFETY_ANALYSIS {
+  WaitOnConditionVariable(&cond_, &lock, [this]() NO_THREAD_SAFETY_ANALYSIS {
     return poll_task_id_ == rpc::kUninitializedScheduledTaskId;
   });
 }
@@ -59,13 +64,33 @@ void Poller::Schedule() {
       std::bind(&Poller::Poll, this, _1), interval_.ToSteadyDuration());
 }
 
+void Poller::Pause() {
+  std::lock_guard lock(mutex_);
+  paused_ = true;
+  if (poll_task_id_ != rpc::kUninitializedScheduledTaskId) {
+    scheduler_->Abort(poll_task_id_);
+  }
+}
+
+void Poller::Resume() {
+  std::lock_guard lock(mutex_);
+  if (closing_ || !paused_) {
+    return;
+  }
+  paused_ = false;
+  if (poll_task_id_ == rpc::kUninitializedScheduledTaskId) {
+    Schedule();
+  }
+}
+
 void Poller::Poll(const Status& status) {
   {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!status.ok() || closing_) {
-      LOG_WITH_PREFIX(INFO) << "Poll stopped: " << status;
+    std::lock_guard lock(mutex_);
+    if (!status.ok() || closing_ || paused_) {
+      LOG_WITH_PREFIX(INFO)
+          << "Poll stopped: " << status << ", closing: " << closing_ << ", paused: " << paused_;
       poll_task_id_ = rpc::kUninitializedScheduledTaskId;
-      cond_.notify_one();
+      YB_PROFILE(cond_.notify_one());
       return;
     }
   }
@@ -73,14 +98,14 @@ void Poller::Poll(const Status& status) {
   callback_();
 
   {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!closing_) {
+    std::lock_guard lock(mutex_);
+    if (!closing_ && !paused_) {
       Schedule();
     } else {
       poll_task_id_ = rpc::kUninitializedScheduledTaskId;
     }
     if (poll_task_id_ == rpc::kUninitializedScheduledTaskId) {
-      cond_.notify_one();
+      YB_PROFILE(cond_.notify_one());
     }
   }
 }

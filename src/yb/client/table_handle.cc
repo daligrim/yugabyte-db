@@ -21,7 +21,7 @@
 #include "yb/client/table_creator.h"
 #include "yb/client/yb_op.h"
 
-#include "yb/common/partition.h"
+#include "yb/dockv/partition.h"
 #include "yb/common/ql_type.h"
 #include "yb/common/schema.h"
 
@@ -30,6 +30,8 @@
 #include "yb/util/format.h"
 #include "yb/util/result.h"
 #include "yb/util/status_format.h"
+
+using std::string;
 
 using namespace std::literals; // NOLINT
 
@@ -55,6 +57,21 @@ Status TableHandle::Create(const YBTableName& table_name,
   table_creator->table_name(table_name)
       .schema(&schema)
       .num_tablets(num_tablets);
+
+  if (schema.num_hash_key_columns() == 0) {
+    // Setup range key columns for range-sharded tables.
+    std::vector<std::string> range_column_names;
+    range_column_names.reserve(schema.num_range_key_columns());
+    auto& columns = schema.columns();
+    for (size_t i = 0; i < schema.num_key_columns(); ++i) {
+      auto& column_schema = columns[i];
+      CHECK(column_schema.is_key());
+      if (!column_schema.is_hash_key()) {
+        range_column_names.push_back(column_schema.name());
+      }
+    }
+    table_creator->set_range_partition_columns(range_column_names);
+  }
 
   // Setup Index properties.
   if (index_info) {
@@ -171,27 +188,6 @@ void TableHandle::AddCondition(QLConditionPB* const condition, const QLOperator 
   condition->add_operands()->mutable_condition()->set_op(op);
 }
 
-QLMapValuePB* TableHandle::AddMapColumnValue(
-    QLWriteRequestPB* req, const int32_t& column_id, const string& entry_key,
-    const string& entry_value) const {
-  auto column_value = req->add_column_values();
-  column_value->set_column_id(column_id);
-  QLMapValuePB* map_value = (column_value->mutable_expr()->mutable_value()->mutable_map_value());
-  QLValuePB* elem = map_value->add_keys();
-  elem->set_string_value(entry_key);
-  elem = map_value->add_values();
-  elem->set_string_value(entry_value);
-  return map_value;
-}
-
-void TableHandle::AddMapEntryToColumn(
-    QLMapValuePB* map_value_pb, const string& entry_key, const string& entry_value) const {
-  QLValuePB* elem = map_value_pb->add_keys();
-  elem->set_string_value(entry_key);
-  elem = map_value_pb->add_values();
-  elem->set_string_value(entry_value);
-}
-
 void TableHandle::AddColumns(const std::vector<std::string>& columns, QLReadRequestPB* req) const {
   QLRSRowDescPB* rsrow_desc = req->mutable_rsrow_desc();
   for (const auto& column : columns) {
@@ -225,7 +221,7 @@ TableIterator::TableIterator(const TableHandle* table, const TableIteratorOption
     : table_(table), error_handler_(options.error_handler) {
   auto client = table->client();
 
-  session_ = client->NewSession();
+  session_ = client->NewSession(options.timeout);
 
   google::protobuf::RepeatedPtrField<master::TabletLocationsPB> tablets;
   REPORT_AND_RETURN_IF_NOT_OK(client->GetTablets(
@@ -247,7 +243,7 @@ TableIterator::TableIterator(const TableHandle* table, const TableIteratorOption
 
     const auto& key_start = tablet.partition().partition_key_start();
     if (!key_start.empty()) {
-      req->set_hash_code(PartitionSchema::DecodeMultiColumnHashValue(key_start));
+      req->set_hash_code(dockv::PartitionSchema::DecodeMultiColumnHashValue(key_start));
     }
 
     if (options.filter) {
@@ -302,7 +298,7 @@ TableIterator& TableIterator::operator++() {
   return *this;
 }
 
-const QLRow& TableIterator::operator*() const {
+const qlexpr::QLRow& TableIterator::operator*() const {
   return current_block_->rows()[row_index_];
 }
 
@@ -410,6 +406,41 @@ template <>
 void FilterEqualImpl<std::string>::operator()(
     const TableHandle& table, QLConditionPB* condition) const {
   table.SetBinaryCondition(condition, column_, QL_OP_EQUAL, t_);
+}
+
+void UpdateMapUpsertKeyValue(
+    QLWriteRequestPB* req, const int32_t column_id, const string& entry_key,
+    const string& entry_value) {
+  auto column_value = req->add_column_values();
+  column_value->set_column_id(column_id);
+  QLValuePB* elem = column_value->mutable_expr()->mutable_value();
+  elem->set_string_value(entry_value);
+  auto sub_arg = column_value->add_subscript_args();
+  elem = sub_arg->mutable_value();
+  elem->set_string_value(entry_key);
+}
+
+void UpdateMapRemoveKey(QLWriteRequestPB* req, const int32_t column_id, const string& entry_key) {
+  auto column_value = req->add_column_values();
+  column_value->set_column_id(column_id);
+  auto sub_arg = column_value->add_subscript_args();
+  QLValuePB* elem = sub_arg->mutable_value();
+  elem->set_string_value(entry_key);
+}
+
+QLMapValuePB* AddMapColumn(QLWriteRequestPB* req, const int32_t& column_id) {
+  auto column_value = req->add_column_values();
+  column_value->set_column_id(column_id);
+  QLMapValuePB* map_value = (column_value->mutable_expr()->mutable_value()->mutable_map_value());
+  return map_value;
+}
+
+void AddMapEntryToColumn(
+    QLMapValuePB* map_value_pb, const string& entry_key, const string& entry_value) {
+  QLValuePB* elem = map_value_pb->add_keys();
+  elem->set_string_value(entry_key);
+  elem = map_value_pb->add_values();
+  elem->set_string_value(entry_value);
 }
 
 } // namespace client

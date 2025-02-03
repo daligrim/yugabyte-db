@@ -20,7 +20,7 @@
 #endif
 #include <fcntl.h>
 #include <string>
-#include <glog/logging.h>
+#include "yb/util/logging.h"
 
 #include "yb/gutil/casts.h"
 
@@ -29,6 +29,10 @@
 #include "yb/util/random_util.h"
 #include "yb/util/scope_exit.h"
 #include "yb/util/status_format.h"
+
+using std::string;
+
+DECLARE_string(tmp_dir);
 
 namespace yb {
 
@@ -67,7 +71,7 @@ Result<void*> MMap(int fd, SharedMemorySegment::AccessMode access_mode, size_t s
 
 // Returns the directory in which all shared memory files should be created.
 std::string GetSharedMemoryDirectory() {
-  std::string directory = "/tmp";
+  std::string directory = FLAGS_tmp_dir;
 
 #if defined(__linux__)
   auto* mount_file = fopen("/proc/mounts", "r");
@@ -245,12 +249,9 @@ SharedMemorySegment::SharedMemorySegment(void* base_address, int fd, size_t segm
 }
 
 SharedMemorySegment::SharedMemorySegment(SharedMemorySegment&& other)
-    : base_address_(other.base_address_),
-      fd_(other.fd_),
-      segment_size_(other.segment_size_) {
-  other.base_address_ = nullptr;
-  other.fd_ = -1;
-}
+    : base_address_(std::exchange(other.base_address_, nullptr)),
+      fd_(std::exchange(other.fd_, -1)),
+      segment_size_(other.segment_size_) { }
 
 SharedMemorySegment::~SharedMemorySegment() {
   if (base_address_ && munmap(base_address_, segment_size_) == -1) {
@@ -261,6 +262,13 @@ SharedMemorySegment::~SharedMemorySegment() {
   if (fd_ != -1) {
     close(fd_);
   }
+}
+
+SharedMemorySegment& SharedMemorySegment::operator=(SharedMemorySegment&& other) {
+  base_address_ = std::exchange(other.base_address_, nullptr);
+  fd_ = std::exchange(other.fd_, -1);
+  segment_size_ = other.segment_size_;
+  return *this;
 }
 
 void* SharedMemorySegment::GetAddress() const {

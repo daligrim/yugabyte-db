@@ -14,6 +14,7 @@
 #include "yb/client/table.h"
 
 #include "yb/client/client.h"
+#include "yb/client/client-internal.h"
 #include "yb/client/table_info.h"
 #include "yb/client/yb_op.h"
 
@@ -21,13 +22,19 @@
 
 #include "yb/master/master_client.pb.h"
 
+#include "yb/tserver/tserver_fwd.h"
+
 #include "yb/util/logging.h"
+#include "yb/util/memory/memory_usage.h"
 #include "yb/util/result.h"
 #include "yb/util/shared_lock.h"
 #include "yb/util/status_format.h"
 #include "yb/util/unique_lock.h"
+#include "yb/util/flags.h"
 
-DEFINE_int32(
+using std::string;
+
+DEFINE_UNKNOWN_int32(
     max_num_tablets_for_table, 5000,
     "Max number of tablets that can be specified in a CREATE TABLE statement");
 
@@ -97,7 +104,7 @@ const Schema& YBTable::InternalSchema() const {
   return internal::GetSchema(info_->schema);
 }
 
-const IndexMap& YBTable::index_map() const {
+const qlexpr::IndexMap& YBTable::index_map() const {
   return info_->index_map;
 }
 
@@ -109,8 +116,8 @@ bool YBTable::IsUniqueIndex() const {
   return info_->index_info.is_initialized() && info_->index_info->is_unique();
 }
 
-const IndexInfo& YBTable::index_info() const {
-  static IndexInfo kEmptyIndexInfo;
+const qlexpr::IndexInfo& YBTable::index_info() const {
+  static qlexpr::IndexInfo kEmptyIndexInfo;
   if (info_->index_info) {
     return *info_->index_info;
   }
@@ -121,17 +128,22 @@ bool YBTable::colocated() const {
   return info_->colocated;
 }
 
-const boost::optional<master::ReplicationInfoPB>& YBTable::replication_info() const {
+const boost::optional<ReplicationInfoPB>& YBTable::replication_info() const {
   return info_->replication_info;
 }
 
 std::string YBTable::ToString() const {
-  return Format(
-      "$0 $1 IndexInfo: $2 IndexMap $3", (IsIndex() ? "Index Table" : "Normal Table"), id(),
-      yb::ToString(index_info()), yb::ToString(index_map()));
+  std::string result = Format("$0 $1", (IsIndex() ? "Index" : "Table"), name());
+  if (info_->index_info) {
+    result += " index info: " + AsString(*info_->index_info);
+  }
+  if (!info_->index_map.empty()) {
+    result += " index map: " + AsString(info_->index_map);
+  }
+  return result;
 }
 
-const PartitionSchema& YBTable::partition_schema() const {
+const dockv::PartitionSchema& YBTable::partition_schema() const {
   return info_->partition_schema;
 }
 
@@ -173,7 +185,7 @@ int32_t YBTable::GetPartitionCount() const {
   return narrow_cast<int32_t>(partitions_->keys.size());
 }
 
-int32_t YBTable::GetPartitionListVersion() const {
+PartitionListVersion YBTable::GetPartitionListVersion() const {
   SharedLock<decltype(mutex_)> lock(mutex_);
   return partitions_->version;
 }
@@ -249,7 +261,7 @@ void YBTable::RefreshPartitions(YBClient* client, StdStatusCallback callback) {
     }
     const auto& partitions = *result;
     {
-      std::lock_guard<rw_spinlock> partitions_lock(mutex_);
+      std::lock_guard partitions_lock(mutex_);
       if (partitions->version < partitions_->version) {
         // This might happen if another split happens after we had fetched partition in the current
         // thread from master leader and partition list has been concurrently updated to version
@@ -282,9 +294,9 @@ void YBTable::FetchPartitions(
   // of some tablet has been split and post-split tablets are not yet running.
   client->GetTableLocations(
       table_id, /* max_tablets = */ std::numeric_limits<int32_t>::max(),
-      RequireTabletsRunning::kTrue,
-      [table_id, callback = std::move(callback)]
-          (const Result<master::GetTableLocationsResponsePB*>& result) {
+      RequireTabletsRunning::kTrue, PartitionsOnly::kTrue,
+      [table_id,
+       callback = std::move(callback)](const Result<master::GetTableLocationsResponsePB*>& result) {
         if (!result.ok()) {
           callback(result.status());
           return;
@@ -294,6 +306,14 @@ void YBTable::FetchPartitions(
         VLOG_WITH_FUNC(2) << Format(
             "Fetched partitions for table $0, found $1 tablets",
             table_id, resp.tablet_locations_size());
+
+        // Check the validity of the partitions list
+        auto status = CheckTabletLocations(resp.tablet_locations(),
+                                           tserver::AllowSplitTablet::kFalse);
+        if (!status.ok()) {
+          callback(status);
+          return;
+        }
 
         auto partitions = std::make_shared<VersionedTablePartitionList>();
         partitions->version = resp.partition_list_version();
@@ -307,17 +327,26 @@ void YBTable::FetchPartitions(
       });
 }
 
+size_t YBTable::DynamicMemoryUsage() const {
+  // Below presumes that every PK size is less than default string size of 22 bytes (i.e.
+  // kStdStringInternalCapacity).
+  return sizeof(*this) + info_->DynamicMemoryUsage() +
+         (GetPartitionCount() * kStdStringInternalCapacity);
+}
+
 //--------------------------------------------------------------------------------------------------
 
 size_t FindPartitionStartIndex(const TablePartitionList& partitions,
-                               const PartitionKey& partition_key,
+                               std::string_view partition_key,
                                size_t group_by) {
-  auto it = std::lower_bound(partitions.begin(), partitions.end(), partition_key);
-  if (it == partitions.end() || *it > partition_key) {
-    DCHECK(it != partitions.begin()) << "Could not find partition start while looking for "
-        << partition_key << " in " << yb::ToString(partitions);
-    --it;
-  }
+  CHECK(!partitions.empty()) << "Invalid table partition list <empty list>";
+  CHECK(partitions.begin()->empty()) << "Invalid table partition list " << AsString(partitions)
+                                     << ", the first partition key is expected to be empty";
+  // Looking for the highest "partitions" entry less or equal the partition_key.
+  // The upper_bound returns the next entry, which would be strictly greater than partition_key, or
+  // partitions.end(), if partition_key is greater than them all. In both cases we just decrement
+  // the found iterator by one to get the correct answer.
+  auto it = std::upper_bound(partitions.begin() + 1, partitions.end(), partition_key) - 1;
   return group_by <= 1 ? it - partitions.begin() :
                          (it - partitions.begin()) / group_by * group_by;
 }

@@ -3,6 +3,7 @@
 package node
 
 import (
+	"context"
 	"fmt"
 	"node-agent/util"
 	"strings"
@@ -21,14 +22,18 @@ func SetupNodeCommand(parentCmd *cobra.Command) {
 	SetupConfigureCommand(nodeCmd)
 	SetupPreflightCheckCommand(nodeCmd)
 	SetupRegisterCommand(nodeCmd)
+	SetupDeleteNodeInstanceCmd(nodeCmd)
 	parentCmd.AddCommand(nodeCmd)
 }
 
 // Accepts a key and desciption and updates the config with user input.
-func checkConfigAndUpdate(key string, desc string) {
+func checkConfigAndUpdate(ctx context.Context, key string, defaultValue *string, desc string) {
 	config := util.CurrentConfig()
 	for {
 		val := config.String(key)
+		if val == "" && defaultValue != nil {
+			val = *defaultValue
+		}
 		if val != "" {
 			fmt.Printf(
 				"* The current value of %s is set to %s; Enter new value or enter to skip: ",
@@ -36,7 +41,7 @@ func checkConfigAndUpdate(key string, desc string) {
 				val,
 			)
 		} else {
-			fmt.Printf("* The current value of %s is not set; Enter new value or enter to skip: ", desc)
+			fmt.Printf("* The current value of %s is not set; Enter value: ", desc)
 		}
 		var newVal string
 		fmt.Scanln(&newVal)
@@ -45,10 +50,11 @@ func checkConfigAndUpdate(key string, desc string) {
 			if val != "" {
 				break
 			}
+			fmt.Println()
 		} else {
 			err := config.Update(key, newVal)
 			if err != nil {
-				util.ConsoleLogger().Errorf("Error in updating value %s for key %s", newVal, key)
+				util.ConsoleLogger().Errorf(ctx, "Error in updating value %s for key %s", newVal, key)
 				fmt.Println()
 				continue
 			}

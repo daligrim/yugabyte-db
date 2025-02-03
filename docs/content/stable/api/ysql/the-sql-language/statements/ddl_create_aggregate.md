@@ -4,7 +4,7 @@ headerTitle: CREATE AGGREGATE
 linkTitle: CREATE AGGREGATE
 description: Use the CREATE AGGREGATE statement to create an aggregate function.
 menu:
-  stable:
+  stable_api:
     identifier: ddl_create_aggregate
     parent: statements
 type: docs
@@ -17,33 +17,20 @@ create aggregates.
 
 ## Syntax
 
-<ul class="nav nav-tabs nav-tabs-yb">
-  <li >
-    <a href="#grammar" class="nav-link active" id="grammar-tab" data-toggle="tab" role="tab" aria-controls="grammar" aria-selected="true">
-      <i class="fas fa-file-alt" aria-hidden="true"></i>
-      Grammar
-    </a>
-  </li>
-  <li>
-    <a href="#diagram" class="nav-link" id="diagram-tab" data-toggle="tab" role="tab" aria-controls="diagram" aria-selected="false">
-      <i class="fas fa-project-diagram" aria-hidden="true"></i>
-      Diagram
-    </a>
-  </li>
-</ul>
-
-<div class="tab-content">
-  <div id="grammar" class="tab-pane fade show active" role="tabpanel" aria-labelledby="grammar-tab">
-  {{% includeMarkdown "../../syntax_resources/the-sql-language/statements/create_aggregate,create_aggregate_normal,create_aggregate_order_by,create_aggregate_old,aggregate_arg,aggregate_normal_option,aggregate_order_by_option,aggregate_old_option.grammar.md" %}}
-  </div>
-  <div id="diagram" class="tab-pane fade" role="tabpanel" aria-labelledby="diagram-tab">
-  {{% includeMarkdown "../../syntax_resources/the-sql-language/statements/create_aggregate,create_aggregate_normal,create_aggregate_order_by,create_aggregate_old,aggregate_arg,aggregate_normal_option,aggregate_order_by_option,aggregate_old_option.diagram.md" %}}
-  </div>
-</div>
+{{%ebnf%}}
+  create_aggregate,
+  create_aggregate_normal,
+  create_aggregate_order_by,
+  create_aggregate_old,
+  aggregate_arg,
+  aggregate_normal_option,
+  aggregate_order_by_option,
+  aggregate_old_option
+{{%/ebnf%}}
 
 ## Semantics
 
-The order of options does not matter.  Even the mandatory options `BASETYPE`, `SFUNC`, and `STYPE`
+The order of options does not matter.  Even the mandatory options BASETYPE, SFUNC, and STYPE
 may appear in any order.
 
 See the semantics of each option in the [PostgreSQL docs][postgresql-docs-create-aggregate].
@@ -111,5 +98,6 @@ yugabyte=# SELECT newcnt(*) FROM pg_aggregate;
 
 ## See also
 
-- [`DROP AGGREGATE`](../ddl_drop_aggregate)
-- [postgresql-docs-create-aggregate](https://www.postgresql.org/docs/current/sql-createaggregate.html)
+- [DROP AGGREGATE](../ddl_drop_aggregate)
+
+[postgresql-docs-create-aggregate]: https://www.postgresql.org/docs/11/sql-createaggregate.html

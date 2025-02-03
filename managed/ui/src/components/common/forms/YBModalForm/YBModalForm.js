@@ -1,6 +1,6 @@
 // Copyright (c) YugaByte, Inc.
 
-import React, { Component } from 'react';
+import { Component } from 'react';
 import PropTypes from 'prop-types';
 import { Modal, Button } from 'react-bootstrap';
 import { YBButton } from '../fields';
@@ -12,6 +12,8 @@ import BackIcon from './images/back.svg';
 export default class YBModalForm extends Component {
   render() {
     const {
+      isButtonDisabled: isFormDisabled,
+      isSubmitDisabled,
       visible,
       onHide,
       size,
@@ -34,7 +36,9 @@ export default class YBModalForm extends Component {
       validate,
       initialValues,
       validateOnBlur,
-      validateOnChange
+      validateOnChange,
+      submitTestId = 'submitForm',
+      cancelTestId = 'closeForm'
     } = this.props;
 
     let footerButtonClass = '';
@@ -104,10 +108,17 @@ export default class YBModalForm extends Component {
                       loading={props.isSubmitting}
                       btnText={submitLabel}
                       btnType="submit"
-                      disabled={props.isSubmitting}
+                      disabled={props.isSubmitting || isFormDisabled || isSubmitDisabled}
+                      data-testid={submitTestId}
                     />
                     {showCancelButton && (
-                      <YBButton btnClass="btn" btnText={cancelLabel} onClick={onHide} />
+                      <YBButton
+                        btnClass="btn"
+                        btnText={cancelLabel}
+                        onClick={onHide}
+                        data-testid={cancelTestId}
+                        disabled={isFormDisabled}
+                      />
                     )}
                     {footerAccessory && (
                       <div className={`pull-${pullRightFooter ? 'right' : 'left'} modal-accessory`}>

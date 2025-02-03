@@ -2,7 +2,8 @@
 
 import { connect } from 'react-redux';
 import { isNonEmptyObject, isNonEmptyArray, isNonEmptyString } from '../../../utils/ObjectUtils';
-import { reset } from 'redux-form';
+import { reset, reduxForm } from 'redux-form';
+import { browserHistory } from 'react-router';
 import { toast } from 'react-toastify';
 import OnPremNodesList from './OnPremNodesList';
 import {
@@ -16,6 +17,8 @@ import {
   getNodesInstancesForProviderResponse,
   precheckInstance,
   precheckInstanceResponse,
+  changeNodeInstanceStatus,
+  changeNodeInstanceStatusResponse,
   deleteInstance,
   deleteInstanceResponse
 } from '../../../actions/cloud';
@@ -24,10 +27,14 @@ import {
   fetchCustomerTasksSuccess,
   fetchCustomerTasksFailure
 } from '../../../actions/tasks';
-import { fetchUniverseList, fetchUniverseListResponse } from '../../../actions/universe';
-import { reduxForm } from 'redux-form';
-import { closeUniverseDialog } from '../../../actions/universe';
+import {
+  fetchUniverseList,
+  fetchUniverseListResponse,
+  closeUniverseDialog
+} from '../../../actions/universe';
+
 import { openDialog, closeDialog } from '../../../actions/modal';
+import { OnPremNodeState } from '../../../redesign/helpers/dtos';
 
 const mapStateToProps = (state) => {
   return {
@@ -61,8 +68,8 @@ const mapDispatchToProps = (dispatch, ownProps) => {
     createOnPremNodes: (nodePayloadData, pUUID) => {
       nodePayloadData.forEach(function (nodePayload) {
         Object.keys(nodePayload).forEach((zoneUUID, zoneIdx) => {
-          const nodesForZone = nodePayload[zoneUUID];          
-          dispatch(createNodeInstances(zoneUUID, nodesForZone)).then((response) => {       
+          const nodesForZone = nodePayload[zoneUUID];
+          dispatch(createNodeInstances(zoneUUID, nodesForZone)).then((response) => {
             if (!response.error) {
               dispatch(createNodeInstancesResponse(response.payload));
               if (zoneIdx === Object.keys(nodePayload).length - 1) {
@@ -73,10 +80,12 @@ const mapDispatchToProps = (dispatch, ownProps) => {
                 dispatch(closeUniverseDialog());
               }
             } else {
-              const errorMessage = response.payload?.response?.data?.error ?? 'Something went wrong creating node instances!';
+              const errorMessage =
+                response.payload?.response?.data?.error ??
+                'Something went wrong creating node instances!';
               toast.error(errorMessage);
               dispatch(closeDialog());
-            }           
+            }
           });
         });
       });
@@ -125,6 +134,34 @@ const mapDispatchToProps = (dispatch, ownProps) => {
       });
     },
 
+    changeInstanceStatus: (providerUUID, instanceIP, nodeInstanceStatus) => {
+      dispatch(changeNodeInstanceStatus(providerUUID, instanceIP, nodeInstanceStatus)).then(
+        (response) => {
+          if (response.payload.status === 200 || response.payload.status === 201) {
+            dispatch(changeNodeInstanceStatusResponse(response.payload));
+            browserHistory.push('/tasks');
+          } else {
+            const errorMessage =
+              response.payload?.response?.data?.error ??
+              `Something went wrong while ${
+                nodeInstanceStatus.state === OnPremNodeState.FREE
+                  ? 'recommissioning'
+                  : 'decommissioning'
+              } node instances!`;
+            toast.error(errorMessage);
+          }
+        }
+      );
+    },
+
+    showConfirmRecommissionNodeModal: () => {
+      dispatch(openDialog('confirmRecommissionNodeInstance'));
+    },
+
+    showConfirmDecommissionNodeModal: () => {
+      dispatch(openDialog('confirmDecommissionNodeInstance'));
+    },
+
     showConfirmDeleteModal: () => {
       dispatch(openDialog('confirmDeleteNodeInstance'));
     },
@@ -165,7 +202,7 @@ const validate = (values) => {
             ) {
               instanceErrors.instanceTypeIP = 'Address Too Long';
             }
-          }          
+          }
           errors.instances[instanceRowKey][instanceRowIdx] = instanceErrors;
         });
       }

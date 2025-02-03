@@ -16,6 +16,8 @@
 
 using namespace std::literals;
 
+DECLARE_bool(enable_wait_queues);
+
 namespace yb {
 namespace pgwrapper {
 
@@ -23,15 +25,13 @@ template<IsolationLevel level>
 class PgExplicitLockTest : public PgMiniTestBase {
  protected:
   void BeforePgProcessStart() override {
-    FLAGS_ysql_sleep_before_retry_on_txn_conflict = false;
+    ANNOTATE_UNPROTECTED_WRITE(FLAGS_ysql_sleep_before_retry_on_txn_conflict) = false;
   }
 
   void TestRowLockInJoin() {
-    PGConn join_conn = ASSERT_RESULT(Connect());
-    ASSERT_OK(join_conn.Execute("SET yb_transaction_priority_upper_bound=0.4"));
-    PGConn misc_conn = ASSERT_RESULT(Connect());
-    PGConn select_conn = ASSERT_RESULT(Connect());
-    ASSERT_OK(select_conn.Execute("SET yb_transaction_priority_lower_bound=0.5"));
+    auto join_conn = ASSERT_RESULT(SetLowPriTxn(Connect()));
+    auto misc_conn = ASSERT_RESULT(Connect());
+    auto select_conn = ASSERT_RESULT(SetHighPriTxn(Connect()));
 
     // Set up tables
     ASSERT_OK(misc_conn.Execute(
@@ -102,6 +102,13 @@ class PgExplicitLockTest : public PgMiniTestBase {
 
 class PgExplicitLockTestSerializable
     : public PgExplicitLockTest<IsolationLevel::SERIALIZABLE_ISOLATION> {
+ protected:
+  void BeforePgProcessStart() override {
+    // This test depends on fail-on-conflict concurrency control to perform its validation.
+    // TODO(wait-queues): https://github.com/yugabyte/yugabyte-db/issues/17871
+    EnableFailOnConflict();
+    PgExplicitLockTest::BeforePgProcessStart();
+  }
 };
 
 class PgExplicitLockTestSnapshot : public PgExplicitLockTest<IsolationLevel::SNAPSHOT_ISOLATION> {
@@ -111,69 +118,51 @@ class PgExplicitLockTestSnapshot : public PgExplicitLockTest<IsolationLevel::SNA
 
 // Currently SKIP LOCKED is supported only SELECT statements in REPEATABLE READ isolation level.
 void PgExplicitLockTestSnapshot::TestSkipLocked() {
-  PGConn misc_conn = ASSERT_RESULT(Connect());
+  auto misc_conn = ASSERT_RESULT(Connect());
 
   // Set up table
   ASSERT_OK(misc_conn.Execute("create table test (k int primary key, v int)"));
   ASSERT_OK(misc_conn.Execute("insert into test values (1, 10), (2, 20), (3, 30)"));
 
   // Test case 1: 2 REPEATABLE READ txns skipping rows locked by each other.
-  PGConn txn1_conn = ASSERT_RESULT(Connect());
-  PGConn txn2_conn = ASSERT_RESULT(Connect());
+  auto txn1_conn = ASSERT_RESULT(Connect());
+  auto txn2_conn = ASSERT_RESULT(Connect());
   ASSERT_OK(StartTxn(&txn1_conn));
   ASSERT_OK(StartTxn(&txn2_conn));
 
-  auto res = ASSERT_RESULT(txn1_conn.Fetch("select * from test for update skip locked limit 1"));
-  ASSERT_EQ(PQntuples(res.get()), 1);
-  auto assert_val = [](PGResultPtr& res, int row, int col, int expected_val) {
-    auto val = ASSERT_RESULT(GetInt32(res.get(), row, col));
-    ASSERT_EQ(val, expected_val);
-  };
+  auto row = ASSERT_RESULT((txn1_conn.FetchRow<int32_t, int32_t>(
+      "select * from test for update skip locked limit 1")));
+  ASSERT_EQ(row, (decltype(row){1, 10}));
 
-  assert_val(res, 0, 0, 1);
-  assert_val(res, 0, 1, 10);
-  assert_val(res, 0, 0, 1);
-  assert_val(res, 0, 1, 10);
+  row = ASSERT_RESULT((txn2_conn.FetchRow<int32_t, int32_t>(
+      "select * from test for update skip locked limit 1")));
+  ASSERT_EQ(row, (decltype(row){2, 20}));
 
-  res = ASSERT_RESULT(txn2_conn.Fetch("select * from test for update skip locked limit 1"));
-  ASSERT_EQ(PQntuples(res.get()), 1);
-  assert_val(res, 0, 0, 2);
-  assert_val(res, 0, 1, 20);
+  auto rows = ASSERT_RESULT((txn1_conn.FetchRows<int32_t, int32_t>(
+      "select * from test for update skip locked limit 2")));
+  ASSERT_EQ(rows, (decltype(rows){{1, 10}, {3, 30}}));
 
-  res = ASSERT_RESULT(txn1_conn.Fetch("select * from test for update skip locked limit 2"));
-  ASSERT_EQ(PQntuples(res.get()), 2);
-  assert_val(res, 0, 0, 1);
-  assert_val(res, 0, 1, 10);
-  assert_val(res, 1, 0, 3);
-  assert_val(res, 1, 1, 30);
-
-  res = ASSERT_RESULT(txn2_conn.Fetch("select * from test for update skip locked limit 2"));
-  ASSERT_EQ(PQntuples(res.get()), 1);
-  assert_val(res, 0, 0, 2);
-  assert_val(res, 0, 1, 20);
+  row = ASSERT_RESULT((txn2_conn.FetchRow<int32_t, int32_t>(
+      "select * from test for update skip locked limit 2")));
+  ASSERT_EQ(row, (decltype(row){2, 20}));
 
   ASSERT_OK(txn1_conn.Execute("COMMIT"));
   ASSERT_OK(txn2_conn.Execute("COMMIT"));
 
   // Test case 2: A txn holds lock on some rows. A single statement then skips the locked rows.
   ASSERT_OK(StartTxn(&txn1_conn));
-  res = ASSERT_RESULT(txn1_conn.Fetch("select * from test for update skip locked limit 1"));
-  ASSERT_EQ(PQntuples(res.get()), 1);
-  assert_val(res, 0, 0, 1);
-  assert_val(res, 0, 1, 10);
+  row = ASSERT_RESULT((txn1_conn.FetchRow<int32_t, int32_t>(
+      "select * from test for update skip locked limit 1")));
+  ASSERT_EQ(row, (decltype(row){1, 10}));
 
-  PGConn single_stmt_conn = ASSERT_RESULT(Connect());
-  res = ASSERT_RESULT(single_stmt_conn.Fetch("select * from test for update skip locked limit 1"));
-  ASSERT_EQ(PQntuples(res.get()), 1);
-  assert_val(res, 0, 0, 2);
-  assert_val(res, 0, 1, 20);
+  auto single_stmt_conn = ASSERT_RESULT(Connect());
+  row = ASSERT_RESULT((single_stmt_conn.FetchRow<int32_t, int32_t>(
+      "select * from test for update skip locked limit 1")));
+  ASSERT_EQ(row, (decltype(row){2, 20}));
 
-  res = ASSERT_RESULT(txn1_conn.Fetch("select * from test for update skip locked limit 2"));
-  ASSERT_EQ(PQntuples(res.get()), 2);
-  assert_val(res, 0, 0, 1);
-  assert_val(res, 0, 1, 10);
-  assert_val(res, 1, 0, 2);
-  assert_val(res, 1, 1, 20);
+  rows = ASSERT_RESULT((txn1_conn.FetchRows<int32_t, int32_t>(
+      "select * from test for update skip locked limit 2")));
+  ASSERT_EQ(rows, (decltype(rows){{1, 10}, {2, 20}}));
 
   ASSERT_OK(txn1_conn.Execute("COMMIT"));
 
@@ -189,23 +178,17 @@ void PgExplicitLockTestSnapshot::TestSkipLocked() {
 
   ASSERT_OK(StartTxn(&txn1_conn));
   ASSERT_OK(StartTxn(&txn2_conn));
-  res = ASSERT_RESULT(txn1_conn.Fetch("select * from test where k=1 for update;"));
-  ASSERT_EQ(PQntuples(res.get()), 1);
-  assert_val(res, 0, 0, 1);
-  assert_val(res, 0, 1, 10);
+  row = ASSERT_RESULT((txn1_conn.FetchRow<int32_t, int32_t>(
+      "select * from test where k=1 for update")));
+  ASSERT_EQ(row, (decltype(row){1, 10}));
 
-  res = ASSERT_RESULT(txn2_conn.Fetch("select * from test, test2 where test.v=test2.v for update "
-                                      "skip locked limit 1;"));
-  ASSERT_EQ(PQntuples(res.get()), 1);
-  assert_val(res, 0, 0, 2);
-  assert_val(res, 0, 1, 20);
-  assert_val(res, 0, 2, 5);
-  assert_val(res, 0, 3, 20);
+  auto row2 = ASSERT_RESULT((txn2_conn.FetchRow<int32_t, int32_t, int32_t, int32_t>(
+      "select * from test, test2 where test.v=test2.v for update skip locked limit 1")));
+  ASSERT_EQ(row2, (decltype(row2){2, 20, 5, 20}));
 
-  res = ASSERT_RESULT(txn1_conn.Fetch("select * from test2 where k=4 for update;"));
-  ASSERT_EQ(PQntuples(res.get()), 1);
-  assert_val(res, 0, 0, 4);
-  assert_val(res, 0, 1, 10);
+  row = ASSERT_RESULT((txn1_conn.FetchRow<int32_t, int32_t>(
+      "select * from test2 where k=4 for update")));
+  ASSERT_EQ(row, (decltype(row){4, 10}));
 
   ASSERT_OK(txn1_conn.Execute("COMMIT"));
   ASSERT_OK(txn2_conn.Execute("COMMIT"));

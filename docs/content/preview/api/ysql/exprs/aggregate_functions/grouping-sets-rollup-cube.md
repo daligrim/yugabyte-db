@@ -4,7 +4,7 @@ linkTitle: Grouping sets, rollup, cube
 headerTitle: Using the GROUPING SETS, ROLLUP, and CUBE syntax for aggregate function invocation
 description: Explains the GROUPING SETS, ROLLUP, and CUBE syntax and semantics for aggregate function invocation.
 menu:
-  preview:
+  preview_api:
     identifier: grouping-sets-rollup-cube
     parent: aggregate-functions
     weight: 60
@@ -18,8 +18,6 @@ This section shows how to use the `GROUPING SETS`, `ROLLUP`, and `CUBE` syntax, 
 `GROUPING SETS (...)`,  is a shorthand notation to let you achieve, in a single terse subquery, what you could achieve by the union of several subqueries that each uses the plain `GROUP BY <expression list>` syntax.
 
 `ROLLUP (...)` and `CUBE` are each shorthand notations for specifying two common uses of the `GROUPING SET` syntax.
-
-_To_do:_ x-ref to `GROUP BY` in syntax diagrams.
 
 ### GROUPING SETS
 

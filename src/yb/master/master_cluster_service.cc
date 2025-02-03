@@ -14,17 +14,29 @@
 #include "yb/gutil/casts.h"
 
 #include "yb/master/catalog_manager.h"
+#include "yb/master/catalog_manager_util.h"
 #include "yb/master/master_cluster.service.h"
+#include "yb/master/master_cluster_handler.h"
+#include "yb/master/tablet_health_manager.h"
+#include "yb/master/master_auto_flags_manager.h"
 #include "yb/master/master_heartbeat.pb.h"
-#include "yb/master/master_service_base.h"
 #include "yb/master/master_service_base-internal.h"
+#include "yb/master/master_service_base.h"
 #include "yb/master/ts_descriptor.h"
 #include "yb/master/ts_manager.h"
+#include "yb/master/xcluster/xcluster_manager.h"
 
 #include "yb/util/service_util.h"
+#include "yb/util/flags.h"
 
-DEFINE_double(master_slow_get_registration_probability, 0,
+using std::string;
+using std::vector;
+
+DEFINE_UNKNOWN_double(master_slow_get_registration_probability, 0,
               "Probability of injecting delay in GetMasterRegistration.");
+DECLARE_bool(enable_ysql_tablespaces_for_placement);
+
+DECLARE_bool(emergency_repair_mode);
 
 using namespace std::literals;
 
@@ -46,26 +58,97 @@ class MasterClusterServiceImpl : public MasterServiceBase, public MasterClusterI
       return;
     }
 
-    std::vector<std::shared_ptr<TSDescriptor> > descs;
+    std::vector<std::shared_ptr<TSDescriptor>> descs;
     if (!req->primary_only()) {
-      server_->ts_manager()->GetAllDescriptors(&descs);
+      descs = server_->ts_manager()->GetAllDescriptors();
     } else {
       auto uuid_result = server_->catalog_manager_impl()->placement_uuid();
       if (!uuid_result.ok()) {
+        SetupErrorAndRespond(
+            resp->mutable_error(), uuid_result.status(), MasterErrorPB_Code_INTERNAL_ERROR, &rpc);
         return;
       }
       server_->ts_manager()->GetAllLiveDescriptorsInCluster(&descs, *uuid_result);
     }
 
-    for (const std::shared_ptr<TSDescriptor>& desc : descs) {
+    bool is_ysql_replication_info_required =
+        FLAGS_enable_ysql_tablespaces_for_placement &&
+        (req->has_tablespace_id() || req->has_replication_info());
+    std::unique_ptr<ReplicationInfoPB> replication_info;
+    if (is_ysql_replication_info_required) {
+      if (req->has_tablespace_id()) {
+        LOG(INFO) << "Retrieve placement info from tablespace ID";
+        auto result =
+            server_->catalog_manager_impl()->
+                GetTablespaceReplicationInfoWithRetry(req->tablespace_id());
+        if (!result.ok()) {
+          SetupErrorAndRespond(resp->mutable_error(), result.status(),
+                              MasterErrorPB_Code_UNKNOWN_ERROR, &rpc);
+          return;
+        }
+        auto tablespace_replication_pb = std::move(*result);
+        if (!tablespace_replication_pb ||
+            !tablespace_replication_pb.is_initialized()) {
+          LOG(INFO) << "Could not retrieve placement info from tablespace ID "
+                    << req->tablespace_id() << ". "
+                    << "Default to returning all tablet servers";
+          // In YSQL, CREATE TABLE using LOCATION parameter is syntactically
+          // accepted but semantically ignored. In this case, replication info
+          // does not exist through the tablespace ID. So skipping the filter
+          // process below and returning the tablet servers retrieved via
+          // GetAllLiveDescriptorsInCluster() which filters placement ID's
+          // based on master primary cluster's placement ID.
+          is_ysql_replication_info_required = false;
+        } else {
+          replication_info =
+              std::make_unique<ReplicationInfoPB>(*tablespace_replication_pb);
+        }
+      } else if (req->has_replication_info()) {
+        LOG(INFO) << "Retrieve placement info from user request";
+        replication_info =
+            std::make_unique<ReplicationInfoPB>(req->replication_info());
+      }
+    }
+
+    for (const auto& desc : descs) {
+      auto l = desc->LockForRead();
+      if (is_ysql_replication_info_required) {
+        LOG(INFO) << "Filter TServers based on placement ID "
+                  << "and cloud info against placement "
+                  << replication_info->live_replicas().placement_uuid();
+        // Filter based on placement ID
+        if (l->pb.registration().placement_uuid() !=
+            replication_info->live_replicas().placement_uuid())
+          continue;
+
+        // Filter based on cloud, region, zone IDs (all IDs must match)
+        bool is_cloud_match = false;
+        const auto& placement_blocks =
+            replication_info->live_replicas().placement_blocks();
+        for (const auto& pb : placement_blocks) {
+          if (CatalogManagerUtil::IsCloudInfoPrefix(
+                  l->pb.registration().cloud_info(), pb.cloud_info())) {
+            is_cloud_match = true;
+            break;
+          }
+        }
+        if (!is_cloud_match) continue;
+        LOG(INFO) << "Placement info has matched against placement "
+                  << replication_info->live_replicas().placement_uuid();
+      }
       ListTabletServersResponsePB::Entry* entry = resp->add_servers();
-      auto ts_info = *desc->GetTSInformationPB();
-      *entry->mutable_instance_id() = std::move(*ts_info.mutable_tserver_instance());
-      *entry->mutable_registration() = std::move(*ts_info.mutable_registration());
+      *entry->mutable_instance_id() = desc->GetNodeInstancePB();
+      *entry->mutable_registration() = desc->GetTSRegistrationPB();
       auto last_heartbeat = desc->LastHeartbeatTime();
       if (last_heartbeat) {
-        entry->set_millis_since_heartbeat(narrow_cast<int>(
-            MonoTime::Now().GetDeltaSince(last_heartbeat).ToMilliseconds()));
+        auto ms_since_heartbeat = MonoTime::Now().GetDeltaSince(last_heartbeat).ToMilliseconds();
+        if (ms_since_heartbeat > std::numeric_limits<int32_t>::max()) {
+          LOG(DFATAL) << entry->instance_id().permanent_uuid()
+                      << " has not heartbeated since "
+                      << ms_since_heartbeat;
+          ms_since_heartbeat = std::numeric_limits<int32_t>::max();
+        }
+        entry->set_millis_since_heartbeat(narrow_cast<int>(ms_since_heartbeat));
       }
       entry->set_alive(desc->IsLive());
       desc->GetMetrics(entry->mutable_metrics());
@@ -82,6 +165,9 @@ class MasterClusterServiceImpl : public MasterServiceBase, public MasterClusterI
     }
     auto placement_uuid_result = server_->catalog_manager_impl()->placement_uuid();
     if (!placement_uuid_result.ok()) {
+      SetupErrorAndRespond(
+          resp->mutable_error(), placement_uuid_result.status(), MasterErrorPB_Code_INTERNAL_ERROR,
+          &rpc);
       return;
     }
     string placement_uuid = *placement_uuid_result;
@@ -99,9 +185,8 @@ class MasterClusterServiceImpl : public MasterServiceBase, public MasterClusterI
         continue;
       }
       ListLiveTabletServersResponsePB::Entry* entry = resp->add_servers();
-      auto ts_info = *desc->GetTSInformationPB();
-      *entry->mutable_instance_id() = std::move(*ts_info.mutable_tserver_instance());
-      *entry->mutable_registration() = std::move(*ts_info.mutable_registration());
+      *entry->mutable_instance_id() = desc->GetNodeInstancePB();
+      *entry->mutable_registration() = desc->GetTSRegistrationPB();
       bool isPrimary = server_->ts_manager()->IsTsInCluster(desc, placement_uuid);
       entry->set_isfromreadreplica(!isPrimary);
     }
@@ -155,11 +240,12 @@ class MasterClusterServiceImpl : public MasterServiceBase, public MasterClusterI
     Status s = server_->GetMasterRegistration(resp->mutable_registration());
     CheckRespErrorOrSetUnknown(s, resp);
     auto role = server_->catalog_manager_impl()->Role();
-    if (role == PeerRole::LEADER) {
+    if (role == PeerRole::LEADER && !FLAGS_emergency_repair_mode) {
+      // When in emergency_repair_mode the CatalogManager is not fully loaded and leader_state will
+      // be invalid. We need to allow the leader to respond to the GetMasterRegistration request so
+      // that the client can then invoke DumpSysCatalogEntries and WriteSysCatalogEntry RPCs.
       if (!l.leader_status().ok()) {
-        YB_LOG_EVERY_N_SECS(INFO, 1)
-            << "Patching role from leader to follower because of: " << l.leader_status()
-            << THROTTLE_MSG;
+        YB_LOG_EVERY_N_SECS(INFO, 5) << l.leader_status();
         role = PeerRole::FOLLOWER;
       }
     }
@@ -192,11 +278,17 @@ class MasterClusterServiceImpl : public MasterServiceBase, public MasterClusterI
 
     if (req->return_dump_as_string()) {
       std::ostringstream ss;
-      server_->catalog_manager_impl()->DumpState(&ss, req->on_disk());
+      auto s = server_->catalog_manager_impl()->DumpState(&ss, req->on_disk());
+      CheckRespErrorOrSetUnknown(s, resp);
+      if (!s.ok())
+        return;
       resp->set_dump(title + ":\n" + ss.str());
     } else {
       LOG(INFO) << title;
-      server_->catalog_manager_impl()->DumpState(&LOG(INFO), req->on_disk());
+      auto s = server_->catalog_manager_impl()->DumpState(&LOG(INFO), req->on_disk());
+      CheckRespErrorOrSetUnknown(s, resp);
+      if (!s.ok())
+        return;
     }
 
     if (req->has_peers_also() && req->peers_also()) {
@@ -264,47 +356,59 @@ class MasterClusterServiceImpl : public MasterServiceBase, public MasterClusterI
   void ChangeMasterClusterConfig(
     const ChangeMasterClusterConfigRequestPB* req, ChangeMasterClusterConfigResponsePB* resp,
     rpc::RpcContext rpc) override {
-    HANDLE_ON_LEADER_WITH_LOCK(CatalogManager, SetClusterConfig);
+    HANDLE_ON_LEADER_WITH_LOCK(MasterClusterHandler, SetClusterConfig);
   }
 
   void GetMasterClusterConfig(
       const GetMasterClusterConfigRequestPB* req, GetMasterClusterConfigResponsePB* resp,
       rpc::RpcContext rpc) override {
-    HANDLE_ON_LEADER_WITH_LOCK(CatalogManager, GetClusterConfig);
+    HANDLE_ON_LEADER_WITH_LOCK(MasterClusterHandler, GetClusterConfig);
   }
 
   void GetLeaderBlacklistCompletion(
       const GetLeaderBlacklistPercentRequestPB* req, GetLoadMovePercentResponsePB* resp,
       rpc::RpcContext rpc) override {
-    HANDLE_ON_LEADER_WITH_LOCK(CatalogManager, GetLeaderBlacklistCompletionPercent);
+    HANDLE_ON_LEADER_WITH_LOCK(MasterClusterHandler, GetLeaderBlacklistCompletionPercent);
   }
 
   void GetLoadMoveCompletion(
       const GetLoadMovePercentRequestPB* req, GetLoadMovePercentResponsePB* resp,
       rpc::RpcContext rpc) override {
-    HANDLE_ON_LEADER_WITH_LOCK(CatalogManager, GetLoadMoveCompletionPercent);
+    HANDLE_ON_LEADER_WITH_LOCK(MasterClusterHandler, GetLoadMoveCompletionPercent);
   }
 
-  void GetAutoFlagsConfig(
-      const GetAutoFlagsConfigRequestPB* req, GetAutoFlagsConfigResponsePB* resp,
-      rpc::RpcContext rpc) override {
-    SCOPED_LEADER_SHARED_LOCK(l, server_->catalog_manager_impl());
-    if (!l.CheckIsInitializedAndIsLeaderOrRespond(resp, &rpc)) {
-      return;
-    }
+  MASTER_SERVICE_IMPL_ON_ALL_MASTERS(
+    TabletHealthManager,
+    (CheckMasterTabletHealth)
+  )
 
-    *resp->mutable_config() = server_->GetAutoFlagConfig();
-
-    rpc.RespondSuccess();
-  }
+  MASTER_SERVICE_IMPL_ON_LEADER_WITH_LOCK(
+    MasterClusterHandler,
+    (AreLeadersOnPreferredOnly)
+    (SetPreferredZones)
+    (RemoveTabletServer)
+  )
 
   MASTER_SERVICE_IMPL_ON_LEADER_WITH_LOCK(
     CatalogManager,
-    (AreLeadersOnPreferredOnly)
     (IsLoadBalanced)
     (IsLoadBalancerIdle)
-    (SetPreferredZones)
   )
+
+  MASTER_SERVICE_IMPL_ON_LEADER_WITH_LOCK(
+    MasterAutoFlagsManager,
+    (GetAutoFlagsConfig)
+    (PromoteAutoFlags)
+    (RollbackAutoFlags)
+    (PromoteSingleAutoFlag)
+    (DemoteSingleAutoFlag)
+    (ValidateAutoFlagsConfig)
+  )
+
+  MASTER_SERVICE_IMPL_ON_LEADER_WITH_LOCK(XClusterManager,
+    (GetMasterXClusterConfig)
+  )
+
 };
 
 } // namespace

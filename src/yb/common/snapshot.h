@@ -11,8 +11,7 @@
 // under the License.
 //
 
-#ifndef YB_COMMON_SNAPSHOT_H
-#define YB_COMMON_SNAPSHOT_H
+#pragma once
 
 #include <unordered_map>
 
@@ -35,6 +34,6 @@ using SnapshotSchedulesToObjectIdsMap =
 using RestorationCompleteTimeMap = std::unordered_map<
     TxnSnapshotRestorationId, HybridTime, TxnSnapshotRestorationIdHash>;
 
+using ScheduleMinRestoreTime =
+    std::unordered_map<SnapshotScheduleId, HybridTime, SnapshotScheduleIdHash>;
 } // namespace yb
-
-#endif // YB_COMMON_SNAPSHOT_H

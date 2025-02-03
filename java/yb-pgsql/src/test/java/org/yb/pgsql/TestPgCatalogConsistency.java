@@ -4,7 +4,7 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.yb.util.YBTestRunnerNonTsanOnly;
+import org.yb.YBTestRunner;
 
 import static org.yb.AssertionWrappers.assertGreaterThan;
 import static org.yb.AssertionWrappers.assertTrue;
@@ -20,7 +20,7 @@ import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
-@RunWith(value=YBTestRunnerNonTsanOnly.class)
+@RunWith(value=YBTestRunner.class)
 public class TestPgCatalogConsistency extends BasePgSQLTest {
   private static final Logger LOG = LoggerFactory.getLogger(TestPgCatalogConsistency.class);
 
@@ -147,5 +147,64 @@ public class TestPgCatalogConsistency extends BasePgSQLTest {
       assertGreaterThan(alterTableSuccessfulCycles.get(), 0);
       assertGreaterThan(catalogCheckSuccessfulCycles.get(), 0);
     }
+  }
+
+  public void testAlterDatabaseSetResetGucHelper(String database) throws Exception {
+    try (Statement statement = connection.createStatement()) {
+      if (!database.equals(DEFAULT_PG_DATABASE)) {
+        statement.execute("CREATE DATABASE tdb");
+      }
+      statement.execute("ALTER DATABASE " + database + " SET temp_file_limit = 4096");
+      waitForTServerHeartbeat();
+
+      // Test 2 new connections.
+      Connection connection1 = getConnectionBuilder().withDatabase(database).connect();
+      Statement statement1 = connection1.createStatement();
+      assertQuery(statement1, "SHOW temp_file_limit", new Row("4MB"));
+
+      Connection connection2 = getConnectionBuilder().withDatabase(database).connect();
+      Statement statement2 = connection2.createStatement();
+      assertQuery(statement2, "SHOW temp_file_limit", new Row("4MB"));
+
+      // Change 'temp_file_limit'.
+      statement.execute("ALTER DATABASE " + database + " SET temp_file_limit = 1024");
+      waitForTServerHeartbeat();
+
+      // Test a new connection.
+      Connection connection3 = getConnectionBuilder().withDatabase(database).connect();
+      Statement statement3 = connection3.createStatement();
+      assertQuery(statement3, "SHOW temp_file_limit", new Row("1MB"));
+
+      // Test old connections.
+      assertQuery(statement1, "SHOW temp_file_limit", new Row("4MB"));
+      assertQuery(statement2, "SHOW temp_file_limit", new Row("4MB"));
+
+      // Reset 'temp_file_limit'.
+      statement.execute("ALTER DATABASE " + database + " RESET temp_file_limit");
+      waitForTServerHeartbeat();
+
+      // Test a new connection.
+      Connection connection4 = getConnectionBuilder().withDatabase(database).connect();
+      Statement statement4 = connection4.createStatement();
+      assertQuery(statement4, "SHOW temp_file_limit", new Row("1GB"));
+
+      // Test old connections.
+      assertQuery(statement1, "SHOW temp_file_limit", new Row("4MB"));
+      assertQuery(statement2, "SHOW temp_file_limit", new Row("4MB"));
+      assertQuery(statement3, "SHOW temp_file_limit", new Row("1MB"));
+
+      connection4.close();
+      connection3.close();
+      connection2.close();
+      connection1.close();
+    }
+  }
+  @Test
+  public void testAlterDatabaseSetResetGucTestDb() throws Exception {
+    testAlterDatabaseSetResetGucHelper("tdb");
+  }
+  @Test
+  public void testAlterDatabaseSetResetGucDefaultDb() throws Exception {
+    testAlterDatabaseSetResetGucHelper(DEFAULT_PG_DATABASE);
   }
 }

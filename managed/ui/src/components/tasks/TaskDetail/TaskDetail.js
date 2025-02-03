@@ -1,6 +1,6 @@
 // Copyright (c) YugaByte, Inc.
 
-import React, { Component } from 'react';
+import { Component } from 'react';
 import PropTypes from 'prop-types';
 import { browserHistory, Link, withRouter } from 'react-router';
 import { isNonEmptyArray, isNonEmptyObject, isNonEmptyString } from '../../../utils/ObjectUtils';
@@ -15,6 +15,11 @@ import { getPromiseState } from '../../../utils/PromiseUtils';
 import 'highlight.js/styles/github.css';
 import { toast } from 'react-toastify';
 import { timeFormatter } from '../../../utils/TableFormatters';
+import { RbacValidator } from '../../../redesign/features/rbac/common/RbacApiPermValidator';
+import { ApiPermissionMap } from '../../../redesign/features/rbac/ApiAndUserPermMapping';
+import { calculateDuration } from '../../backupv2/common/BackupUtils';
+import { SoftwareUpgradeTaskType } from '../../universes/helpers/universeHelpers';
+import { ybFormatDate } from '../../../redesign/helpers/DateUtils';
 
 class TaskDetail extends Component {
   constructor(props) {
@@ -45,6 +50,21 @@ class TaskDetail extends Component {
     });
   };
 
+  rollbackTaskClicked = (currentTaskUUID) => {
+    this.props.rollbackCurrentTask(currentTaskUUID).then((response) => {
+      const status = response?.payload?.response?.status || response?.payload?.status;
+      if (status === 200 || status === 201) {
+        browserHistory.push('/tasks');
+      } else {
+        const taskResponse = response?.payload?.response;
+        const toastMessage = taskResponse?.data?.error
+          ? taskResponse?.data?.error
+          : taskResponse?.statusText;
+        toast.error(toastMessage);
+      }
+    });
+  };
+
   componentDidMount() {
     const { params, fetchCurrentTaskDetail, fetchFailedTaskDetail, fetchUniverseList } = this.props;
     const currentTaskUUID = params.taskUUID;
@@ -58,7 +78,8 @@ class TaskDetail extends Component {
   render() {
     const {
       tasks: { failedTasks, taskProgressData },
-      params: { taskUUID }
+      params: { taskUUID },
+      universe: { universeUUID }
     } = this.props;
     const self = this;
     const currentTaskData = taskProgressData.data;
@@ -90,7 +111,7 @@ class TaskDetail extends Component {
       return <Highlighter type="json" text={truncatedError} element="pre" />;
     };
 
-    const getErrorMessageDisplay = (errorString, taskUUID, allowRetry) => {
+    const getErrorMessageDisplay = (errorString, taskUUID) => {
       let errorElement = getTruncatedErrorString(errorString);
       let displayMessage = 'Expand';
       let displayIcon = <i className="fa fa-expand"></i>;
@@ -110,8 +131,15 @@ class TaskDetail extends Component {
             {displayMessage}
           </div>
           {/* TODO use API response to check retryable. */}
-          {allowRetry && isNonEmptyString(currentTaskData.title) &&
-            currentTaskData.retryable && (
+          {isNonEmptyString(currentTaskData.title) && currentTaskData.retryable && (
+            <RbacValidator
+              accessRequiredOn={{
+                onResource: currentTaskData?.targetUUID,
+                ...ApiPermissionMap.RETRY_TASKS
+              }}
+              isControl
+              overrideStyle={{ float: 'right' }}
+            >
               <div
                 className="btn btn-orange text-center pull-right task-detail-button"
                 onClick={() => self.retryTaskClicked(taskUUID)}
@@ -119,7 +147,26 @@ class TaskDetail extends Component {
                 <i className="fa fa-refresh"></i>
                 Retry Task
               </div>
-            )}
+            </RbacValidator>
+          )}
+          {isNonEmptyString(currentTaskData.title) && currentTaskData.canRollback && (
+            <RbacValidator
+              accessRequiredOn={{
+                onResource: currentTaskData?.targetUUID,
+                ...ApiPermissionMap.RETRY_TASKS
+              }}
+              isControl
+              overrideStyle={{ float: 'right' }}
+            >
+              <div
+                className="btn btn-orange text-center pull-right task-detail-button"
+                onClick={() => self.rollbackTaskClicked(taskUUID)}
+              >
+                <i className="fa fa-refresh"></i>
+                Rollback Task
+              </div>
+            </RbacValidator>
+          )}
         </div>
       );
     };
@@ -141,13 +188,9 @@ class TaskDetail extends Component {
         // Show retry only for the last failed task.
         if (subTask.subTaskState === 'Failure' || subTask.subTaskState === 'Aborted') {
           if (subTask.errorString === 'null') {
-            subTask.errorString = "Task failed";
+            subTask.errorString = 'Task failed';
           }
-          let allowRetry = false;
-          if (universe) {
-            allowRetry = (taskUUID === universe.universeDetails.updatingTaskUUID);
-          }
-          errorString = getErrorMessageDisplay(subTask.errorString, taskUUID, allowRetry);
+          errorString = getErrorMessageDisplay(subTask.errorString, taskUUID);
         }
         return (
           <div className="task-detail-info" key={subTask.creationTime}>
@@ -183,7 +226,7 @@ class TaskDetail extends Component {
           <Link to="/tasks/">Tasks</Link>
           <span>
             <i className="fa fa-chevron-right"></i>
-            {(currentTaskData && currentTaskData.title) || 'Task Details'}
+            {currentTaskData?.title || 'Task Details'}
           </span>
         </h2>
       );
@@ -197,28 +240,83 @@ class TaskDetail extends Component {
             <YBResourceCount
               className="text-align-right pull-right"
               kind="Target universe"
-              size={currentTaskData.title && currentTaskData.title.split(' : ')[1]}
+              sizeClassName="task-header-font"
+              size={currentTaskData?.title?.split(' : ')[1]}
             />
             <YBResourceCount
               kind="Task name"
-              size={currentTaskData.title && currentTaskData.title.split(' : ')[0]}
+              sizeClassName="task-header-font"
+              size={currentTaskData?.title?.split(' : ')[0]}
             />
             {taskTopLevelData}
           </div>
           <div className="task-step-bar-container">{taskProgressBarData}</div>
         </div>
-
         <YBPanelItem
-          header={<h2>Task details</h2>}
+          header={
+            <h2>
+              {currentTaskData.correlationId ? (
+                <Link to={`/logs/?queryRegex=${currentTaskData.correlationId}`}>Task details</Link>
+              ) : (
+                'Task details'
+              )}
+            </h2>
+          }
           body={
-            <div className="task-detail-container">
-              <Row className="task-heading-row">
-                <Col xs={4}>Task</Col>
-                <Col xs={4}>Started On</Col>
-                <Col xs={4}>Status</Col>
-              </Row>
-              {taskFailureDetails}
-            </div>
+            [
+              SoftwareUpgradeTaskType.SOFTWARE_UPGRADE,
+              SoftwareUpgradeTaskType.ROLLBACK_UPGRADE,
+              SoftwareUpgradeTaskType.FINALIZE_UPGRADE
+            ].includes(currentTaskData?.type) ? (
+              <div className="task-detail-container">
+                <Row className="task-heading-row">
+                  <Col xs={3}>TASK</Col>
+                  <Col xs={2}>START VERSION</Col>
+                  <Col xs={2}>TARGET VERSION</Col>
+                  <Col xs={3}>START TIME</Col>
+                  <Col xs={2}>DURATION</Col>
+                </Row>
+                <Row className="task-value-row">
+                  <Col xs={3}>
+                    <>
+                      {currentTaskData?.type === SoftwareUpgradeTaskType.SOFTWARE_UPGRADE &&
+                        'Database Upgrade'}
+                      {currentTaskData?.type === SoftwareUpgradeTaskType.ROLLBACK_UPGRADE &&
+                        'Roll Back Database Upgrade'}
+                      {currentTaskData?.type === SoftwareUpgradeTaskType.FINALIZE_UPGRADE &&
+                        'Finalize Database Upgrade'}
+                    </>
+                  </Col>
+                  <Col xs={2}>
+                    {currentTaskData?.details?.versionNumbers?.ybPrevSoftwareVersion ?? '-'}
+                  </Col>
+                  <Col xs={2}>
+                    {currentTaskData?.details?.versionNumbers?.ybSoftwareVersion ?? '-'}
+                  </Col>
+                  <Col xs={3}>
+                    {currentTaskData?.createTime ? ybFormatDate(currentTaskData?.createTime) : '-'}
+                  </Col>
+                  <Col xs={2}>
+                    {currentTaskData?.createTime && currentTaskData?.completionTime
+                      ? calculateDuration(
+                          currentTaskData?.createTime,
+                          currentTaskData?.completionTime
+                        )
+                      : '-'}
+                  </Col>
+                </Row>
+                {taskFailureDetails}
+              </div>
+            ) : (
+              <div className="task-detail-container">
+                <Row className="task-heading-row">
+                  <Col xs={4}>Task</Col>
+                  <Col xs={4}>Started On</Col>
+                  <Col xs={4}>Status</Col>
+                </Row>
+                {taskFailureDetails}
+              </div>
+            )
           }
         />
       </div>

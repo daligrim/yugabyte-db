@@ -12,6 +12,7 @@ import static io.swagger.annotations.ApiModelProperty.AccessMode.READ_ONLY;
 import com.fasterxml.jackson.annotation.JsonFormat;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.Streams;
 import com.yugabyte.yw.common.alerts.AlertLabelsProvider;
 import com.yugabyte.yw.models.filters.AlertFilter;
 import com.yugabyte.yw.models.helpers.KnownAlertLabels;
@@ -24,6 +25,14 @@ import io.ebean.PersistenceContextScope;
 import io.ebean.annotation.Formula;
 import io.swagger.annotations.ApiModel;
 import io.swagger.annotations.ApiModelProperty;
+import jakarta.persistence.CascadeType;
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
+import jakarta.persistence.Id;
+import jakarta.persistence.OneToMany;
+import jakarta.persistence.Transient;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.Date;
@@ -31,14 +40,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
-import javax.persistence.CascadeType;
-import javax.persistence.Column;
-import javax.persistence.Entity;
-import javax.persistence.EnumType;
-import javax.persistence.Enumerated;
-import javax.persistence.Id;
-import javax.persistence.OneToMany;
-import javax.persistence.Transient;
+import java.util.stream.Stream;
 import javax.validation.constraints.NotNull;
 import javax.validation.constraints.Size;
 import lombok.Data;
@@ -118,16 +120,25 @@ public class Alert extends Model implements AlertLabelsProvider {
 
   @NotNull
   @Column(nullable = false)
-  @JsonFormat(shape = JsonFormat.Shape.STRING, pattern = "yyyy-MM-dd'T'HH:mm:ssZ")
-  @ApiModelProperty(value = "Alert creation timestamp", accessMode = READ_ONLY)
+  @JsonFormat(shape = JsonFormat.Shape.STRING, pattern = "yyyy-MM-dd'T'HH:mm:ss'Z'")
+  @ApiModelProperty(
+      value = "Alert creation timestamp",
+      accessMode = READ_ONLY,
+      example = "2022-12-12T13:07:18Z")
   private Date createTime = nowWithoutMillis();
 
-  @JsonFormat(shape = JsonFormat.Shape.STRING, pattern = "yyyy-MM-dd'T'HH:mm:ssZ")
-  @ApiModelProperty(value = "Timestamp at which the alert was acknowledged", accessMode = READ_ONLY)
+  @JsonFormat(shape = JsonFormat.Shape.STRING, pattern = "yyyy-MM-dd'T'HH:mm:ss'Z'")
+  @ApiModelProperty(
+      value = "Timestamp at which the alert was acknowledged",
+      accessMode = READ_ONLY,
+      example = "2022-12-12T13:07:18Z")
   private Date acknowledgedTime;
 
-  @JsonFormat(shape = JsonFormat.Shape.STRING, pattern = "yyyy-MM-dd'T'HH:mm:ssZ")
-  @ApiModelProperty(value = "Timestamp at which the alert was resolved", accessMode = READ_ONLY)
+  @JsonFormat(shape = JsonFormat.Shape.STRING, pattern = "yyyy-MM-dd'T'HH:mm:ss'Z'")
+  @ApiModelProperty(
+      value = "Timestamp at which the alert was resolved",
+      accessMode = READ_ONLY,
+      example = "2022-12-12T13:07:18Z")
   private Date resolvedTime;
 
   @NotNull
@@ -187,18 +198,26 @@ public class Alert extends Model implements AlertLabelsProvider {
   private UUID configurationUuid;
 
   @NotNull
+  @Enumerated(EnumType.STRING)
   @ApiModelProperty(value = "Alert configuration type", accessMode = READ_ONLY)
   private AlertConfiguration.TargetType configurationType;
 
   @OneToMany(mappedBy = "alert", cascade = CascadeType.ALL, orphanRemoval = true)
+  @EqualsAndHashCode.Exclude
   private List<AlertLabel> labels;
 
-  @ApiModelProperty(value = "Time of the last notification attempt", accessMode = READ_ONLY)
-  @JsonFormat(shape = JsonFormat.Shape.STRING, pattern = "yyyy-MM-dd'T'HH:mm:ssZ")
+  @ApiModelProperty(
+      value = "Time of the last notification attempt",
+      accessMode = READ_ONLY,
+      example = "2022-12-12T13:07:18Z")
+  @JsonFormat(shape = JsonFormat.Shape.STRING, pattern = "yyyy-MM-dd'T'HH:mm:ss'Z'")
   private Date notificationAttemptTime;
 
-  @ApiModelProperty(value = "Time of the next notification attempt", accessMode = READ_ONLY)
-  @JsonFormat(shape = JsonFormat.Shape.STRING, pattern = "yyyy-MM-dd'T'HH:mm:ssZ")
+  @ApiModelProperty(
+      value = "Time of the next notification attempt",
+      accessMode = READ_ONLY,
+      example = "2022-12-12T13:07:18Z")
+  @JsonFormat(shape = JsonFormat.Shape.STRING, pattern = "yyyy-MM-dd'T'HH:mm:ss'Z'")
   private Date nextNotificationTime = nowWithoutMillis();
 
   @ApiModelProperty(value = "Count of failures to send a notification", accessMode = READ_ONLY)
@@ -232,12 +251,7 @@ public class Alert extends Model implements AlertLabelsProvider {
   }
 
   public String getLabelValue(String name) {
-    // TODO Remove once notifications sent through AlertManager
-    if (KnownAlertLabels.ALERT_STATE.labelName().equals(name)) {
-      return state.getAction();
-    }
-    return labels
-        .stream()
+    return labels.stream()
         .filter(label -> name.equals(label.getName()))
         .map(AlertLabel::getValue)
         .findFirst()
@@ -272,9 +286,12 @@ public class Alert extends Model implements AlertLabelsProvider {
     return this;
   }
 
-  public List<AlertLabel> getLabels() {
-    return labels
-        .stream()
+  @JsonIgnore
+  @EqualsAndHashCode.Include
+  public List<AlertLabel> getEffectiveLabels() {
+    AlertLabel uuidLabel =
+        new AlertLabel(this, KnownAlertLabels.ALERT_UUID.labelName(), uuid.toString());
+    return Streams.concat(labels.stream(), Stream.of(uuidLabel))
         .sorted(Comparator.comparing(AlertLabel::getName))
         .collect(Collectors.toList());
   }

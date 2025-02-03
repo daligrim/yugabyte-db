@@ -11,10 +11,11 @@
 // under the License.
 //
 
-#ifndef YB_UTIL_CLONE_PTR_H
-#define YB_UTIL_CLONE_PTR_H
+#pragma once
 
 #include <memory>
+
+#include "yb/gutil/casts.h"
 
 namespace yb {
 
@@ -104,6 +105,9 @@ class clone_ptr {
   T* t_;
 };
 
-} // namespace yb
+template <class U, class T>
+clone_ptr<U> down_cast(clone_ptr<T>&& t) {
+  return clone_ptr<U>(yb::down_cast<U*>(t.release()));
+}
 
-#endif // YB_UTIL_CLONE_PTR_H
+} // namespace yb

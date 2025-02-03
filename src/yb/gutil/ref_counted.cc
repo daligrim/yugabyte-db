@@ -22,7 +22,7 @@
 #include <atomic>
 #include <regex>
 
-#include <glog/logging.h>
+#include "yb/util/logging.h"
 
 #include "yb/gutil/threading/thread_collision_warner.h"
 
@@ -72,6 +72,10 @@ bool RefCountedBase::Release() const {
 
 bool RefCountedThreadSafeBase::HasOneRef() const {
   return ref_count_.load(std::memory_order_acquire) == 1;
+}
+
+bool RefCountedThreadSafeBase::HasTwoRef() const {
+  return ref_count_.load(std::memory_order_acquire) == 2;
 }
 
 RefCountedThreadSafeBase::~RefCountedThreadSafeBase() {

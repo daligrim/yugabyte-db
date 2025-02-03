@@ -11,24 +11,31 @@
 // under the License.
 //
 
-#ifndef YB_INTEGRATION_TESTS_CDC_TEST_UTIL_H
-#define YB_INTEGRATION_TESTS_CDC_TEST_UTIL_H
+#pragma once
 
 #include "yb/cdc/cdc_service.pb.h"
 #include "yb/cdc/cdc_service.proxy.h"
 
+#include "yb/cdc/cdc_service.h"
+
 #include "yb/integration-tests/mini_cluster.h"
 
 namespace yb {
+namespace xrepl {
+class CDCSDKTabletMetrics;
+class XClusterTabletMetrics;
+}  // namespace xrepl
 namespace cdc {
 
-void AssertIntKey(const google::protobuf::RepeatedPtrField<cdc::KeyValuePairPB>& key,
-                  int32_t value);
+Result<QLValuePB> ExtractKey(
+    const Schema& schema, const cdc::KeyValuePairPB& key, std::string expected_col_name,
+    size_t col_id = 0, bool range_col = false);
 
-void CreateCDCStream(const std::unique_ptr<CDCServiceProxy>& cdc_proxy,
-                     const TableId& table_id,
-                     CDCStreamId* stream_id,
-                     cdc::CDCRequestSource source_type = XCLUSTER);
+void AssertIntKey(
+    const Schema& schema, const google::protobuf::RepeatedPtrField<cdc::KeyValuePairPB>& key,
+    int32_t value);
+
+Result<xrepl::StreamId> CreateXClusterStream(client::YBClient& client, const TableId& table_id);
 
 // For any tablet that belongs to a table whose name starts with 'table_name_start', this method
 // will verify that its WAL retention time matches the provided time.
@@ -39,7 +46,16 @@ void VerifyWalRetentionTime(yb::MiniCluster* cluster,
 
 Status CorrectlyPollingAllTablets(
     MiniCluster* cluster, size_t num_producer_tablets, MonoDelta timeout);
+
+Result<std::shared_ptr<xrepl::XClusterTabletMetrics>> GetXClusterTabletMetrics(
+    cdc::CDCServiceImpl& cdc_service, const TabletId& tablet_id, const xrepl::StreamId stream_id,
+    cdc::CreateMetricsEntityIfNotFound create = cdc::CreateMetricsEntityIfNotFound::kTrue);
+
+Result<std::shared_ptr<xrepl::CDCSDKTabletMetrics>> GetCDCSDKTabletMetrics(
+    cdc::CDCServiceImpl& cdc_service, const TabletId& tablet_id, const xrepl::StreamId stream_id,
+    cdc::CreateMetricsEntityIfNotFound create = cdc::CreateMetricsEntityIfNotFound::kTrue);
+
+CDCStateTable MakeCDCStateTable(client::YBClient* client);
+
 } // namespace cdc
 } // namespace yb
-
-#endif // YB_INTEGRATION_TESTS_CDC_TEST_UTIL_H

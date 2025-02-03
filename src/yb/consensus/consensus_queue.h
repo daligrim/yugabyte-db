@@ -30,8 +30,7 @@
 // under the License.
 //
 
-#ifndef YB_CONSENSUS_CONSENSUS_QUEUE_H_
-#define YB_CONSENSUS_CONSENSUS_QUEUE_H_
+#pragma once
 
 #include <iosfwd>
 #include <map>
@@ -43,16 +42,19 @@
 
 #include "yb/common/entity_ids_types.h"
 #include "yb/common/hybrid_time.h"
-#include "yb/common/placement_info.h"
+#include "yb/common/tablespace_parser.h"
 
 #include "yb/consensus/consensus_fwd.h"
-#include "yb/consensus/metadata.pb.h"
+#include "yb/consensus/consensus_types.h"
 #include "yb/consensus/log_cache.h"
+#include "yb/consensus/metadata.pb.h"
 #include "yb/consensus/opid_util.h"
 
 #include "yb/gutil/ref_counted.h"
 
 #include "yb/server/clock.h"
+
+#include "yb/rpc/strand.h"
 
 #include "yb/util/status_fwd.h"
 #include "yb/util/locks.h"
@@ -189,9 +191,9 @@ class PeerMessageQueue {
     // Whether the follower was detected to need remote bootstrap.
     bool needs_remote_bootstrap = false;
 
-    // #Attempts of bootstrapping from closest non-leader peer.
-    // We revert to bootstrapping from leader post 5 failed attempts.
-    uint64_t bootstrap_attempts_from_non_leader = 0;
+    // Number of times this peer attempted bootstrap from a closest non-leader peer
+    // that resulted in a failure.
+    uint32_t failed_bootstrap_attempts_from_non_leader = 0;
 
     // Member type of this peer in the config.
     PeerMemberType member_type = PeerMemberType::UNKNOWN_MEMBER_TYPE;
@@ -219,7 +221,7 @@ class PeerMessageQueue {
                    const std::string& tablet_id,
                    const server::ClockPtr& clock,
                    ConsensusContext* context,
-                   std::unique_ptr<ThreadPoolToken> raft_pool_observers_token);
+                   std::unique_ptr<rpc::Strand> observers_strand);
 
   // Initialize the queue.
   virtual void Init(const OpId& last_locally_replicated);
@@ -294,8 +296,8 @@ class PeerMessageQueue {
   // the old ones if they are still required.
   virtual Status RequestForPeer(
       const std::string& uuid,
-      ConsensusRequestPB* request,
-      ReplicateMsgsHolder* msgs_holder,
+      LWConsensusRequestPB* request,
+      LWReplicateMsgsHolder* msgs_holder,
       bool* needs_remote_bootstrap,
       PeerMemberType* member_type = nullptr,
       bool* last_exchange_successful = nullptr);
@@ -312,6 +314,14 @@ class PeerMessageQueue {
   const TrackedPeer* FindClosestPeerForBootstrap(const TrackedPeer* remote_tracked_peer)
       REQUIRES(queue_lock_);
 
+  // Increment failed_bootstrap_attempts_from_non_leader for the given peer. The method should only
+  // be called when an attempt to bootstrap from a non-leader peer was made, and it resulted in an
+  // error, where (error != ALREADY_IN_PROGRESS && error != TABLET_SPLIT_PARENT_STILL_LIVE) holds
+  // true.
+  // We do so because a remote bootstrap could only have been tried from the new peer when the above
+  // expression holds true.
+  void IncrementFailedBootstrapAttemptsFromNonLeader(const std::string& peer_uuid);
+
   // Update the last successful communication timestamp for the given peer to the current time. This
   // should be called when a non-network related error is received from the peer, indicating that it
   // is alive, even if it may not be fully up and running or able to accept updates.
@@ -320,7 +330,7 @@ class PeerMessageQueue {
   // Updates the request queue with the latest response of a peer, returns whether this peer has
   // more requests pending.
   virtual bool ResponseFromPeer(const std::string& peer_uuid,
-                                const ConsensusResponsePB& response);
+                                const LWConsensusResponsePB& response);
 
   void RequestWasNotSent(const std::string& peer_uuid);
 
@@ -387,9 +397,19 @@ class PeerMessageQueue {
 
   // Read replicated log records starting from the OpId immediately after last_op_id.
   Result<ReadOpsResult> ReadReplicatedMessagesForCDC(
-    const yb::OpId& last_op_id,
-    int64_t* last_replicated_opid_index = nullptr,
-    const CoarseTimePoint deadline = CoarseTimePoint::max());
+      const yb::OpId& last_op_id, int64_t* last_replicated_opid_index = nullptr,
+      const CoarseTimePoint deadline = CoarseTimePoint::max(),
+      const bool fetch_single_entry = false);
+
+  Result<ReadOpsResult> ReadReplicatedMessagesForConsistentCDC(
+      OpId last_op_id, uint64_t stream_safe_time, CoarseTimePoint deadline,
+      bool fetch_single_entry = false, int64_t* last_replicated_opid_index = nullptr);
+
+  Result<ReadOpsResult> ReadReplicatedMessagesInSegmentForCDC(
+      const OpId& from_op_id, CoarseTimePoint deadline, bool fetch_single_entry = false,
+      int64_t* last_committed_index = nullptr,
+      HybridTime* consistent_stream_safe_time_footer = nullptr,
+      bool* read_entire_wal = nullptr);
 
   void UpdateCDCConsumerOpId(const yb::OpId& op_id);
 
@@ -407,6 +427,8 @@ class PeerMessageQueue {
   }
 
   Result<OpId> TEST_GetLastOpIdWithType(int64_t max_allowed_index, OperationType op_type);
+
+  std::vector<FollowerCommunicationTime> GetFollowerCommunicationTimes() const;
 
  private:
   FRIEND_TEST(ConsensusQueueTest, TestQueueAdvancesCommittedIndex);
@@ -559,16 +581,29 @@ class PeerMessageQueue {
   //
   // If 'to_index' is 0, then all operations after 'after_index' will be included.
   Result<ReadOpsResult> ReadFromLogCache(
-    int64_t after_index,
-    int64_t to_index,
-    size_t max_batch_size,
-    const std::string& peer_uuid,
-    const CoarseTimePoint deadline = CoarseTimePoint::max());
+      int64_t after_index,
+      int64_t to_index,
+      size_t max_batch_size,
+      const std::string& peer_uuid,
+      const CoarseTimePoint deadline = CoarseTimePoint::max(),
+      const bool fetch_single_entry = false);
+
+  Result<ReadOpsResult> ReadFromLogCacheForCDC(
+      int64_t last_op_id_index,
+      int64_t to_index,
+      CoarseTimePoint deadline = CoarseTimePoint::max(),
+      bool fetch_single_entry = false);
+
+  std::pair<int64_t, int64_t> GetCommittedAndMajorityReplicatedIndex();
+
+  int64_t GetStartOpIdIndex(int64_t start_index);
+
+  void TEST_WaitForNotificationToFinish();
 
   std::vector<PeerMessageQueueObserver*> observers_;
 
   // The pool token which executes observer notifications.
-  std::unique_ptr<ThreadPoolToken> raft_pool_observers_token_;
+  std::unique_ptr<rpc::Strand> notifications_strand_;
 
   // PB containing identifying information about the local peer.
   const RaftPeerPB local_peer_pb_;
@@ -657,9 +692,5 @@ class PeerMessageQueueObserver {
   virtual ~PeerMessageQueueObserver() {}
 };
 
-Status ValidateFlags();
-
 }  // namespace consensus
 }  // namespace yb
-
-#endif // YB_CONSENSUS_CONSENSUS_QUEUE_H_

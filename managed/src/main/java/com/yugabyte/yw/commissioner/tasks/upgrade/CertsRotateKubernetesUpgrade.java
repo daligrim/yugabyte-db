@@ -9,9 +9,12 @@ import com.yugabyte.yw.commissioner.UserTaskDetails.SubTaskGroupType;
 import com.yugabyte.yw.commissioner.tasks.subtasks.UniverseSetTlsParams;
 import com.yugabyte.yw.commissioner.tasks.subtasks.UniverseUpdateRootCert;
 import com.yugabyte.yw.commissioner.tasks.subtasks.UniverseUpdateRootCert.UpdateRootCertAction;
+import com.yugabyte.yw.common.config.GlobalConfKeys;
+import com.yugabyte.yw.common.operator.OperatorStatusUpdaterFactory;
 import com.yugabyte.yw.forms.CertsRotateParams;
 import com.yugabyte.yw.forms.UniverseDefinitionTaskParams.Cluster;
 import com.yugabyte.yw.forms.UniverseDefinitionTaskParams.UserIntent;
+import com.yugabyte.yw.models.Universe;
 import javax.inject.Inject;
 import lombok.extern.slf4j.Slf4j;
 
@@ -19,8 +22,10 @@ import lombok.extern.slf4j.Slf4j;
 public class CertsRotateKubernetesUpgrade extends KubernetesUpgradeTaskBase {
 
   @Inject
-  protected CertsRotateKubernetesUpgrade(BaseTaskDependencies baseTaskDependencies) {
-    super(baseTaskDependencies);
+  protected CertsRotateKubernetesUpgrade(
+      BaseTaskDependencies baseTaskDependencies,
+      OperatorStatusUpdaterFactory operatorStatusUpdaterFactory) {
+    super(baseTaskDependencies, operatorStatusUpdaterFactory);
   }
 
   @Override
@@ -34,6 +39,12 @@ public class CertsRotateKubernetesUpgrade extends KubernetesUpgradeTaskBase {
   }
 
   @Override
+  protected void createPrecheckTasks(Universe universe) {
+    super.createPrecheckTasks(universe);
+    addBasicPrecheckTasks();
+  }
+
+  @Override
   public void run() {
     runUpgrade(
         () -> {
@@ -41,7 +52,7 @@ public class CertsRotateKubernetesUpgrade extends KubernetesUpgradeTaskBase {
           UserIntent userIntent = cluster.userIntent;
 
           // Verify the request params and fail if invalid
-          taskParams().verifyParams(getUniverse());
+          taskParams().verifyParams(getUniverse(), isFirstTry());
 
           // Update the rootCA in platform to have both old cert and new cert
           // Here in the temporary multi-cert we will have old cert first and new cert later
@@ -50,7 +61,14 @@ public class CertsRotateKubernetesUpgrade extends KubernetesUpgradeTaskBase {
           // So, generated node certs will still be of old rootCA after this step
           createUniverseUpdateRootCertTask(UpdateRootCertAction.MultiCert);
           // Create kubernetes upgrade task to rotate certs
-          createUpgradeTask(getUniverse(), userIntent.ybSoftwareVersion, true, true);
+          String stableYbcVersion = confGetter.getGlobalConf(GlobalConfKeys.ybcStableVersion);
+          createUpgradeTask(
+              getUniverse(),
+              userIntent.ybSoftwareVersion,
+              true /* isMasterChanged */,
+              true /* isTserverChanged */,
+              getUniverse().isYbcEnabled(),
+              stableYbcVersion);
 
           // Now we will change the order of certs: new cert first, followed by old root cert
           // Also cert key will be pointing to new root cert key
@@ -58,21 +76,32 @@ public class CertsRotateKubernetesUpgrade extends KubernetesUpgradeTaskBase {
           // Essentially equivalent to updating only node certs in this step
           createUniverseUpdateRootCertTask(UpdateRootCertAction.MultiCertReverse);
           // Create kubernetes upgrade task to rotate certs
-          createUpgradeTask(getUniverse(), userIntent.ybSoftwareVersion, true, true);
+          createUpgradeTask(
+              getUniverse(),
+              userIntent.ybSoftwareVersion,
+              true /* isMasterChanged */,
+              true /* isTserverChanged */,
+              getUniverse().isYbcEnabled(),
+              stableYbcVersion);
 
           // Reset the temporary certs and update the universe to use new rootCA
           createUniverseUpdateRootCertTask(UpdateRootCertAction.Reset);
           createUniverseSetTlsParamsTask();
           // Create kubernetes upgrade task to rotate certs
-          createUpgradeTask(getUniverse(), userIntent.ybSoftwareVersion, true, true);
+          createUpgradeTask(
+              getUniverse(),
+              userIntent.ybSoftwareVersion,
+              true /* isMasterChanged */,
+              true /* isTserverChanged */,
+              getUniverse().isYbcEnabled(),
+              stableYbcVersion);
         });
   }
 
   private void createUniverseUpdateRootCertTask(UpdateRootCertAction updateAction) {
-    SubTaskGroup subTaskGroup =
-        getTaskExecutor().createSubTaskGroup("UniverseUpdateRootCert", executor);
+    SubTaskGroup subTaskGroup = createSubTaskGroup("UniverseUpdateRootCert");
     UniverseUpdateRootCert.Params params = new UniverseUpdateRootCert.Params();
-    params.universeUUID = taskParams().universeUUID;
+    params.setUniverseUUID(taskParams().getUniverseUUID());
     params.rootCA = taskParams().rootCA;
     params.action = updateAction;
     UniverseUpdateRootCert task = createTask(UniverseUpdateRootCert.class);
@@ -83,15 +112,14 @@ public class CertsRotateKubernetesUpgrade extends KubernetesUpgradeTaskBase {
   }
 
   private void createUniverseSetTlsParamsTask() {
-    SubTaskGroup subTaskGroup =
-        getTaskExecutor().createSubTaskGroup("UniverseSetTlsParams", executor);
+    SubTaskGroup subTaskGroup = createSubTaskGroup("UniverseSetTlsParams");
     UniverseSetTlsParams.Params params = new UniverseSetTlsParams.Params();
-    params.universeUUID = taskParams().universeUUID;
+    params.setUniverseUUID(taskParams().getUniverseUUID());
     params.enableNodeToNodeEncrypt = getUserIntent().enableNodeToNodeEncrypt;
     params.enableClientToNodeEncrypt = getUserIntent().enableClientToNodeEncrypt;
     params.allowInsecure = getUniverse().getUniverseDetails().allowInsecure;
     params.rootCA = taskParams().rootCA;
-    params.clientRootCA = getUniverse().getUniverseDetails().clientRootCA;
+    params.clientRootCA = getUniverse().getUniverseDetails().getClientRootCA();
     params.rootAndClientRootCASame = getUniverse().getUniverseDetails().rootAndClientRootCASame;
     UniverseSetTlsParams task = createTask(UniverseSetTlsParams.class);
     task.initialize(params);

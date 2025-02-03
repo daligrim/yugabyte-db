@@ -12,38 +12,35 @@
 // under the License.
 //--------------------------------------------------------------------------------------------------
 
-#ifndef YB_YQL_PGGATE_PG_TRUNCATE_COLOCATED_H_
-#define YB_YQL_PGGATE_PG_TRUNCATE_COLOCATED_H_
+#pragma once
+
+#include <memory>
+
+#include "yb/util/result.h"
 
 #include "yb/yql/pggate/pg_dml_write.h"
-#include "yb/yql/pggate/pg_session.h"
-#include "yb/yql/pggate/pg_statement.h"
 
-namespace yb {
-namespace pggate {
+namespace yb::pggate {
 
-//--------------------------------------------------------------------------------------------------
-// Colocated TRUNCATE
-//--------------------------------------------------------------------------------------------------
-
-class PgTruncateColocated : public PgDmlWrite {
+class PgTruncateColocated final : public PgStatementLeafBase<PgDmlWrite, StmtOp::kTruncate> {
  public:
-  PgTruncateColocated(
-      PgSession::ScopedRefPtr pg_session,
-      const PgObjectId& table_id,
-      bool is_single_row_txn,
-      bool is_region_local)
-      : PgDmlWrite(std::move(pg_session), table_id, is_single_row_txn, is_region_local) {}
-
-  StmtOp stmt_op() const override { return StmtOp::STMT_TRUNCATE; }
+  static Result<std::unique_ptr<PgTruncateColocated>> Make(
+      const PgSession::ScopedRefPtr& pg_session, const PgObjectId& table_id, bool is_region_local,
+      YbcPgTransactionSetting transaction_setting) {
+    std::unique_ptr<PgTruncateColocated> result{new PgTruncateColocated{
+        pg_session, transaction_setting}};
+    RETURN_NOT_OK(result->Prepare(table_id, is_region_local));
+    return result;
+  }
 
  private:
+  PgTruncateColocated(
+      const PgSession::ScopedRefPtr& pg_session, YbcPgTransactionSetting transaction_setting)
+      : BaseType(pg_session, transaction_setting) {}
+
   PgsqlWriteRequestPB::PgsqlStmtType stmt_type() const override {
     return PgsqlWriteRequestPB::PGSQL_TRUNCATE_COLOCATED;
   }
 };
 
-}  // namespace pggate
-}  // namespace yb
-
-#endif // YB_YQL_PGGATE_PG_TRUNCATE_COLOCATED_H_
+} // namespace yb::pggate

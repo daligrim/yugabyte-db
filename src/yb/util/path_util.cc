@@ -46,8 +46,6 @@
 #include <sys/sysinfo.h>
 #endif
 
-#include <glog/logging.h>
-
 #include "yb/util/env_util.h"
 #include "yb/util/errno.h"
 #include "yb/util/logging.h"
@@ -149,4 +147,16 @@ Status CheckODirectTempFileCreationInDir(Env* env,
 #endif
   return Status::OK();
 }
+
+Result<string> path_utils::GetToolPath(const string& rel_path, const string& tool_name) {
+  string exe;
+  RETURN_NOT_OK(Env::Default()->GetExecutablePath(&exe));
+  const string binroot = JoinPathSegments(DirName(exe), rel_path);
+  const string tool_path = JoinPathSegments(binroot, tool_name);
+  if (!Env::Default()->FileExists(tool_path)) {
+    return STATUS_FORMAT(IOError, Format("$0 tool not found at: $1", tool_name, tool_path));
+  }
+  return tool_path;
+}
+
 } // namespace yb

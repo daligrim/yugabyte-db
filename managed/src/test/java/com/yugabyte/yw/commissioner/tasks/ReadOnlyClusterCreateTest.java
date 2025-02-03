@@ -16,6 +16,7 @@ import static org.mockito.Mockito.when;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.net.HostAndPort;
 import com.yugabyte.yw.commissioner.Common;
 import com.yugabyte.yw.common.ApiUtils;
 import com.yugabyte.yw.common.PlacementInfoUtil;
@@ -61,9 +62,13 @@ public class ReadOnlyClusterCreateTest extends UniverseModifyBaseTest {
     try {
       when(mockClient.getMasterClusterConfig()).thenReturn(mockConfigResponse);
       when(mockClient.changeMasterClusterConfig(any())).thenReturn(mockChangeConfigResponse);
+      mockClockSyncResponse(mockNodeUniverseManager);
+      mockLocaleCheckResponse(mockNodeUniverseManager);
+      when(mockClient.getLeaderMasterHostAndPort()).thenReturn(HostAndPort.fromHost("10.0.0.1"));
     } catch (Exception e) {
     }
     mockWaits(mockClient);
+    setLeaderlessTabletsMock();
   }
 
   private TaskInfo submitTask(UniverseDefinitionTaskParams taskParams) {
@@ -80,17 +85,24 @@ public class ReadOnlyClusterCreateTest extends UniverseModifyBaseTest {
 
   private static final List<TaskType> CLUSTER_CREATE_TASK_SEQUENCE =
       ImmutableList.of(
+          TaskType.CheckLeaderlessTablets,
+          TaskType.UpdateConsistencyCheck,
+          TaskType.FreezeUniverse,
           TaskType.SetNodeStatus,
           TaskType.AnsibleCreateServer,
           TaskType.AnsibleUpdateNodeInfo,
           TaskType.RunHooks,
           TaskType.AnsibleSetupServer,
           TaskType.RunHooks,
+          TaskType.CheckLocale,
+          TaskType.CheckGlibc,
           TaskType.AnsibleConfigureServers,
           TaskType.AnsibleConfigureServers,
           TaskType.SetNodeStatus,
+          TaskType.WaitForClockSync, // Ensure clock skew is low enough
           TaskType.AnsibleClusterServerCtl,
           TaskType.WaitForServer,
+          TaskType.WaitForServer, // check if postgres is up
           TaskType.SetNodeState,
           TaskType.UpdatePlacementInfo,
           TaskType.SwamperTargetsFileUpdate,
@@ -107,7 +119,14 @@ public class ReadOnlyClusterCreateTest extends UniverseModifyBaseTest {
           Json.toJson(ImmutableMap.of()),
           Json.toJson(ImmutableMap.of()),
           Json.toJson(ImmutableMap.of()),
+          Json.toJson(ImmutableMap.of()),
+          Json.toJson(ImmutableMap.of()),
+          Json.toJson(ImmutableMap.of()),
+          Json.toJson(ImmutableMap.of()),
+          Json.toJson(ImmutableMap.of()),
+          Json.toJson(ImmutableMap.of()),
           Json.toJson(ImmutableMap.of("process", "tserver", "command", "start")),
+          Json.toJson(ImmutableMap.of()),
           Json.toJson(ImmutableMap.of()),
           Json.toJson(ImmutableMap.of()),
           Json.toJson(ImmutableMap.of()),
@@ -122,7 +141,7 @@ public class ReadOnlyClusterCreateTest extends UniverseModifyBaseTest {
       assertEquals(taskType, tasks.get(0).getTaskType());
       JsonNode expectedResults = CLUSTER_CREATE_TASK_EXPECTED_RESULTS.get(position);
       List<JsonNode> taskDetails =
-          tasks.stream().map(TaskInfo::getTaskDetails).collect(Collectors.toList());
+          tasks.stream().map(TaskInfo::getTaskParams).collect(Collectors.toList());
       assertJsonEqual(expectedResults, taskDetails.get(0));
       position++;
     }
@@ -131,7 +150,7 @@ public class ReadOnlyClusterCreateTest extends UniverseModifyBaseTest {
   @Test
   public void testClusterCreateSuccess() {
     UniverseConfigureTaskParams taskParams = new UniverseConfigureTaskParams();
-    taskParams.universeUUID = defaultUniverse.universeUUID;
+    taskParams.setUniverseUUID(defaultUniverse.getUniverseUUID());
     taskParams.currentClusterType = ClusterType.ASYNC;
     UserIntent userIntent = new UserIntent();
     Region region = Region.create(defaultProvider, "region-2", "Region 2", "yb-image-1");
@@ -140,16 +159,16 @@ public class ReadOnlyClusterCreateTest extends UniverseModifyBaseTest {
     userIntent.replicationFactor = 1;
     userIntent.ybSoftwareVersion = "yb-version";
     userIntent.accessKeyCode = "demo-access";
-    userIntent.regionList = ImmutableList.of(region.uuid);
+    userIntent.regionList = ImmutableList.of(region.getUuid());
     userIntent.instanceType = ApiUtils.UTIL_INST_TYPE;
-    userIntent.universeName = defaultUniverse.name;
-    userIntent.provider = defaultProvider.uuid.toString();
+    userIntent.universeName = defaultUniverse.getName();
+    userIntent.provider = defaultProvider.getUuid().toString();
     taskParams.clusters.add(defaultUniverse.getUniverseDetails().getPrimaryCluster());
     Cluster asyncCluster = new Cluster(ClusterType.ASYNC, userIntent);
     taskParams.clusters.add(asyncCluster);
     taskParams.clusterOperation = UniverseConfigureTaskParams.ClusterOperationType.CREATE;
     PlacementInfoUtil.updateUniverseDefinition(
-        taskParams, defaultCustomer.getCustomerId(), asyncCluster.uuid);
+        taskParams, defaultCustomer.getId(), asyncCluster.uuid);
     int iter = 1;
     for (NodeDetails node : taskParams.nodeDetailsSet) {
       node.cloudInfo.private_ip = "10.9.22." + iter;
@@ -168,17 +187,17 @@ public class ReadOnlyClusterCreateTest extends UniverseModifyBaseTest {
     assertClusterCreateSequence(subTasksByPosition);
 
     UniverseDefinitionTaskParams univUTP =
-        Universe.getOrBadRequest(defaultUniverse.universeUUID).getUniverseDetails();
+        Universe.getOrBadRequest(defaultUniverse.getUniverseUUID()).getUniverseDetails();
     assertEquals(2, univUTP.clusters.size());
   }
 
   @Test
   public void testClusterCreateFailure() {
     UniverseDefinitionTaskParams univUTP =
-        Universe.getOrBadRequest(defaultUniverse.universeUUID).getUniverseDetails();
+        Universe.getOrBadRequest(defaultUniverse.getUniverseUUID()).getUniverseDetails();
     assertEquals(1, univUTP.clusters.size());
     UniverseDefinitionTaskParams taskParams = new UniverseDefinitionTaskParams();
-    taskParams.universeUUID = defaultUniverse.universeUUID;
+    taskParams.setUniverseUUID(defaultUniverse.getUniverseUUID());
     TaskInfo taskInfo = submitTask(taskParams);
     assertEquals(Failure, taskInfo.getTaskState());
   }
@@ -186,7 +205,7 @@ public class ReadOnlyClusterCreateTest extends UniverseModifyBaseTest {
   @Test
   public void testClusterOnPremCreateSuccess() {
     UniverseConfigureTaskParams taskParams = new UniverseConfigureTaskParams();
-    taskParams.universeUUID = onPremUniverse.universeUUID;
+    taskParams.setUniverseUUID(onPremUniverse.getUniverseUUID());
     taskParams.currentClusterType = ClusterType.ASYNC;
 
     AvailabilityZone zone = AvailabilityZone.getByCode(onPremProvider, AZ_CODE);
@@ -197,17 +216,17 @@ public class ReadOnlyClusterCreateTest extends UniverseModifyBaseTest {
     userIntent.replicationFactor = 1;
     userIntent.ybSoftwareVersion = "yb-version";
     userIntent.accessKeyCode = "demo-access";
-    userIntent.regionList = ImmutableList.of(zone.region.uuid);
+    userIntent.regionList = ImmutableList.of(zone.getRegion().getUuid());
     userIntent.instanceType = ApiUtils.UTIL_INST_TYPE;
     userIntent.providerType = Common.CloudType.onprem;
-    userIntent.provider = onPremProvider.uuid.toString();
-    userIntent.universeName = onPremUniverse.name;
+    userIntent.provider = onPremProvider.getUuid().toString();
+    userIntent.universeName = onPremUniverse.getName();
     taskParams.clusters.add(defaultUniverse.getUniverseDetails().getPrimaryCluster());
     Cluster asyncCluster = new Cluster(ClusterType.ASYNC, userIntent);
     taskParams.clusters.add(asyncCluster);
     taskParams.clusterOperation = UniverseConfigureTaskParams.ClusterOperationType.CREATE;
     PlacementInfoUtil.updateUniverseDefinition(
-        taskParams, defaultCustomer.getCustomerId(), asyncCluster.uuid);
+        taskParams, defaultCustomer.getId(), asyncCluster.uuid);
 
     int iter = 1;
     for (NodeDetails node : taskParams.nodeDetailsSet) {
@@ -221,7 +240,7 @@ public class ReadOnlyClusterCreateTest extends UniverseModifyBaseTest {
     verify(mockNodeManager, times(11)).nodeCommand(any(), any());
 
     UniverseDefinitionTaskParams univUTP =
-        Universe.getOrBadRequest(onPremUniverse.universeUUID).getUniverseDetails();
+        Universe.getOrBadRequest(onPremUniverse.getUniverseUUID()).getUniverseDetails();
     assertEquals(2, univUTP.clusters.size());
     assertNotNull(taskInfo);
     assertEquals(Success, taskInfo.getTaskState());
@@ -230,7 +249,7 @@ public class ReadOnlyClusterCreateTest extends UniverseModifyBaseTest {
   @Test
   public void testClusterOnPremCreateFailIfPreflightFails() {
     UniverseConfigureTaskParams taskParams = new UniverseConfigureTaskParams();
-    taskParams.universeUUID = onPremUniverse.universeUUID;
+    taskParams.setUniverseUUID(onPremUniverse.getUniverseUUID());
     taskParams.currentClusterType = ClusterType.ASYNC;
 
     AvailabilityZone zone = AvailabilityZone.getByCode(onPremProvider, AZ_CODE);
@@ -241,17 +260,17 @@ public class ReadOnlyClusterCreateTest extends UniverseModifyBaseTest {
     userIntent.replicationFactor = 1;
     userIntent.ybSoftwareVersion = "yb-version";
     userIntent.accessKeyCode = "demo-access";
-    userIntent.regionList = ImmutableList.of(zone.region.uuid);
+    userIntent.regionList = ImmutableList.of(zone.getRegion().getUuid());
     userIntent.instanceType = ApiUtils.UTIL_INST_TYPE;
     userIntent.providerType = Common.CloudType.onprem;
-    userIntent.provider = onPremProvider.uuid.toString();
-    userIntent.universeName = onPremUniverse.name;
+    userIntent.provider = onPremProvider.getUuid().toString();
+    userIntent.universeName = onPremUniverse.getName();
     taskParams.clusters.add(defaultUniverse.getUniverseDetails().getPrimaryCluster());
     Cluster asyncCluster = new Cluster(ClusterType.ASYNC, userIntent);
     taskParams.clusters.add(asyncCluster);
     taskParams.clusterOperation = UniverseConfigureTaskParams.ClusterOperationType.CREATE;
     PlacementInfoUtil.updateUniverseDefinition(
-        taskParams, defaultCustomer.getCustomerId(), asyncCluster.uuid);
+        taskParams, defaultCustomer.getId(), asyncCluster.uuid);
     int iter = 1;
     for (NodeDetails node : taskParams.nodeDetailsSet) {
       node.cloudInfo.private_ip = "10.9.22." + iter;

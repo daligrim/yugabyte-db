@@ -18,14 +18,14 @@
 #include "yb/gutil/dynamic_annotations.h"
 #include "yb/tablet/running_transaction.h"
 
-#include "yb/util/flag_tags.h"
+#include "yb/util/flags.h"
 #include "yb/util/logging.h"
 #include "yb/util/monotime.h"
 #include "yb/util/status_log.h"
 
 using namespace std::literals;
 
-DEFINE_int64(apply_intents_task_injected_delay_ms, 0,
+DEFINE_UNKNOWN_int64(apply_intents_task_injected_delay_ms, 0,
              "Inject such delay before applying intents for large transactions. "
              "Could be used to throttle the apply speed.");
 
@@ -71,17 +71,12 @@ void ApplyIntentsTask::Run() {
       continue;
     }
 
-    auto result = applier_.ApplyIntents(apply_data_);
-    if (!result.ok()) {
-      LOG_WITH_PREFIX(DFATAL)
-          << "Failed to apply intents " << apply_data_.ToString() << ": " << result.status();
-      break;
-    }
+    auto apply_data = applier_.ApplyIntents(apply_data_);
 
-    transaction_->SetApplyData(*result);
-    VLOG_WITH_PREFIX(2) << "Performed next apply step: " << result->ToString();
+    transaction_->SetApplyData(apply_data);
+    VLOG_WITH_PREFIX(2) << "Performed next apply step: " << apply_data.ToString();
 
-    if (!result->active()) {
+    if (!apply_data.active()) {
       break;
     }
   }

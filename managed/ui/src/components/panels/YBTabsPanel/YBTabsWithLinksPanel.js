@@ -1,6 +1,6 @@
 // Copyright (c) YugaByte, Inc.
 
-import React, { Component } from 'react';
+import { Component } from 'react';
 import PropTypes from 'prop-types';
 import { withRouter } from 'react-router';
 import { Nav, NavItem, Tab } from 'react-bootstrap';
@@ -17,6 +17,7 @@ class YBTabsWithLinksPanel extends Component {
   };
 
   tabSelect = (selectedKey) => {
+    if(!selectedKey) return;
     const currentLocation = this.props.location;
     if (this.props.routePrefix) {
       currentLocation.pathname = this.props.routePrefix + selectedKey;
@@ -43,8 +44,7 @@ class YBTabsWithLinksPanel extends Component {
   render() {
     const { activeTab, defaultTab, children } = this.props;
     const activeTabKey = activeTab || this.queryTabHandler() || defaultTab;
-    const childTabs = (Array.isArray(children) ? children : [children])
-      .filter(child => child);
+    const childTabs = (Array.isArray(children) ? children : [children]).filter((child) => child);
     const links = childTabs.map((item) => (
       <NavItem
         key={item.props.eventKey}

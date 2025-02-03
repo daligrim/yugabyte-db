@@ -1,29 +1,30 @@
 ---
 title: Debezium and CDC in YugabyteDB
 linkTitle: Debezium
-description: Debezium is an open source distributed platform used to capture the changes in a database.
-beta: /preview/faq/general/#what-is-the-definition-of-the-beta-feature-tag
+description: Using Debezium for CDC in YugabyteDB.
+tags:
+  feature: early-access
 aliases:
   - /preview/integrations/cdc/
 menu:
-  preview:
+  preview_integrations:
     identifier: cdc-debezium
-    parent: integrations
+    parent: data-integration
     weight: 571
 type: docs
 ---
 
-Debezium is an open-source distributed platform used to capture the changes in a database.
+Debezium is an open-source distributed platform used to capture the changes in a database. The [YugabyteDB gRPC Connector](../../../develop/change-data-capture/using-yugabytedb-grpc-replication/) is based on the Debezium Connector, and captures row-level changes in a YugabyteDB database's schemas.
 
-## Get the Debezium connector for YugabyteDB
+## Get the YugabyteDB gRPC Connector
 
 Using Docker, you can get the connector from Quay:
 
 ```sh
-docker pull quay.io/yugabyte/debezium-connector:1.3.7-BETA
+docker pull quay.io/yugabyte/debezium-connector:latest
 ```
 
-If you want to build the connector image yourself, follow the steps in the [README for debezium-connector-yugabytedb](https://github.com/yugabyte/debezium/blob/final-connector-ybdb/debezium-connector-yugabytedb2/README.md).
+If you want to build the connector image yourself, follow the steps in the [README for debezium-connector-yugabytedb](https://github.com/yugabyte/debezium-connector-yugabytedb/blob/main/README.md).
 
 ## Run Debezium locally
 
@@ -32,13 +33,13 @@ Use the following steps to run change data capture (CDC) with Debezium on a loca
 1. Start Zookeeper.
 
     ```sh
-    docker run -it --rm --name zookeeper -p 2181:2181 -p 2888:2888 -p 3888:3888 debezium/zookeeper:1.7
+    docker run -it --rm --name zookeeper -p 2181:2181 -p 2888:2888 -p 3888:3888 debezium/zookeeper:1.9
     ```
 
 1. Start Kafka.
 
     ```sh
-    docker run -it --rm --name kafka -p 9092:9092 --link zookeeper:zookeeper debezium/kafka:1.7
+    docker run -it --rm --name kafka -p 9092:9092 --link zookeeper:zookeeper debezium/kafka:1.9
     ```
 
 1. Assign your computer's IP address to an environment variable.
@@ -69,7 +70,7 @@ Use the following steps to run change data capture (CDC) with Debezium on a loca
 
 ### Create a database stream ID
 
-[`yb-admin`](../../../admin/yb-admin#change-data-capture-cdc-commands) is equipped with commands to manage stream IDs for CDC. Use it to create a stream ID:
+[yb-admin](../../../admin/yb-admin#change-data-capture-cdc-commands) is equipped with commands to manage stream IDs for CDC. Use it to create a stream ID:
 
 ```sh
 ./bin/yb-admin --master_addresses ${IP}:7100 create_change_data_stream ysql.yugabyte
@@ -92,7 +93,7 @@ docker run -it --rm \
   -e OFFSET_STORAGE_TOPIC=my_connect_offsets \
   -e STATUS_STORAGE_TOPIC=my_connect_statuses \
   --link zookeeper:zookeeper --link kafka:kafka \
-  quay.io/yugabyte/debezium-connector:1.3.7-BETA
+  quay.io/yugabyte/debezium-connector:latest
 ```
 
 Deploy the configuration for the connector:
@@ -154,19 +155,21 @@ Do the following:
     }'
     ```
 
-For a list of all the configuration options provided with the Debezium YugabyteDB connector, see [Connector configuration properties](../../../explore/change-data-capture/debezium-connector-yugabytedb/#connector-configuration-properties).
+For a list of all the configuration options provided with the YugabyteDB gRPC Connector, see [Connector configuration properties](../../../develop/change-data-capture/using-yugabytedb-grpc-replication/debezium-connector-yugabytedb/#connector-configuration-properties).
 
-{{< warning title="Warning" >}}
+{{< tip title="TRUNCATE tables when CDC is enabled" >}}
 
-YugabyteDB's CDC implementation doesn't currently support DROP TABLE and TRUNCATE TABLE, and the behavior of these commands while streaming data from CDC is undefined. If you need to drop or truncate a table, delete the stream ID using [yb-admin](../../../admin/yb-admin/#change-data-capture-cdc-commands).
+By default, the YugabyteDB CDC implementation does not allow you to TRUNCATE a table while an active CDC stream is present on the namespace. To allow truncating tables while CDC is active, set the [enable_truncate_cdcsdk_table](../../../reference/configuration/yb-tserver/#enable-truncate-cdcsdk-table) flag to true.
 
-See [limitations](../../../explore/change-data-capture/#limitations) for more details on upcoming feature support.
-
-{{< /warning >}}
+{{< /tip >}}
 
 ### Start a Kafka Topic console consumer (optional)
 
 ```sh
-docker run -it --rm --name consumer --link zookeeper:zookeeper --link kafka:kafka debezium/kafka:1.7 \
+docker run -it --rm --name consumer --link zookeeper:zookeeper --link kafka:kafka debezium/kafka:1.9 \
 watch-topic -a dbserver1.public.test
 ```
+
+## Other examples
+
+To explore other examples on the usage of CDC, refer to [CDC examples](https://github.com/yugabyte/cdc-examples).

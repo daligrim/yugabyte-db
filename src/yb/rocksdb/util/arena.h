@@ -25,8 +25,6 @@
 // it allocates a block with pre-defined block size. For a request of big
 // size, it uses malloc to directly get the requested size.
 
-#ifndef YB_ROCKSDB_UTIL_ARENA_H
-#define YB_ROCKSDB_UTIL_ARENA_H
 
 #pragma once
 #ifndef OS_WIN
@@ -85,6 +83,12 @@ class Arena : public Allocator {
   // Otherwise, the error message will be printed out to stderr directly.
   char* AllocateAligned(size_t bytes, size_t huge_page_size = 0,
                         Logger* logger = nullptr) override;
+
+  template <class T, class... Args>
+  T* NewObject(Args&&... args) {
+    void *mem = AllocateAligned(sizeof(T));
+    return new (mem) T(std::forward<Args>(args)...);
+  }
 
   // Returns an estimate of the total memory usage of data allocated
   // by the arena (exclude the space allocated but not yet used for future
@@ -164,5 +168,3 @@ inline char* Arena::Allocate(size_t bytes) {
 extern size_t OptimizeBlockSize(size_t block_size);
 
 }  // namespace rocksdb
-
-#endif // YB_ROCKSDB_UTIL_ARENA_H

@@ -82,9 +82,6 @@ using namespace std::placeholders;
 namespace yb {
 
 using client::YBClient;
-using client::YBClientBuilder;
-using client::YBTable;
-using client::YBTableName;
 
 class ClientStressTest : public YBMiniClusterTestBase<ExternalMiniCluster> {
  public:
@@ -272,8 +269,11 @@ class ClientStressTest_LowMemory : public ClientStressTest {
     const int kMemLimitBytes = RegularBuildVsSanitizers(64_MB, 2_MB);
     ExternalMiniClusterOptions opts;
 
-    opts.extra_tserver_flags = { Substitute("--memory_limit_hard_bytes=$0", kMemLimitBytes),
-                                 "--memory_limit_soft_percentage=0"s };
+    opts.extra_tserver_flags = {
+        Substitute("--memory_limit_hard_bytes=$0", kMemLimitBytes),
+        "--memory_limit_soft_percentage=0"s};
+    // Turn off tablet guardrail otherwise we fail due to insufficient memory for tablets:
+    opts.extra_master_flags = {"--tablet_replicas_per_gib_limit=0"s};
 
     opts.num_tablet_servers = 3;
     return opts;
@@ -362,7 +362,7 @@ TEST_F_EX(ClientStressTest, MasterQueueFull, ClientStressTestSmallQueueMultiMast
     item.client = ASSERT_RESULT(cluster_->CreateClient());
     item.table = std::make_unique<client::TableHandle>();
     ASSERT_OK(item.table->Open(TestWorkloadOptions::kDefaultTableName, item.client.get()));
-    item.session = std::make_shared<client::YBSession>(item.client.get());
+    item.session = item.client.get()->NewSession(60s);
     items.push_back(std::move(item));
   }
 
@@ -393,7 +393,8 @@ Result<size_t> GetPeakRootConsumption(const ExternalTabletServer& ts) {
   EXPECT_OK(c.FetchURL(Format("http://$0/mem-trackers?raw=1", ts.bound_http_hostport().ToString()),
                        &buf));
   static const std::regex re(
-      R"#(\s*<td>root</td><td>([0-9.]+\w)(\s+\([0-9.]+\w\))?</td>)#"
+      R"#(\s*<td><span class=\"toggle collapse\"></span>root</td>)#"
+      R"#(<td>([0-9.]+\w)(\s+\([0-9.]+\w\))?</td>)#"
       R"#(<td>([0-9.]+\w)</td><td>([0-9.]+\w)</td>\s*)#");
   const auto str = buf.ToString();
   std::smatch match;
@@ -570,7 +571,7 @@ TEST_F_EX(ClientStressTest, IncreaseReplicationFactorUnderLoad, RF1ClientStressT
 
   ASSERT_OK(cluster_->AddTabletServer(/* start_cql_proxy= */ false, {"--time_source=skewed,-500"}));
 
-  master::ReplicationInfoPB replication_info;
+  ReplicationInfoPB replication_info;
   replication_info.mutable_live_replicas()->set_num_replicas(2);
   ASSERT_OK(work.client().SetReplicationInfo(replication_info));
 

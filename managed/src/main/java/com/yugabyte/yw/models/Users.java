@@ -2,40 +2,46 @@
 
 package com.yugabyte.yw.models;
 
+import static com.yugabyte.yw.common.Util.NULL_UUID;
 import static io.swagger.annotations.ApiModelProperty.AccessMode.READ_ONLY;
 import static play.mvc.Http.Status.BAD_REQUEST;
+import static play.mvc.Http.Status.UNAUTHORIZED;
 
 import com.fasterxml.jackson.annotation.JsonFormat;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.yugabyte.yw.common.PlatformServiceException;
+import com.yugabyte.yw.common.concurrent.KeyLock;
+import com.yugabyte.yw.common.config.GlobalConfKeys;
+import com.yugabyte.yw.common.config.RuntimeConfGetter;
 import com.yugabyte.yw.common.encryption.HashBuilder;
 import com.yugabyte.yw.common.encryption.bc.BcOpenBsdHasher;
-import com.yugabyte.yw.common.config.RuntimeConfigFactory;
-
+import com.yugabyte.yw.common.inject.StaticInjectorHolder;
 import io.ebean.DuplicateKeyException;
 import io.ebean.Finder;
 import io.ebean.Model;
+import io.ebean.annotation.DbArray;
 import io.ebean.annotation.Encrypted;
 import io.ebean.annotation.EnumValue;
+import io.ebean.annotation.Transactional;
 import io.swagger.annotations.ApiModel;
 import io.swagger.annotations.ApiModelProperty;
+import io.swagger.annotations.ApiModelProperty.AccessMode;
+import jakarta.persistence.Entity;
+import jakarta.persistence.Id;
 import java.math.BigInteger;
 import java.security.SecureRandom;
+import java.time.Duration;
 import java.util.Calendar;
 import java.util.Date;
-import java.time.Duration;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
-import javax.persistence.Column;
-import javax.persistence.Entity;
-import javax.persistence.EnumType;
-import javax.persistence.Enumerated;
-import javax.persistence.Id;
-import javax.persistence.Transient;
-
+import lombok.Getter;
+import lombok.RequiredArgsConstructor;
+import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
-
 import org.joda.time.DateTime;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -45,25 +51,32 @@ import play.mvc.Http.Status;
 @Slf4j
 @Entity
 @ApiModel(description = "A user associated with a customer")
+@Getter
+@Setter
 public class Users extends Model {
 
   public static final Logger LOG = LoggerFactory.getLogger(Users.class);
 
   private static final HashBuilder hasher = new BcOpenBsdHasher();
 
+  private static final KeyLock<UUID> usersLock = new KeyLock<>();
+
   /** These are the available user roles */
   public enum Role {
-    @EnumValue("Admin")
-    Admin,
+    @EnumValue("ConnectOnly")
+    ConnectOnly,
 
     @EnumValue("ReadOnly")
     ReadOnly,
 
-    @EnumValue("SuperAdmin")
-    SuperAdmin,
-
     @EnumValue("BackupAdmin")
-    BackupAdmin;
+    BackupAdmin,
+
+    @EnumValue("Admin")
+    Admin,
+
+    @EnumValue("SuperAdmin")
+    SuperAdmin;
 
     public String getFeaturesFile() {
       switch (this) {
@@ -75,9 +88,27 @@ public class Users extends Model {
           return null;
         case BackupAdmin:
           return "backupAdminFeatureConfig.json";
+        case ConnectOnly:
+          return "connectOnlyFeatureConfig.json";
         default:
           return null;
       }
+    }
+
+    public static Role union(Role r1, Role r2) {
+      if (r1 == null) {
+        return r2;
+      }
+
+      if (r2 == null) {
+        return r1;
+      }
+
+      if (r1.compareTo(r2) < 0) {
+        return r2;
+      }
+
+      return r1;
     }
   }
 
@@ -86,133 +117,91 @@ public class Users extends Model {
     local,
 
     @EnumValue("ldap")
-    ldap;
+    ldap,
+
+    @EnumValue("oidc")
+    oidc;
   }
 
   // A globally unique UUID for the Users.
   @Id
-  @Column(nullable = false, unique = true)
   @ApiModelProperty(value = "User UUID", accessMode = READ_ONLY)
-  public UUID uuid = UUID.randomUUID();
+  private UUID uuid = UUID.randomUUID();
 
-  @Column(nullable = false)
   @ApiModelProperty(value = "Customer UUID", accessMode = READ_ONLY)
-  public UUID customerUUID;
+  private UUID customerUUID;
 
-  public void setCustomerUuid(UUID id) {
-    this.customerUUID = id;
-  }
-
-  @Column(length = 256, unique = true, nullable = false)
   @Constraints.Required
   @Constraints.Email
   @ApiModelProperty(
       value = "User email address",
       example = "username1@example.com",
       required = true)
-  public String email;
-
-  public String getEmail() {
-    return this.email;
-  }
+  private String email;
 
   @JsonIgnore
-  @Column(length = 256, nullable = false)
   @ApiModelProperty(
       value = "User password hash",
       example = "$2y$10$ABccHWa1DO2VhcF1Ea2L7eOBZRhktsJWbFaB/aEjLfpaplDBIJ8K6")
-  public String passwordHash;
+  private String passwordHash;
 
   public void setPassword(String password) {
-    this.passwordHash = Users.hasher.hash(password);
+    this.setPasswordHash(Users.hasher.hash(password));
   }
 
-  @Column(nullable = false)
-  @JsonFormat(shape = JsonFormat.Shape.STRING, pattern = "yyyy-MM-dd'T'HH:mm:ssXXX")
+  @JsonFormat(shape = JsonFormat.Shape.STRING, pattern = "yyyy-MM-dd'T'HH:mm:ss'Z'")
   @ApiModelProperty(
       value = "User creation date",
-      example = "2021-06-17T15:00:05-04:00",
+      example = "2022-12-12T13:07:18Z",
       accessMode = READ_ONLY)
-  public Date creationDate;
+  private Date creationDate;
 
-  @Encrypted private String authToken;
+  @Encrypted @JsonIgnore private String authToken;
 
-  @Column(nullable = true)
+  @JsonFormat(shape = JsonFormat.Shape.STRING, pattern = "yyyy-MM-dd'T'HH:mm:ss'Z'")
   @ApiModelProperty(
-      value = "API token creation date",
-      example = "1624255408795",
+      value = "UI session token creation date",
+      example = "2021-06-17T15:00:05Z",
       accessMode = READ_ONLY)
   private Date authTokenIssueDate;
 
+  @ApiModelProperty(value = "Hash of API Token")
   @JsonIgnore
-  @Column(nullable = true)
-  @ApiModelProperty(value = "User API token", accessMode = READ_ONLY)
   private String apiToken;
 
-  @Column(nullable = true)
+  @JsonIgnore private Long apiTokenVersion = 0L;
+
   @ApiModelProperty(value = "User timezone")
   private String timezone;
 
   // The role of the user.
-  @Column(nullable = false)
-  @Enumerated(EnumType.STRING)
   @ApiModelProperty(value = "User role")
   private Role role;
 
-  public Role getRole() {
-    return this.role;
-  }
-
-  public void setRole(Role role) {
-    this.role = role;
-  }
-
-  @Column(nullable = false)
   @ApiModelProperty(value = "True if the user is the primary user")
   private boolean isPrimary;
 
-  public boolean getIsPrimary() {
-    return this.isPrimary;
-  }
-
-  public void setIsPrimary(boolean isPrimary) {
-    this.isPrimary = isPrimary;
-  }
-
-  @Column(nullable = false)
   @ApiModelProperty(value = "User Type")
-  public UserType userType;
+  private UserType userType;
 
-  public void setUserType(UserType userType) {
-    this.userType = userType;
-  }
-
-  public UserType getUserType() {
-    return this.userType;
-  }
-
-  @Column(nullable = false)
   @ApiModelProperty(value = "LDAP Specified Role")
-  public boolean ldapSpecifiedRole;
+  private boolean ldapSpecifiedRole;
 
-  public void setLdapSpecifiedRole(boolean ldapSpecifiedRole) {
-    this.ldapSpecifiedRole = ldapSpecifiedRole;
+  @Encrypted
+  @Setter
+  @ApiModelProperty(accessMode = AccessMode.READ_ONLY)
+  private String oidcJwtAuthToken;
+
+  @DbArray(name = "group_memberships")
+  private Set<UUID> groupMemberships = new HashSet<>();
+
+  public String getOidcJwtAuthToken() {
+    return null;
   }
 
-  public boolean getLdapSpecifiedRole() {
-    return this.ldapSpecifiedRole;
-  }
-
-  public Date getAuthTokenIssueDate() {
-    return this.authTokenIssueDate;
-  }
-
-  public String getTimezone() {
-    return this.timezone;
-  }
-
-  public void setTimezone(String timezone) {
-    this.timezone = timezone;
+  @JsonIgnore
+  public String getUnmakedOidcJwtAuthToken() {
+    return oidcJwtAuthToken;
   }
 
   public static final Finder<UUID, Users> find = new Finder<UUID, Users>(Users.class) {};
@@ -230,12 +219,26 @@ public class Users extends Model {
     return user;
   }
 
+  public static Users getOrBadRequest(UUID customerUUID, UUID userUUID) {
+    Users user = find.query().where().idEq(userUUID).eq("customer_uuid", customerUUID).findOne();
+    if (user == null) {
+      throw new PlatformServiceException(
+          BAD_REQUEST,
+          String.format("Invalid User UUID: '%s' for customer: '%s'.", userUUID, customerUUID));
+    }
+    return user;
+  }
+
   public static List<Users> getAll(UUID customerUUID) {
     return find.query().where().eq("customer_uuid", customerUUID).findList();
   }
 
+  public static List<Users> getAll() {
+    return find.query().where().findList();
+  }
+
   public Users() {
-    this.creationDate = new Date();
+    this.setCreationDate(new Date());
   }
 
   /**
@@ -248,7 +251,26 @@ public class Users extends Model {
   public static Users create(
       String email, String password, Role role, UUID customerUUID, boolean isPrimary) {
     try {
-      return createInternal(email, password, role, customerUUID, isPrimary);
+      return createInternal(email, password, role, customerUUID, isPrimary, UserType.local);
+    } catch (DuplicateKeyException pe) {
+      throw new PlatformServiceException(Status.CONFLICT, "User already exists");
+    }
+  }
+
+  /**
+   * Create new Users, we encrypt the password before we store it in the DB
+   *
+   * @return Newly Created Users
+   */
+  public static Users create(
+      String email,
+      String password,
+      Role role,
+      UUID customerUUID,
+      boolean isPrimary,
+      UserType userType) {
+    try {
+      return createInternal(email, password, role, customerUUID, isPrimary, userType);
     } catch (DuplicateKeyException pe) {
       throw new PlatformServiceException(Status.CONFLICT, "User already exists");
     }
@@ -262,22 +284,27 @@ public class Users extends Model {
    */
   public static Users createPrimary(String email, String password, Role role, UUID customerUUID) {
     try {
-      return createInternal(email, password, role, customerUUID, true);
+      return createInternal(email, password, role, customerUUID, true, UserType.local);
     } catch (DuplicateKeyException pe) {
       throw new PlatformServiceException(Status.CONFLICT, "Customer already registered.");
     }
   }
 
   static Users createInternal(
-      String email, String password, Role role, UUID customerUUID, boolean isPrimary) {
+      String email,
+      String password,
+      Role role,
+      UUID customerUUID,
+      boolean isPrimary,
+      UserType userType) {
     Users users = new Users();
-    users.email = email.toLowerCase();
+    users.setEmail(email.toLowerCase());
     users.setPassword(password);
-    users.setCustomerUuid(customerUUID);
-    users.creationDate = new Date();
-    users.role = role;
-    users.isPrimary = isPrimary;
-    users.setUserType(UserType.local);
+    users.setCustomerUUID(customerUUID);
+    users.setCreationDate(new Date());
+    users.setRole(role);
+    users.setPrimary(isPrimary);
+    users.setUserType(userType);
     users.setLdapSpecifiedRole(false);
     users.save();
     return users;
@@ -291,11 +318,36 @@ public class Users extends Model {
    */
   public static void deleteUser(String email) {
     Users userToDelete = Users.find.query().where().eq("email", email).findOne();
-    if (userToDelete != null && userToDelete.userType.equals(UserType.ldap)) {
-      log.info("Deleting user id {} with email address {}", userToDelete.uuid, userToDelete.email);
+    if (userToDelete != null && userToDelete.getUserType().equals(UserType.ldap)) {
+      log.info(
+          "Deleting user id {} with email address {}",
+          userToDelete.getUuid(),
+          userToDelete.getEmail());
       userToDelete.delete();
     }
     return;
+  }
+
+  /** Wrapper around save to make sure principal entity is created. */
+  @Transactional
+  @Override
+  public void save() {
+    super.save();
+    Principal principal = Principal.get(this.uuid);
+    if (principal == null) {
+      log.info("Adding Principal entry for user with email: " + this.email);
+      new Principal(this).save();
+    }
+  }
+
+  /** Wrapper around delete to make sure principal entity is deleted. */
+  @Transactional
+  @Override
+  public boolean delete() {
+    log.info("Deleting Principal entry for user with email: " + this.email);
+    Principal principal = Principal.getOrBadRequest(this.uuid);
+    principal.delete();
+    return super.delete();
   }
 
   /**
@@ -308,7 +360,7 @@ public class Users extends Model {
   public static Users authWithPassword(String email, String password) {
     Users users = Users.find.query().where().eq("email", email).findOne();
 
-    if (users != null && Users.hasher.isValid(password, users.passwordHash)) {
+    if (users != null && Users.hasher.isValid(password, users.getPasswordHash())) {
       return users;
     } else {
       return null;
@@ -349,7 +401,7 @@ public class Users extends Model {
     return authToken;
   }
 
-  public void setAuthToken(String authToken) {
+  public void updateAuthToken(String authToken) {
     this.authToken = authToken;
     save();
   }
@@ -360,21 +412,31 @@ public class Users extends Model {
    * @return apiToken
    */
   public String upsertApiToken() {
-    apiToken = UUID.randomUUID().toString();
-    save();
-    return apiToken;
+    return upsertApiToken(apiTokenVersion);
   }
 
-  /**
-   * Get current apiToken.
-   *
-   * @return apiToken
-   */
-  public String getApiToken() {
-    if (apiToken == null) {
-      return null;
+  public String upsertApiToken(Long version) {
+    String apiTokenFormatVersion = "3";
+    UUID uuidToLock = uuid != null ? uuid : NULL_UUID;
+    usersLock.acquireLock(uuidToLock);
+    try {
+      if (version != null
+          && version != -1
+          && apiTokenVersion != null
+          && !version.equals(apiTokenVersion)) {
+        throw new PlatformServiceException(BAD_REQUEST, "API token version has changed");
+      }
+      String apiTokenUnhashed = UUID.randomUUID().toString();
+      apiToken = Users.hasher.hash(apiTokenUnhashed);
+
+      apiTokenVersion = apiTokenVersion == null ? 1L : apiTokenVersion + 1;
+      save();
+      // new format of api token = apiTokenFormatVersion$userUUID$apiTokenUnhashed
+      return apiTokenFormatVersion + "." + uuid + "." + apiTokenUnhashed;
+
+    } finally {
+      usersLock.releaseLock(uuidToLock);
     }
-    return apiToken;
   }
 
   /**
@@ -423,9 +485,65 @@ public class Users extends Model {
       return null;
     }
 
+    // Supporting the 3 formats of api token
+    // 1. apiToken (older format)
+    // 2. apiTokenFormatVersion$userUUID$apiToken (version 2 $ seperated format)
+    // 3. apiTokenFormatVersion.userUUID.apiToken (version 3 . seperated format)
+    // The 3rd format is better for shell based clients because dot is easier to escape than dollar
+    // The first format would lead to performance degradation in the case of more than 10 users
+    // Recommended to reissue the token (which will follow the third format)
+
+    RuntimeConfGetter runtimeConfGetter =
+        StaticInjectorHolder.injector().instanceOf(RuntimeConfGetter.class);
+    boolean disableV1APIToken = runtimeConfGetter.getGlobalConf(GlobalConfKeys.disableV1APIToken);
     try {
-      return find.query().where().eq("apiToken", apiToken).findOne();
+      boolean isOldFormat = true;
+      String regexSeparator = "";
+      if (apiToken.startsWith("2$", 0)) {
+        regexSeparator = "\\$";
+        isOldFormat = false;
+      } else if (apiToken.startsWith("3.", 0)) {
+        regexSeparator = "\\.";
+        isOldFormat = false;
+      }
+      if (!isOldFormat) {
+        // to authenticate new format of api token = apiTokenFormatVersion.userUUID.apiTokenUnhashed
+        String[] parts = apiToken.split(regexSeparator);
+        UUID userUUID = UUID.fromString(parts[1]);
+        String apiTokenUnhashed = parts[2];
+        Users userWithToken = find.query().where().eq("uuid", userUUID).findOne();
+        if (userWithToken != null) {
+          if (Users.hasher.isValid(apiTokenUnhashed, userWithToken.getApiToken())) {
+            return userWithToken;
+          }
+        }
+      } else {
+        if (disableV1APIToken) {
+          String errMessage =
+              "API Token version 1 is disabled. Please reissue the token. To allow this version of"
+                  + " token, please set yb.user.disable_v1_api_token config to false.";
+          throw new PlatformServiceException(UNAUTHORIZED, errMessage);
+        } else {
+          // to authenticate old format of api token with no seperator
+          LOG.warn("Using older API token format. Renew to improve performance.");
+          List<Users> usersList = find.query().where().isNotNull("apiToken").findList();
+          long startTime = System.currentTimeMillis();
+          for (Users user : usersList) {
+            if (Users.hasher.isValid(apiToken, user.getApiToken())) {
+              LOG.info(
+                  "Authentication using API token. Completed time: {} ms",
+                  System.currentTimeMillis() - startTime);
+              return user;
+            }
+          }
+          LOG.info(
+              "Authentication using API token. Completed time: {} ms",
+              System.currentTimeMillis() - startTime);
+        }
+      }
+      return null;
     } catch (Exception e) {
+      LOG.error("Error while authenticating API token", e);
       return null;
     }
   }
@@ -437,12 +555,23 @@ public class Users extends Model {
     save();
   }
 
-  public static String getAllEmailsForCustomer(UUID customerUUID) {
+  public static String getAllEmailDomainsForCustomer(UUID customerUUID) {
     List<Users> users = Users.getAll(customerUUID);
-    return users.stream().map(user -> user.email).collect(Collectors.joining(","));
+    return users.stream()
+        .map(user -> user.getEmail().substring(user.getEmail().indexOf("@") + 1))
+        .collect(Collectors.toSet())
+        .stream()
+        .collect(Collectors.joining(","));
   }
 
   public static List<Users> getAllReadOnly() {
     return find.query().where().eq("role", Role.ReadOnly).findList();
+  }
+
+  @RequiredArgsConstructor
+  public static class UserOIDCAuthToken {
+
+    @ApiModelProperty(value = "User OIDC Auth token")
+    public final String oidcAuthToken;
   }
 }

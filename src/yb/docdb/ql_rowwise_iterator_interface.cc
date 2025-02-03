@@ -13,29 +13,46 @@
 
 #include "yb/docdb/ql_rowwise_iterator_interface.h"
 
+#include "yb/common/hybrid_time.h"
+
 #include "yb/util/result.h"
 
 namespace yb {
 namespace docdb {
 
-Status YQLRowwiseIteratorIf::GetNextReadSubDocKey(SubDocKey* sub_doc_key) const {
+Status YQLRowwiseIteratorIf::GetNextReadSubDocKey(dockv::SubDocKey* sub_doc_key) {
   return Status::OK();
 }
 
-Result<Slice> YQLRowwiseIteratorIf::GetTupleId() const {
-  return STATUS(NotSupported, "This iterator does not provide tuple id");
+Slice YQLRowwiseIteratorIf::GetTupleId() const {
+  LOG(DFATAL) << "This iterator does not provide tuple id";
+  return Slice();
 }
 
-Result<bool> YQLRowwiseIteratorIf::SeekTuple(const Slice& tuple_id) {
-  return STATUS(NotSupported, "This iterator cannot seek by tuple id");
+Slice YQLRowwiseIteratorIf::GetRowKey() const {
+  LOG(DFATAL) << "This iterator cannot return row key";
+  return Slice();
 }
 
-Status YQLRowwiseIteratorIf::NextRow(const Schema& projection, QLTableRow* table_row) {
-  return DoNextRow(projection, table_row);
+void YQLRowwiseIteratorIf::SeekTuple(Slice tuple_id) {
+  LOG(DFATAL) << "This iterator cannot seek by tuple id";
 }
 
-Status YQLRowwiseIteratorIf::NextRow(QLTableRow* table_row) {
-  return DoNextRow(schema(), table_row);
+void YQLRowwiseIteratorIf::SeekToDocKeyPrefix(Slice doc_key_prefix) {
+  LOG(DFATAL) << "This iterator cannot seek to doc key prefix";
+}
+
+
+HybridTime YQLRowwiseIteratorIf::TEST_MaxSeenHt() {
+  return HybridTime::kInvalid;
+}
+
+Result<bool> YQLRowwiseIteratorIf::FetchTuple(Slice tuple_id, qlexpr::QLTableRow* row) {
+  return STATUS(NotSupported, "This iterator cannot fetch tuple id");
+}
+
+Result<Slice> YQLRowwiseIteratorIf::FetchDirect(Slice key) {
+  return STATUS(NotSupported, "FetchDirect not supported");
 }
 
 }  // namespace docdb

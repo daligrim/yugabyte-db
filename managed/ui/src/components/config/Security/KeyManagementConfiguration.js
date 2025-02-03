@@ -1,7 +1,7 @@
 // Copyright (c) YugaByte, Inc.
 
 import React, { Component, Fragment } from 'react';
-import { Row, Col } from 'react-bootstrap';
+import { Row, Col, OverlayTrigger, Tooltip } from 'react-bootstrap';
 import { Field, Formik } from 'formik';
 import { toast } from 'react-toastify';
 import {
@@ -17,15 +17,18 @@ import { ListKeyManagementConfigurations } from './ListKeyManagementConfiguratio
 import * as Yup from 'yup';
 
 import {
-  regionsData,
+  AWS_REGIONS,
   GCP_KMS_REGIONS,
   GCP_KMS_REGIONS_FLATTENED
 } from '../PublicCloud/views/providerRegionsData';
 import { readUploadedFile } from '../../../utils/UniverseUtils';
 import { change } from 'redux-form';
 import YBInfoTip from '../../common/descriptors/YBInfoTip';
+import { isRbacEnabled } from '../../../redesign/features/rbac/common/RbacUtils';
+import { getYBAHost } from '../../configRedesign/providerRedesign/utils';
+import { YBAHost } from '../../../redesign/helpers/constants';
 
-const awsRegionList = regionsData.map((region, index) => {
+const awsRegionList = AWS_REGIONS.map((region, index) => {
   return {
     value: region.destVpcRegion,
     label: region.destVpcRegion
@@ -43,7 +46,7 @@ let kmsConfigTypes = [
 ];
 
 //GCP KMS
-const PROTECTION_LEVELS = [
+export const PROTECTION_LEVELS = [
   { label: 'HSM (Hardware)', value: 'HSM' },
   { label: 'Software', value: 'SOFTWARE' }
 ];
@@ -70,10 +73,25 @@ const DEFAULT_FORM_DATA = {
   AZU_KEY_SIZE: DEFAULT_KEY_SIZE
 };
 
+//HCP KMS
+const HcpAuthType = {
+  Token: 'TOKEN',
+  AppRole: 'APPROLE'
+};
+
+export const HCP_AUTHENTICATION_TYPE = [
+  { label: 'Token', value: HcpAuthType.Token },
+  { label: 'AppRole', value: HcpAuthType.AppRole }
+];
+
+const DEFAULT_HCP_AUTHENTICATION_TYPE = HCP_AUTHENTICATION_TYPE[0];
+
 class KeyManagementConfiguration extends Component {
   state = {
     listView: false,
     enabledIAMProfile: false,
+    enabledMI: false,
+    hcpAuthType: DEFAULT_HCP_AUTHENTICATION_TYPE,
     useCmkPolicy: false,
     mode: 'NEW',
     formData: DEFAULT_FORM_DATA
@@ -84,16 +102,27 @@ class KeyManagementConfiguration extends Component {
     return mode === 'EDIT';
   };
 
+  isTokenMode = () => {
+    const { hcpAuthType } = this.state;
+    return hcpAuthType.value === HcpAuthType.Token;
+  }
+
+  isAppRoleMode = () => {
+    const { hcpAuthType } = this.state;
+    return hcpAuthType.value === HcpAuthType.AppRole;
+  }
+
   updateFormField = (field, value) => {
     this.props.dispatch(change('kmsProviderConfigForm', field, value));
   };
 
   componentDidMount() {
     this.props.fetchKMSConfigList().then((response) => {
-      if (response.payload?.data?.length) {
+      if (isRbacEnabled() || response.payload?.data?.length) {
         this.setState({ listView: true });
       }
     });
+    this.props.fetchHostInfo();
     this._ismounted = true;
   }
 
@@ -141,7 +170,7 @@ class KeyManagementConfiguration extends Component {
       const updateConfig = (data) => {
         updateKMSConfig(values.configUUID, data).then((res) => {
           if (res) {
-            this.setState({ listView: true, mode: 'NEW', formData: DEFAULT_FORM_DATA }, () => {
+            this.setState({ listView: true, mode: 'NEW', hcpAuthType: DEFAULT_HCP_AUTHENTICATION_TYPE, formData: DEFAULT_FORM_DATA }, () => {
               this.monitorTaskStatus(res.payload.data.taskUUID, mode);
             });
           }
@@ -171,7 +200,13 @@ class KeyManagementConfiguration extends Component {
           break;
         case 'HASHICORP':
           data['HC_VAULT_ADDRESS'] = values.HC_VAULT_ADDRESS;
-          if (isFieldModified('HC_VAULT_TOKEN')) data['HC_VAULT_TOKEN'] = values.HC_VAULT_TOKEN;
+          if (this.isTokenMode()) {
+            if (isFieldModified('HC_VAULT_TOKEN')) data['HC_VAULT_TOKEN'] = values.HC_VAULT_TOKEN;
+          } else if (this.isAppRoleMode()) {
+            if (isFieldModified('HC_VAULT_ROLE_ID')) data['HC_VAULT_ROLE_ID'] = values.HC_VAULT_ROLE_ID;
+            if (isFieldModified('HC_VAULT_SECRET_ID')) data['HC_VAULT_SECRET_ID'] = values.HC_VAULT_SECRET_ID;
+            if (isFieldModified('HC_VAULT_AUTH_NAMESPACE')) data['HC_VAULT_AUTH_NAMESPACE'] = values.HC_VAULT_AUTH_NAMESPACE;
+          }
           break;
         default:
         case 'SMARTKEY':
@@ -195,7 +230,10 @@ class KeyManagementConfiguration extends Component {
         case 'AZU':
           if (isFieldModified('CLIENT_ID')) data['CLIENT_ID'] = values.CLIENT_ID;
 
-          if (isFieldModified('CLIENT_SECRET')) data['CLIENT_SECRET'] = values.CLIENT_SECRET;
+          if (!this.state.enabledMI) {
+            if (isFieldModified('CLIENT_SECRET'))
+              data['CLIENT_SECRET'] = values.CLIENT_SECRET;
+          }
 
           if (isFieldModified('TENANT_ID')) data['TENANT_ID'] = values.TENANT_ID;
 
@@ -216,7 +254,7 @@ class KeyManagementConfiguration extends Component {
       const createConfig = (data) => {
         setKMSConfig(kmsProvider.value, data).then((res) => {
           if (res) {
-            this.setState({ listView: true }, () => {
+            this.setState({ listView: true, hcpAuthType: DEFAULT_HCP_AUTHENTICATION_TYPE }, () => {
               this.monitorTaskStatus(res.payload.data.taskUUID, mode);
             });
           }
@@ -245,7 +283,16 @@ class KeyManagementConfiguration extends Component {
           break;
         case 'HASHICORP':
           data['HC_VAULT_ADDRESS'] = values.HC_VAULT_ADDRESS;
-          data['HC_VAULT_TOKEN'] = values.HC_VAULT_TOKEN;
+          if (this.isTokenMode()) {
+            data['HC_VAULT_TOKEN'] = values.HC_VAULT_TOKEN;
+          } else if (this.isAppRoleMode()) {
+            data['HC_VAULT_ROLE_ID'] = values.HC_VAULT_ROLE_ID;
+            data['HC_VAULT_SECRET_ID'] = values.HC_VAULT_SECRET_ID;
+            data['HC_VAULT_AUTH_NAMESPACE'] = values.HC_VAULT_AUTH_NAMESPACE;
+          }
+          data['HC_VAULT_KEY_NAME'] = values.HC_VAULT_KEY_NAME
+            ? values.HC_VAULT_KEY_NAME
+            : 'key_yugabyte';
           data['HC_VAULT_MOUNT_PATH'] = values.HC_VAULT_MOUNT_PATH
             ? values.HC_VAULT_MOUNT_PATH
             : 'transit/';
@@ -279,7 +326,9 @@ class KeyManagementConfiguration extends Component {
           break;
         case 'AZU':
           data['CLIENT_ID'] = values.CLIENT_ID;
-          data['CLIENT_SECRET'] = values.CLIENT_SECRET;
+          if (!this.state.enabledMI) {
+            data['CLIENT_SECRET'] = values.CLIENT_SECRET;
+          }
           data['TENANT_ID'] = values.TENANT_ID;
           data['AZU_VAULT_URL'] = values.AZU_VAULT_URL;
           data['AZU_KEY_NAME'] = values.AZU_KEY_NAME;
@@ -325,7 +374,8 @@ class KeyManagementConfiguration extends Component {
     );
   };
 
-  getAWSForm = () => {
+  getAWSForm = (values) => {
+    const { hostInfo } = this.props;
     const isEdit = this.isEditMode();
     return (
       <Fragment>
@@ -337,6 +387,7 @@ class KeyManagementConfiguration extends Component {
             <Field
               name={'enableIAMProfile'}
               component={YBCheckBox}
+              disabled={hostInfo === undefined || getYBAHost(hostInfo) !== YBAHost.AWS}
               checkState={this.state.enabledIAMProfile ? true : false}
               input={{
                 onChange: () => this.setState({ enabledIAMProfile: !this.state.enabledIAMProfile })
@@ -413,6 +464,7 @@ class KeyManagementConfiguration extends Component {
               component={YBFormInput}
               placeholder={'CMK ID'}
               className={'kube-provider-input-field'}
+              disabled={isEdit}
             />
           </Col>
           <Col lg={1} className="config-zone-tooltip">
@@ -424,7 +476,7 @@ class KeyManagementConfiguration extends Component {
         </Row>
         <Row className="kms-endpoint-row" key={'kms-endpoint-field'}>
           <Col lg={3}>
-            <div className="form-item-custom-label">AWS KMS Endpoint</div>
+            <div className="form-item-custom-label">AWS KMS Endpoint (Optional)</div>
           </Col>
           <Col lg={7}>
             <Field
@@ -435,25 +487,44 @@ class KeyManagementConfiguration extends Component {
             />
           </Col>
           <Col lg={1} className="config-zone-tooltip">
-            <YBInfoTip title="AWS KMS Endpoint" content="Enter your AWS KMS Endpoint." />
+            <YBInfoTip title="AWS KMS Endpoint (Optional)" content="Enter your AWS KMS Endpoint." />
           </Col>
         </Row>
-        <Row>
-          <div className={'bottom-form-field'}>
-            <Field
-              component={YBFormDropZone}
-              name={'cmkPolicyContent'}
-              title={'Upload CMK Policy'}
-              className="upload-file-button"
-            />
-          </div>
-        </Row>
+        {!isEdit && (
+          <Row>
+            <div className={'bottom-form-field'}>
+              <OverlayTrigger
+                placement="top"
+                overlay={
+                  !!values.cmk_id ? (
+                    <Tooltip className="high-index">
+                      Custom policy file is not needed when Customer Master Key ID is specified.
+                    </Tooltip>
+                  ) : (
+                    <></>
+                  )
+                }
+              >
+                <div>
+                  <Field
+                    component={YBFormDropZone}
+                    name={'cmkPolicyContent'}
+                    title={'Upload CMK Policy'}
+                    disabled={!!values.cmk_id}
+                  />
+                </div>
+              </OverlayTrigger>
+            </div>
+          </Row>
+        )}
       </Fragment>
     );
   };
 
   getHCVaultForm = () => {
     const isEdit = this.isEditMode();
+    const isToken = this.isTokenMode();
+    const isAppRole = this.isAppRoleMode();
     return (
       <Fragment>
         <Row className="config-provider-row" key={'v-url-field'}>
@@ -466,6 +537,7 @@ class KeyManagementConfiguration extends Component {
               component={YBFormInput}
               placeholder={''}
               className={'kube-provider-input-field'}
+              disabled={isEdit}
             />
           </Col>
           <Col lg={1} className="config-zone-tooltip">
@@ -475,15 +547,109 @@ class KeyManagementConfiguration extends Component {
             />
           </Col>
         </Row>
-        <Row className="config-provider-row" key={'v-token-field'}>
+        <Row className="config-provider-row" key={'v-auth-field'}>
           <Col lg={3}>
-            <div className="form-item-custom-label">Secret Token</div>
+            <div className="form-item-custom-label">Authentication Type</div>
           </Col>
           <Col lg={7}>
             <Field
-              name={'HC_VAULT_TOKEN'}
-              component={YBFormInput}
+              name="hcpAuthType"
+              component={YBFormSelect}
+              options={HCP_AUTHENTICATION_TYPE}
               className={'kube-provider-input-field'}
+              defaultValue={DEFAULT_HCP_AUTHENTICATION_TYPE}
+              onChange={({ form, field }, option) => {
+                this.setState({ hcpAuthType: option });
+              }}
+            />
+          </Col>
+          <Col lg={1} className="config-zone-tooltip">
+            <YBInfoTip title="Authentication Type" content="The authentication type used to connect to the Hahicorp Vault." />
+          </Col>
+        </Row>
+        {isToken && (
+          <Row className="config-provider-row" key={'v-token-field'}>
+            <Col lg={3}>
+              <div className="form-item-custom-label">Secret Token</div>
+            </Col>
+            <Col lg={7}>
+              <Field
+                name={'HC_VAULT_TOKEN'}
+                component={YBFormInput}
+                className={'kube-provider-input-field'}
+              />
+            </Col>
+          </Row>
+        )}
+        {isAppRole && (
+          <Fragment>
+            <Row className="config-provider-row" key={'v-role-id-field'}>
+              <Col lg={3}>
+                <div className="form-item-custom-label">Role ID</div>
+              </Col>
+              <Col lg={7}>
+                <Field
+                  name={'HC_VAULT_ROLE_ID'}
+                  component={YBFormInput}
+                  className={'kube-provider-input-field'}
+                />
+              </Col>
+              <Col lg={1} className="config-zone-tooltip">
+                <YBInfoTip
+                  title="Vault Role ID"
+                  content="AppRole Role ID Credentials for the provided Auth Namespace"
+                />
+              </Col>
+            </Row>
+            <Row className="config-provider-row" key={'v-secret-id-field'}>
+              <Col lg={3}>
+                <div className="form-item-custom-label">Secret ID</div>
+              </Col>
+              <Col lg={7}>
+                <Field
+                  name={'HC_VAULT_SECRET_ID'}
+                  component={YBFormInput}
+                  className={'kube-provider-input-field'}
+                />
+              </Col>
+              <Col lg={1} className="config-zone-tooltip">
+                <YBInfoTip
+                  title="Vault Secret ID"
+                  content="AppRole Secret ID Credentials for the provided Auth Namespace"
+                />
+              </Col>
+            </Row>
+            <Row className="config-provider-row" key={'v-auth-namespace-field'}>
+              <Col lg={3}>
+                <div className="form-item-custom-label">Auth Namespace (Optional)</div>
+              </Col>
+              <Col lg={7}>
+                <Field
+                  name={'HC_VAULT_AUTH_NAMESPACE'}
+                  component={YBFormInput}
+                  className={'kube-provider-input-field'}
+                />
+              </Col>
+            </Row>
+          </Fragment>
+        )}
+        <Row className="config-provider-row" key={'v-key-name-field'}>
+          <Col lg={3}>
+            <div className="form-item-custom-label">Key Name (Optional)</div>
+          </Col>
+          <Col lg={7}>
+            <Field
+              name={'HC_VAULT_KEY_NAME'}
+              component={YBFormInput}
+              placeholder={'key_yugabyte'}
+              className={'kube-provider-input-field'}
+              disabled={isEdit}
+            />
+          </Col>
+          <Col lg={1} className="config-zone-tooltip">
+            <YBInfoTip
+              title="Key Name (Optional)"
+              content="Enter the key name. If key name is not specified, it will be auto set to 'key_yugabyte'"
             />
           </Col>
         </Row>
@@ -503,7 +669,7 @@ class KeyManagementConfiguration extends Component {
         </Row>
         <Row className="config-provider-row" key={'v-mount-path-field'}>
           <Col lg={3}>
-            <div className="form-item-custom-label">Mount Path</div>
+            <div className="form-item-custom-label">Mount Path (Optional)</div>
           </Col>
           <Col lg={7}>
             <Field
@@ -516,7 +682,7 @@ class KeyManagementConfiguration extends Component {
           </Col>
           <Col lg={1} className="config-zone-tooltip">
             <YBInfoTip
-              title="Mount Path"
+              title="Mount Path (Optional)"
               content="Enter the mount path. If mount path is not specified, path will be auto set to 'transit/'"
             />
           </Col>
@@ -539,7 +705,6 @@ class KeyManagementConfiguration extends Component {
               component={YBFormDropZone}
               name={'GCP_CONFIG'}
               title={'Upload GCP Credentials (json)'}
-              className="upload-file-button"
               acceptedFiles={['.txt']}
             />
           </Col>
@@ -654,7 +819,7 @@ class KeyManagementConfiguration extends Component {
           </Col>
           <Col lg={1} className="config-zone-tooltip">
             <YBInfoTip
-              title="KMS Endpoint"
+              title="KMS Endpoint (Optional)"
               content="If GCP KMS has custom endpoint. Must be a valid URL."
             />
           </Col>
@@ -664,10 +829,34 @@ class KeyManagementConfiguration extends Component {
   };
 
   getAzuForm = () => {
+    const { hostInfo } = this.props;
     const isEdit = this.isEditMode();
 
     return (
       <>
+        <Row className="config-provider-row" key={'mi-enable-field'}>
+          <Col lg={3}>
+            <div className="form-item-custom-label">Use Managed Identity</div>
+          </Col>
+          <Col lg={7}>
+            <Field
+              name={'enableMI'}
+              component={YBCheckBox}
+              disabled={hostInfo === undefined || getYBAHost(hostInfo) !== YBAHost.AZU}
+              checkState={this.state.enabledMI}
+              input={{
+                onChange: (e) => this.setState({ enabledMI: e.target.checked })
+              }}
+              className={'kube-provider-input-field'}
+            />
+          </Col>
+          <Col lg={1} className="config-zone-tooltip">
+            <YBInfoTip
+              title="Use Managed Identity"
+              content="Select to use a managed identity attached to an Azu VM instance running the platform."
+            />
+          </Col>
+        </Row>
         <Row className="config-provider-row" key={'azu-client-id-field'}>
           <Col lg={3}>
             <div className="form-item-custom-label">Client ID</div>
@@ -696,6 +885,7 @@ class KeyManagementConfiguration extends Component {
             <Field
               name={'CLIENT_SECRET'}
               component={YBFormInput}
+              disabled={this.state.enabledMI}
               placeholder={''}
               className={'kube-provider-input-field'}
             />
@@ -810,15 +1000,15 @@ class KeyManagementConfiguration extends Component {
     );
   };
 
-  displayFormContent = (provider) => {
+  displayFormContent = (provider, values) => {
     if (!provider) {
-      return this.getAWSForm();
+      return this.getAWSForm(values);
     }
     switch (provider.value) {
       case 'SMARTKEY':
         return this.getSmartKeyForm();
       case 'AWS':
-        return this.getAWSForm();
+        return this.getAWSForm(values);
       case 'HASHICORP':
         return this.getHCVaultForm();
       case 'GCP':
@@ -826,7 +1016,7 @@ class KeyManagementConfiguration extends Component {
       case 'AZU':
         return this.getAzuForm();
       default:
-        return this.getAWSForm();
+        return this.getAWSForm(values);
     }
   };
 
@@ -865,6 +1055,7 @@ class KeyManagementConfiguration extends Component {
 
     this.setState({
       listView: false,
+      hcpAuthType: DEFAULT_HCP_AUTHENTICATION_TYPE,
       mode: 'EDIT',
       formData
     });
@@ -882,7 +1073,7 @@ class KeyManagementConfiguration extends Component {
    * Shows list view on click of cancel button by turning the listView flag ON.
    */
   showListView = () => {
-    this.setState({ listView: true, mode: 'NEW', formData: DEFAULT_FORM_DATA });
+    this.setState({ listView: true, mode: 'NEW', hcpAuthType: DEFAULT_HCP_AUTHENTICATION_TYPE, formData: DEFAULT_FORM_DATA });
   };
 
   isValidUrl = (url) => {
@@ -896,9 +1087,11 @@ class KeyManagementConfiguration extends Component {
 
   render() {
     const { configList, featureFlags, currentUserInfo } = this.props;
-    const { listView, enabledIAMProfile, formData } = this.state;
+    const { listView, enabledIAMProfile, formData, enabledMI } = this.state;
     const isAdmin = ['Admin', 'SuperAdmin'].includes(currentUserInfo.role);
     const isEdit = this.isEditMode();
+    const isToken = this.isTokenMode();
+    const isAppRole = this.isAppRoleMode();
 
     if (getPromiseState(configList).isInit() || getPromiseState(configList).isLoading()) {
       return <YBLoadingCircleIcon />;
@@ -921,13 +1114,13 @@ class KeyManagementConfiguration extends Component {
         });
         configs = configs
           ? configs.filter((config) => {
-              return (
-                !['HASHICORP', 'GCP', 'AZU'].includes(config.metadata.provider) ||
-                (config.metadata.provider === 'HASHICORP' && isHCVaultEnabled) ||
-                (config.metadata.provider === 'GCP' && isGcpKMSEnabled) ||
-                (config.metadata.provider === 'AZU' && isAzuKMSEnabled)
-              );
-            })
+            return (
+              !['HASHICORP', 'GCP', 'AZU'].includes(config.metadata.provider) ||
+              (config.metadata.provider === 'HASHICORP' && isHCVaultEnabled) ||
+              (config.metadata.provider === 'GCP' && isGcpKMSEnabled) ||
+              (config.metadata.provider === 'AZU' && isAzuKMSEnabled)
+            );
+          })
           : [];
       }
       //feature flagging
@@ -984,8 +1177,18 @@ class KeyManagementConfiguration extends Component {
         }),
 
         HC_VAULT_TOKEN: Yup.mixed().when('kmsProvider', {
-          is: (provider) => provider?.value === 'HASHICORP',
+          is: (provider) => provider?.value === 'HASHICORP' && isToken,
           then: Yup.mixed().required('Secret Token is Required')
+        }),
+
+        HC_VAULT_ROLE_ID: Yup.mixed().when('kmsProvider', {
+          is: (provider) => provider?.value === 'HASHICORP' && isAppRole,
+          then: Yup.mixed().required('Role ID is Required')
+        }),
+
+        HC_VAULT_SECRET_ID: Yup.mixed().when('kmsProvider', {
+          is: (provider) => provider?.value === 'HASHICORP' && isAppRole,
+          then: Yup.mixed().required('Secret ID is Required')
         }),
 
         //GCP KMS
@@ -1024,7 +1227,7 @@ class KeyManagementConfiguration extends Component {
           then: Yup.mixed().required('Client ID is required')
         }),
         CLIENT_SECRET: Yup.mixed().when('kmsProvider', {
-          is: (provider) => provider?.value === 'AZU',
+          is: (provider) => provider?.value === 'AZU' && !enabledMI,
           then: Yup.string().required('Client Secret is Required')
         }),
         TENANT_ID: Yup.mixed().when('kmsProvider', {
@@ -1103,7 +1306,7 @@ class KeyManagementConfiguration extends Component {
                           />
                         </Col>
                       </Row>
-                      {this.displayFormContent(values.kmsProvider)}
+                      {this.displayFormContent(values.kmsProvider, values)}
                     </Col>
                   </Row>
                   <div className="form-action-button-container">

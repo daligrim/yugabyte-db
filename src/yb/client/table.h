@@ -11,17 +11,21 @@
 // under the License.
 //
 
-#ifndef YB_CLIENT_TABLE_H
-#define YB_CLIENT_TABLE_H
+#pragma once
 
-#include <gflags/gflags_declare.h>
+#include "yb/util/flags.h"
 
 #include "yb/client/client_fwd.h"
 
 #include "yb/common/common_fwd.h"
 
+#include "yb/dockv/dockv_fwd.h"
+
 #include "yb/master/master_fwd.h"
 
+#include "yb/qlexpr/qlexpr_fwd.h"
+
+#include "yb/util/enums.h"
 #include "yb/util/locks.h"
 #include "yb/util/status_callback.h"
 #include "yb/util/status_fwd.h"
@@ -33,13 +37,9 @@ namespace client {
 
 // This must match TableType in common.proto.
 // We have static_assert's in tablet-test.cc to verify this.
-enum class YBTableType {
-  YQL_TABLE_TYPE = 2,
-  REDIS_TABLE_TYPE = 3,
-  PGSQL_TABLE_TYPE = 4,
-  TRANSACTION_STATUS_TABLE_TYPE = 5,
-  UNKNOWN_TABLE_TYPE = -1
-};
+YB_DEFINE_ENUM(YBTableType,
+               ((YQL_TABLE_TYPE, 2))((REDIS_TABLE_TYPE, 3))((PGSQL_TABLE_TYPE, 4))
+               ((TRANSACTION_STATUS_TABLE_TYPE, 5))((UNKNOWN_TABLE_TYPE, -1)));
 
 struct VersionedTablePartitionList {
   TablePartitionList keys;
@@ -80,11 +80,11 @@ class YBTable : public std::enable_shared_from_this<YBTable> {
   // Return the table's ID. This is an internal identifier which uniquely
   // identifies a table. If the table is deleted and recreated with the same
   // name, the ID will distinguish the old table from the new.
-  const std::string& id() const;
+  const TableId& id() const;
 
   const YBSchema& schema() const;
   const Schema& InternalSchema() const;
-  const PartitionSchema& partition_schema() const;
+  const dockv::PartitionSchema& partition_schema() const;
   bool IsHashPartitioned() const;
   bool IsRangePartitioned() const;
 
@@ -95,10 +95,10 @@ class YBTable : public std::enable_shared_from_this<YBTable> {
   VersionedTablePartitionListPtr GetVersionedPartitions() const;
   TablePartitionList GetPartitionsCopy() const;
   int32_t GetPartitionCount() const;
-  int32_t GetPartitionListVersion() const;
+  PartitionListVersion GetPartitionListVersion() const;
 
   // Indexes available on the table.
-  const IndexMap& index_map() const;
+  const qlexpr::IndexMap& index_map() const;
 
   // Is this an index?
   bool IsIndex() const;
@@ -106,13 +106,13 @@ class YBTable : public std::enable_shared_from_this<YBTable> {
   bool IsUniqueIndex() const;
 
   // For index table: information about this index.
-  const IndexInfo& index_info() const;
+  const qlexpr::IndexInfo& index_info() const;
 
   // True if the table is colocated (including tablegroups, excluding YSQL system tables).
   bool colocated() const;
 
   // Returns the replication info for the table.
-  const boost::optional<master::ReplicationInfoPB>& replication_info() const;
+  const boost::optional<ReplicationInfoPB>& replication_info() const;
 
   std::string ToString() const;
   //------------------------------------------------------------------------------------------------
@@ -135,6 +135,8 @@ class YBTable : public std::enable_shared_from_this<YBTable> {
 
   // Asynchronously refreshes table partitions.
   void RefreshPartitions(YBClient* client, StdStatusCallback callback);
+
+  size_t DynamicMemoryUsage() const;
 
  private:
   friend class YBClient;
@@ -162,7 +164,7 @@ class YBTable : public std::enable_shared_from_this<YBTable> {
 };
 
 size_t FindPartitionStartIndex(
-    const TablePartitionList& partitions, const PartitionKey& partition_key, size_t group_by = 1);
+    const TablePartitionList& partitions, std::string_view partition_key, size_t group_by = 1);
 
 PartitionKeyPtr FindPartitionStart(
     const VersionedTablePartitionListPtr& versioned_partitions, const PartitionKey& partition_key,
@@ -170,5 +172,3 @@ PartitionKeyPtr FindPartitionStart(
 
 } // namespace client
 } // namespace yb
-
-#endif // YB_CLIENT_TABLE_H

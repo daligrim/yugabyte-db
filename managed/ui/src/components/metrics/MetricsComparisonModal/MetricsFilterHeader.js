@@ -1,4 +1,4 @@
-import React, { useContext, useState } from 'react';
+import { useContext, useState } from 'react';
 import { Dropdown, MenuItem } from 'react-bootstrap';
 import moment from 'moment';
 
@@ -96,6 +96,7 @@ export const MetricsFilterHeader = ({ origin, selectedUniverse }) => {
         setStartMoment={setCustomStartMoment}
         setEndMoment={setCustomEndMoment}
         handleTimeframeChange={handleTimeframeChange}
+        timezone={currentUser.data.timezone}
       />
     ) : null;
 

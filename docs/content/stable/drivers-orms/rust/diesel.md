@@ -1,8 +1,8 @@
 ---
-title: Use an ORM
+title: Diesel ORM
+headerTitle: Use an ORM
 linkTitle: Use an ORM
-description: Diesel ORM support for YugabyteDB
-image: /images/section_icons/sample-data/s_s1-sampledata-3x.png
+description: Rust Diesel ORM support for YugabyteDB
 menu:
   stable:
     identifier: diesel-orm
@@ -14,7 +14,7 @@ type: docs
 <ul class="nav nav-tabs-alt nav-tabs-yb">
   <li>
     <a href="../diesel/" class="nav-link active">
-      <i class="fab fa-rust" aria-hidden="true"></i>
+      <i class="fa-brands fa-rust" aria-hidden="true"></i>
       Diesel
     </a>
   </li>
@@ -26,7 +26,7 @@ YugabyteDB's YSQL API is fully compatible with Diesel ORM for data persistence i
 
 ## CRUD operations
 
-Learn how to establish a connection to a YugabyteDB database and begin basic CRUD operations using the steps on the [Build an application](../../../quick-start/build-apps/rust/ysql-diesel/) page.
+Learn how to establish a connection to a YugabyteDB database and begin basic CRUD operations using the steps on the [Rust ORM example application](../../orms/rust/ysql-diesel/) page.
 
 The following sections break down the example to demonstrate how to perform common tasks required for Rust application development using Diesel.
 
@@ -334,7 +334,3 @@ First Name: "Tom"
 Last Name: "Stewart"
 Email: "tstewart@example.com"
 ```
-
-## Next steps
-
-- Explore [Scaling applications](../../../explore/linear-scalability/) with YugabyteDB.

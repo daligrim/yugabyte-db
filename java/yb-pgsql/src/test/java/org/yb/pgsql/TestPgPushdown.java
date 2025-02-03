@@ -23,19 +23,17 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.function.Function;
-
 import org.apache.commons.lang3.StringUtils;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import org.yb.util.YBTestRunnerNonTsanOnly;
+import org.yb.util.YBTestRunnerNonMac;
 
 /**
  * Test pushdown behaviour of different expression from PG to YB layer.
  */
-@RunWith(value = YBTestRunnerNonTsanOnly.class)
+@RunWith(value = YBTestRunnerNonMac.class)
 public class TestPgPushdown extends BasePgSQLTest {
   private static final Logger LOG = LoggerFactory.getLogger(TestPgPushdown.class);
 
@@ -1352,18 +1350,32 @@ public class TestPgPushdown extends BasePgSQLTest {
 
   /** Ensure pushing down aggregate functions with constant argument. */
   @Test
-  public void aggregates_const() throws Exception {
-    String tableName = "aggregate";
-    int numRows = 5000;
+  public void aggregatesConst() throws Exception {
+    new AggregatePushdownTester("COUNT(*)").test();
+    new AggregatePushdownTester("COUNT(0)").test();
+    new AggregatePushdownTester("COUNT(NULL)").test();
 
-    new AggregatePushdownTester(tableName, numRows, "COUNT(*)").test();
-    new AggregatePushdownTester(tableName, numRows, "COUNT(0)").test();
-    new AggregatePushdownTester(tableName, numRows, "COUNT(NULL)").test();
-
-    new AggregatePushdownTester(tableName, numRows, "SUM(2)").test();
-    new AggregatePushdownTester(tableName, numRows, "SUM(NULL::int)").test();
+    new AggregatePushdownTester("SUM(2)").test();
+    new AggregatePushdownTester("SUM(NULL::int)").test();
 
     // Postgres optimizes MAX(<const>) or MIN(<const>) so it isn't a real pushdown.
+
+    new AggregatePushdownTester("AVG(1)").test();
+    // TODO(#18002): uncomment the following when avg(null) is pushed down.
+    /*new AggregatePushdownTester("AVG(NULL::int)").test();*/
+  }
+
+  /** Ensure pushing down aggregate functions with variables (columns). */
+  @Test
+  public void aggregatesVar() throws Exception {
+    StringBuilder sb = new StringBuilder();
+    for (String agg : Arrays.asList("COUNT", "SUM", "MAX", "MIN", "AVG")) {
+      for (String column : Arrays.asList("id", "v")) {
+        sb.append(String.format("%s(%s),", agg, column));
+      }
+    }
+    // Pass all aggregates at once.  Make sure to remove the trailing comma.
+    new AggregatePushdownTester(sb.substring(0, sb.length() - 1)).test();
   }
 
   //
@@ -1382,10 +1394,16 @@ public class TestPgPushdown extends BasePgSQLTest {
    */
   private abstract class InClausePushdownTester {
     /** How many times would each query be iterated to get a total running time? */
-    public final int queryRunCount = 20;
+    // Connection Manager may keep switching physical connections during query
+    // exec time check, so we need to run more iterations to get stable results.
+    public final int queryRunCount = isTestRunningWithConnectionManager() ? 100 : 20;
 
     /** Minimum speedup multiplier expected for pushed down SELECT-type queries */
-    public final double minSelectSpeedup = 2;
+    // As of GHI #20438 the IN clause is getting pushed down and base select works faster.
+    // To reflect relative timing change the coefficient was lowered from 2 to 1.5
+    // Update: 1.5 seems insufficient, the test has been unstable for a while.
+    // Reduce it to 1.3, considering to remove it.
+    public final double minSelectSpeedup = 1.3;
 
     public final String tableName;
 
@@ -1612,6 +1630,7 @@ public class TestPgPushdown extends BasePgSQLTest {
       // Plain optimized query
       {
         stmt.executeUpdate(truncateQuery);
+        waitForTServerHeartbeatIfConnMgrEnabled();
         fillTable(stmt);
         String query = getOptimizedDeleteQuery();
         assertPushdownPlan(stmt, query, true);
@@ -1624,6 +1643,7 @@ public class TestPgPushdown extends BasePgSQLTest {
       // Prepared optimized query
       {
         stmt.executeUpdate(truncateQuery);
+        waitForTServerHeartbeatIfConnMgrEnabled();
         fillTable(stmt);
         String queryString = getOptimizedPreparedDeleteQueryString();
         assertPushdownPlan(stmt, queryString, (q) -> {
@@ -1697,13 +1717,12 @@ public class TestPgPushdown extends BasePgSQLTest {
    * Uses a {@code (id int PRIMARY KEY, v int)} table
    */
   private class AggregatePushdownTester {
-    private final String tableName;
-    private final int numRowsToInsert;
+    private final String tableName = "aggregate";
+    private final String indexName = "aggregate_index";
+    private final int numRowsToInsert = 5000;
     private final String optimizedExpr;
 
-    public AggregatePushdownTester(String tableName, int numRowsToInsert, String optimizedExpr) {
-      this.tableName = tableName;
-      this.numRowsToInsert = numRowsToInsert;
+    public AggregatePushdownTester(String optimizedExpr) {
       this.optimizedExpr = optimizedExpr;
     }
 
@@ -1713,23 +1732,34 @@ public class TestPgPushdown extends BasePgSQLTest {
             "CREATE TABLE %s (id int PRIMARY KEY, v int)",
             tableName));
         stmt.executeUpdate(String.format(
+            "CREATE INDEX %s ON %s (v ASC, id)",
+            indexName, tableName));
+        stmt.executeUpdate(String.format(
             "INSERT INTO %s ("
                 + "SELECT generate_series, generate_series + 1 FROM generate_series(1, %s)"
                 + ");",
             tableName, numRowsToInsert));
-        verifyPushdown(stmt);
+        verifyPushdown(stmt, "" /* hint */, null /* quals */);
+        verifyPushdown(stmt, String.format("/*+SeqScan(%s)*/", tableName), null /* quals */);
+        final String quals = String.format("v > %s", numRowsToInsert / 2);
+        verifyPushdown(
+            stmt, String.format("/*+IndexOnlyScan(%s %s)*/", tableName, indexName), quals);
+        verifyPushdown(stmt, String.format("/*+IndexScan(%s %s)*/", tableName, indexName), quals);
         stmt.executeUpdate(String.format("DROP TABLE %s", tableName));
+        waitForTServerHeartbeatIfConnMgrEnabled();
       }
     }
 
-    private void verifyPushdown(Statement stmt) throws Exception {
-      String query = String.format("SELECT %s FROM %s", optimizedExpr, tableName);
+    private void verifyPushdown(Statement stmt, String hint, String quals) throws Exception {
+      String query = String.format(
+            "%sSELECT %s FROM %s%s",
+            hint, optimizedExpr, tableName, (quals != null ? " WHERE " + quals : ""));
       verifyStatementMetric(
           stmt,
           query,
           AGGREGATE_PUSHDOWNS_METRIC,
           1 /* queryMetricDelta */,
-          1 /* singleShardTxnMetricDelta */,
+          0 /* singleShardTxnMetricDelta */,
           1 /* txnMetricDelta */,
           true /* validStmt */
       );

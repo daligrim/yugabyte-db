@@ -4,66 +4,106 @@ headerTitle: SQL features
 linkTitle: SQL features
 description: Explore core SQL features in YSQL
 headcontent: Explore core SQL features in YSQL
-image: /images/section_icons/api/ysql.png
 menu:
   stable:
     identifier: explore-ysql-language-features
     parent: explore
-    weight: 200
+    weight: 100
 type: indexpage
 showRightNav: true
 ---
-YugabyteDB's YSQL API reuses a fork of the query layer of PostgreSQL as its starting point and runs on top of YugabyteDB's distributed storage layer called DocDB. This architecture allows YSQL to support most PostgreSQL features, such as data types, queries, expressions, operators and functions, stored procedures, triggers, extensions, and so on, all of which are expected to work identically on both database systems.
+YugabyteDB's [YSQL API](../../api/ysql/) reuses a fork of the [query layer](../../architecture/query-layer/) of PostgreSQL and hence is fully compatible with PostgreSQL. This architecture allows YSQL to support most PostgreSQL features, such as data types, queries, expressions, operators and functions, stored procedures, triggers, extensions, and so on, all of which are expected to work identically on both database systems.
+
+This section provides an overview of the SQL features supported by YugabyteDB, along with details on any limitations or deviations, helping you understand how to leverage YugabyteDB's capabilities while maintaining compatibility with your existing SQL-based workflows.
 
 {{< tip title="Tip" >}}
 A large portion of the documentation and examples written for PostgreSQL would work against YSQL.
-
 {{< /tip >}}
 
-The following diagram shows how YugabyteDB reuses the PostgreSQL query layer, specifically the components that receive the query (_postman_), the query _parser_, _rewriter_, _analyzer_, as well as components responsible for _planning_ and _executing_ the query. Some of these components have been modified to perform efficiently in a distributed SQL database.
+## Schemas and tables
 
-![Reusing the PostgreSQL query layer in YSQL](/images/section_icons/architecture/Reusing-PostgreSQL-query-layer.png)
+A database is a collection of related data, organized into tables, which store the actual records. Schemas act as organizational containers within a database, grouping tables, views, and other objects together to help manage data efficiently. Understanding how these elements work together is essential for designing and managing a well-structured database system.
 
-## SQL Features in YSQL
+{{<lead link="databases-schemas-tables/">}}
+To learn more, see [Schemas and Tables](databases-schemas-tables/)
+{{</lead>}}
 
-The following table lists the most important YSQL features which you would find familiar if you have worked with PostgreSQL.
+## Data types
 
-| YSQL Feature | Description |
-| :----------- | :---------- |
-| <span style="font-size:16px">[Schemas and Tables](databases-schemas-tables/)</span> | SQL shell with `ysqlsh`, users, databases, tables, and schemas |
-| <span style="font-size:16px">[Data Types](data-types/)</span> | String, numeric, temporal types, `SERIAL` pseudo type, `ENUM`, arrays, composite types |
-| <span style="font-size:16px">[DDL Statements](../../api/ysql/the-sql-language/statements/#data-definition-language-ddl/)</span> | Data definition language |
-| <span style="font-size:16px">[Data Manipulation](data-manipulation/)</span> | `INSERT`, `UPDATE`, `DELETE`, `INSERT ... ON CONFLICT`, and `RETURNING` clauses |
-| <span style="font-size:16px">[Queries and Joins](queries/)</span> | Queries, joins, `FROM`, `GROUP BY`, `HAVING` clauses, common table expressions, recursive queries |
-| <span style="font-size:16px">[Expressions and Operators](expressions-operators/)</span> | Basic operators and boolean, numeric, date expressions |
-| <span style="font-size:16px">[Stored Procedures](stored-procedures/)</span> | Support for stored procedures |
-| <span style="font-size:16px">[Triggers](triggers/)</span> | Triggers (on data modification) and event triggers (on schema changes) |
-| <span style="font-size:16px">[Extensions](pg-extensions/)</span> | Support for PostgreSQL extensions |
+YugabyteDB offers extensive support for SQL data types, closely aligning with PostgreSQL's type system. It includes common data types like INTEGER, VARCHAR, BOOLEAN, TIMESTAMP, and more, along with advanced types such as arrays and JSONB, similar to PostgreSQL. Understanding the supported data types is crucial for effective schema design and query optimization in YugabyteDB.
 
-## Advanced features in YSQL
+{{<lead link="data-types/">}}
+To learn more, see [Data types](data-types/)
+{{</lead>}}
 
-The following table lists the advanced features in YSQL.
+## Read data
 
-| YSQL Feature | Description |
-| :----------- | :---------- |
-| <span style="font-size:16px">[Cursors](advanced-features/cursor/)</span> | Declaration of cursors in YSQL |
-| <span style="font-size:16px">[Table Partitioning](advanced-features/partitions/)</span> | List, range, and hash partitioning of tables |
-| <span style="font-size:16px">[Views](advanced-features/views/)</span> | Views and updatable views |
-| <span style="font-size:16px">[Savepoints](advanced-features/savepoints/)</span> | Savepoints in YSQL |
-| <span style="font-size:16px">[Collations](advanced-features/collations/)</span> | Collations in YSQL |
+YugabyteDB provides robust support for Data Manipulation Language (DML) statements, which are used to query data in a database. These include standard SQL commands like SELECT, FROM, GROUP BY, and HAVING. YugabyteDB's DML capabilities align closely with PostgreSQL, allowing for complex queries in a distributed environment. Understanding these DML features is crucial for developers and database users to effectively interact with and manipulate data in YugabyteDB's distributed environment.
 
-<!--
-| <span style="font-size:16px">[Functions and operators](functions-operators/)</span> | Conditional expressions, math / string / date / time / window functions and operators  |
-| <span style="font-size:16px">[Advanced Topics](advanced-topics/)</span>     | Using `VIEWS`, PostgreSQL extensions supported in YSQL, temporary tables, etc. |
--->
+{{<lead link="queries/">}}
+To learn more, see [Read data](queries/)
+{{</lead>}}
 
-## Going beyond SQL
+## Write data
 
-Because YugabyteDB is a distributed SQL database, YSQL has a number of features that are not present in PostgreSQL, as summarized in the following table.
+YugabyteDB provides robust support for Data Manipulation Language (DML) statements, which are used to modify data in a database. These include standard SQL commands like INSERT, UPDATE, and DELETE. YugabyteDB's DML capabilities align closely with PostgreSQL, allowing for complex queries, transactions, and data modifications in a distributed environment. Understanding these DML features is crucial for developers and database users to effectively interact with and manipulate data in YugabyteDB's distributed environment.
 
-| YSQL Feature                                                 | Description                                                  |
-| :----------------------------------------------------------- | :----------------------------------------------------------- |
-| <span style="font-size:16px">[Data distribution with `HASH`](../linear-scalability/sharding-data/)</span> | Enables the use of `HASH` sort order, in addition to `ASC` and `DESC` for indexes |
-| <span style="font-size:16px">[`Tablespaces`](going-beyond-sql/tablespaces/)</span> | Enables pinning of data in tables and table partitions to different geographic locations |
-| <span style="font-size:16px">[`Follower Reads`](going-beyond-sql/follower-reads-ysql/)</span> | Enables more read IOPS with low latencies in YugabyteDB clusters |
-| <span style="font-size:16px">`Tablegroups`</span> | Enables colocation of multiple smaller tables into one tablet for better performance |
+{{<lead link="data-manipulation/">}}
+To learn more, see [Write data](data-manipulation/)
+{{</lead>}}
+
+## Expressions and operators
+
+Leveraging its PostgreSQL compatibility, YugabyteDB supports a wide variety of operators—arithmetic, comparison, logical, and string operators—along with complex expressions that allow for powerful data manipulation and retrieval. Understanding these elements is crucial for constructing efficient queries and leveraging the full power of YugabyteDB's SQL interface.
+
+{{<lead link="expressions-operators/">}}
+To learn more, see [Expressions and operators](expressions-operators/)
+{{</lead>}}
+
+## Data definition - DDL
+
+YugabyteDB supports a broad range of Data Definition Language (DDL) statements, enabling you to create, modify, and manage database objects like tables, indexes, schemas, and more. With a foundation based on PostgreSQL's syntax, YugabyteDB provides compatibility with many standard SQL DDL commands, including CREATE, ALTER, and DROP. Understanding these DDL features is essential for database administrators and developers working with YugabyteDB's schema management and object creation processes
+
+{{<lead link="../../api/ysql/the-sql-language/statements/#data-definition-language-ddl">}}
+To learn more, see [Data definition language](../../api/ysql/the-sql-language/statements/#data-definition-language-ddl)
+{{</lead>}}
+
+## Indexes
+
+Indexes in YugabyteDB are powerful tools designed to enhance query performance by allowing faster data retrieval. They work by creating a data structure that provides quick access to rows in a table based on the values of one or more columns. YugabyteDB supports various types of indexes, including primary, unique, and secondary indexes, each serving different use cases. By leveraging these indexes, you can significantly reduce the time complexity of read operations, making your applications more efficient and responsive.
+
+{{<lead link="indexes-constraints/">}}
+To learn more, see [Indexes](indexes-constraints/)
+{{</lead>}}
+
+## Constraints
+
+YugabyteDB supports constraints that enforce rules on the data to ensure accuracy and consistency, such as preventing duplicate values or maintaining relationships between tables. Constraints ensure data validity and integrity, preventing invalid data from being inserted or updated.
+
+{{<lead link="data-manipulation/#constraints">}}
+To learn more, see [Constraints](data-manipulation/#constraints)
+{{</lead>}}
+
+## Extensions
+
+YugabyteDB offers robust support for PostgreSQL extensions, enabling developers to leverage a wide array of powerful tools and functionalities that enhance database capabilities. By integrating popular PostgreSQL extensions, YugabyteDB ensures compatibility and extends its feature set, allowing you to use familiar tools for tasks such as full-text search, data encryption, and advanced indexing.
+
+{{<lead link="pg-extensions/">}}
+To learn more, see [Extensions](pg-extensions/)
+{{</lead>}}
+
+## Advanced SQL features
+
+Apart from the standard SQL features, YugabyteDb also supports advanced features like cursors, views, savepoints, triggers, stored procedures, and more.
+
+{{<lead link="advanced-features/">}}
+To learn more, see [Advanced features](advanced-features/)
+{{</lead>}}
+
+## SQL compatibility
+
+YugabyteDB is a distributed SQL database that implements many standard SQL features while introducing some unique capabilities due to its distributed nature. Given the daunting nature of supporting SQL in a distributed environment, not all features are supported.
+
+{{<lead link="../../api/ysql/sql-feature-support/">}}
+To learn more, see [SQL feature support](../../api/ysql/sql-feature-support/)
+{{</lead>}}

@@ -17,7 +17,7 @@ import time
 
 from ipaddress import ip_network
 from ybops.utils import get_or_create, get_and_cleanup, DNS_RECORD_SET_TTL
-from ybops.common.exceptions import YBOpsRuntimeError
+from ybops.common.exceptions import YBOpsRuntimeError, YBOpsRecoverableError
 from ybops.cloud.common.utils import request_retry_decorator
 from ybops.cloud.common.cloud import AbstractCloud
 
@@ -231,7 +231,7 @@ class AwsBootstrapClient():
             region, client.vpc.id, client.sg_yugabyte.id, client.route_table.id,
             {az: s.id for az, s in client.subnets.items()})
 
-    def cross_link_regions(self, components):
+    def cross_link_regions(self, components, added_region_codes):
         # Do the cross linking, adding CIDR entries to RTs and SGs, as well as doing vpc peerings.
         region_and_vpc_tuples = [(r, c.vpc) for r, c in components.items()]
         host_vpc = None
@@ -243,6 +243,9 @@ class AwsBootstrapClient():
         for i in range(len(region_and_vpc_tuples) - 1):
             i_region, i_vpc = region_and_vpc_tuples[i]
             for j in range(i + 1, len(region_and_vpc_tuples)):
+                # skip linking existing regions
+                if i_region not in added_region_codes and j_region not in added_region_codes:
+                    continue
                 j_region, j_vpc = region_and_vpc_tuples[j]
                 peerings = create_vpc_peering(
                     # i is the host, j is the target.
@@ -888,13 +891,18 @@ def get_instance_details(instance_type, region):
     return instances[0]
 
 
-def get_device_names(instance_type, num_volumes, region):
+def get_device_names(instance_type, num_volumes, region, predefined_volumes):
     device_names = []
     instance = get_instance_details(instance_type, region)
-    for i in range(num_volumes):
+    i = 0
+    while len(device_names) < num_volumes:
         device_name_format = "nvme{}n1" if is_nvme(instance) else "xvd{}"
         index = "{}".format(i if is_nvme(instance) else chr(ord('b') + i))
-        device_names.append(device_name_format.format(index))
+        device_name = device_name_format.format(index)
+        if not (device_name in predefined_volumes):
+            device_names.append(device_name)
+        i = i + 1
+    logging.info("Device names: %s", device_names)
     return device_names
 
 
@@ -975,11 +983,27 @@ def create_instance(args):
     # Volume setup.
     volumes = []
 
+    ami_descr = describe_ami(args.region, args.machine_image)
+    root_volume_size = args.boot_disk_size_gb
+    root_device_name = ami_descr.get("RootDeviceName")
+    block_device_mappings = ami_descr.get("BlockDeviceMappings")
+    if block_device_mappings:
+        root_volume_info = [v.get("Ebs") for v in block_device_mappings
+                            if v.get("DeviceName") == root_device_name]
+        if root_volume_info and root_volume_info[0].get("VolumeSize") > root_volume_size:
+            root_volume_size = root_volume_info[0].get("VolumeSize")
+            logging.warning("Predefined boot volume has larger size: {} vs {}".format(
+                root_volume_size, args.boot_disk_size_gb))
+
     ebs = {
         "DeleteOnTermination": args.auto_delete_boot_disk,
-        "VolumeSize": args.boot_disk_size_gb,
-        "VolumeType": "gp2"
+        "VolumeSize": root_volume_size,
+        "VolumeType": args.volume_type
     }
+    if args.volume_type == "io1" or args.volume_type == "gp3":
+        ebs["Iops"] = args.disk_iops
+    if args.volume_type == "gp3":
+        ebs["Throughput"] = args.disk_throughput
 
     if args.cmk_res_name is not None:
         ebs["Encrypted"] = True
@@ -989,12 +1013,13 @@ def create_instance(args):
         vars["IamInstanceProfile"] = {
             "Arn": args.iam_profile_arn
         }
+
     volumes.append({
-        "DeviceName": get_root_label(args.region, args.machine_image),
+        "DeviceName": root_device_name,
         "Ebs": ebs
     })
-
-    device_names = get_device_names(args.instance_type, args.num_volumes, args.region)
+    device_names = get_device_names(
+        args.instance_type, args.num_volumes, args.region, get_predefined_devices(ami_descr))
     # TODO: Clean up semantics on nvme vs "next-gen" vs ephemerals, as this is currently whack...
     for i, device_name in enumerate(device_names):
         volume = {}
@@ -1058,6 +1083,20 @@ def create_instance(args):
             tag_dicts.append(resources_tag_dict)
     vars["TagSpecifications"] = tag_dicts
 
+    if args.use_spot_instance:
+        options = {"MarketType": "spot"}
+        spotOptions = {"SpotInstanceType": "persistent",
+                       "InstanceInterruptionBehavior": "stop"}
+        if args.spot_price is not None:
+            spotOptions["MaxPrice"] = args.spot_price
+        options["SpotOptions"] = spotOptions
+        vars["InstanceMarketOptions"] = options
+        logging.info(f"[app] Using AWS spot instances with {options} options")
+
+    if args.imdsv2required:
+        vars["MetadataOptions"] = {"HttpTokens": "required",
+                                   "HttpEndpoint": "enabled"}
+
     # Newer instance types have Credit Specification set to unlimited by default
     if is_burstable(instance):
         vars["CreditSpecification"] = {
@@ -1111,54 +1150,129 @@ def create_instance(args):
         logging.info("[app] Created Elastic IP address at {} in region {} for AWS VM {}"
                      .format(eip["PublicIp"], args.region, args.search_pattern))
 
+    if args.use_spot_instance:
+        logging.info(f"spot instance request id = {instance.spot_instance_request_id}")
+        client.create_tags(
+            Resources=[instance.spot_instance_request_id],
+            Tags=user_tags
+        )
     return instance.id
+
+
+def get_predefined_devices(ami):
+    result = []
+    root_device_name = ami.get("RootDeviceName")
+    block_device_mappings = ami.get("BlockDeviceMappings")
+    if block_device_mappings:
+        for v in block_device_mappings:
+            if v.get("DeviceName") != root_device_name:
+                result.append(v.get("DeviceName").replace("/dev/", ""))
+    logging.info("Predefined devices: %s", result)
+    return result
 
 
 def modify_tags(region, instance_id, tags_to_set_str, tags_to_remove_str):
     instance = get_client(region).Instance(instance_id)
+    client = boto3.client('ec2', region)
     # Remove all the tags we were asked to, except the internal ones.
     tags_to_remove = set(tags_to_remove_str.split(",") if tags_to_remove_str else [])
     # TODO: combine these with the above instance creation function.
-    internal_tags = set(["Name", "launched-by", "yb-server-type"])
+    internal_tags = {"Name", "launched-by", "yb-server-type"}
     if tags_to_remove & internal_tags:
         raise YBOpsRuntimeError(
             "Was asked to remove tags: {}, which contain internal tags: {}".format(
                 tags_to_remove, internal_tags
             ))
+
+    resources_list = []
+    if instance.spot_instance_request_id:
+        resources_list.append(instance.spot_instance_request_id)
+    for volume in instance.volumes.all():
+        resources_list.append(volume.id)
+    for network_interfaces in instance.network_interfaces_attribute:
+        resources_list.append(network_interfaces.get('NetworkInterfaceId'))
+        if 'Association' not in network_interfaces:
+            continue
+        public_ip_address = network_interfaces['Association'].get('PublicIp')
+        if public_ip_address:
+            elastic_ip_list = client.describe_addresses(
+                Filters=[{'Name': 'public-ip', 'Values': [public_ip_address]}]
+            )["Addresses"]
+            for elastic_ip in elastic_ip_list:
+                resources_list.append(elastic_ip["AllocationId"])
+
     # Note: passing an empty list to Tags will remove all tags from the instance.
     if tags_to_remove:
-        instance.delete_tags(Tags=[{"Key": k} for k in tags_to_remove])
+        to_remove_obj = [{"Key": k} for k in tags_to_remove]
+        instance.delete_tags(Tags=to_remove_obj)
+        client.delete_tags(Resources=resources_list, Tags=to_remove_obj)
+
     # Set all the tags provided.
     tags_to_set = json.loads(tags_to_set_str if tags_to_set_str else "{}")
     customer_tags = []
     for k, v in tags_to_set.items():
         customer_tags.append({"Key": k, "Value": v})
     instance.create_tags(Tags=customer_tags)
+    client.create_tags(Resources=resources_list, Tags=customer_tags)
 
 
 def update_disk(args, instance_id):
     ec2_client = boto3.client('ec2', region_name=args.region)
-    device_names = set(get_device_names(args.instance_type, args.num_volumes, args.region))
     instance = get_client(args.region).Instance(instance_id)
+    ami_descr = describe_ami(args.region, args.machine_image if args.machine_image else instance.image_id)
+    device_names = set(get_device_names(args.instance_type, args.num_volumes, args.region,
+                                        get_predefined_devices(ami_descr)))
     vol_ids = list()
     for volume in instance.volumes.all():
         for attachment in volume.attachments:
+            device_name = attachment['Device'].replace('/dev/', '')
             # Format of device name is /dev/xvd{} or /dev/nvme{}n1
-            if attachment['Device'].replace('/dev/', '') in device_names:
-                print("Updating volume {}".format(volume.id))
-                vol_ids.append(volume.id)
-                ec2_client.modify_volume(VolumeId=volume.id, Size=args.volume_size)
+            if device_name in device_names:
+                modify_size = (args.force or
+                               bool(args.volume_size and volume.size != args.volume_size))
+                modify_iops = args.force or bool(args.disk_iops and volume.iops != args.disk_iops)
+                modify_throughput = args.force or bool(args.disk_throughput and
+                                                       volume.throughput != args.disk_throughput)
+                if modify_size or modify_iops or modify_throughput:
+                    logging.info(
+                        "Existing instance %s's volume %s: size=%s, iops=%s, throughput=%s",
+                        instance_id, volume.id, volume.size, volume.iops, volume.throughput)
+                    _args = {"VolumeId": volume.id}
+
+                    if modify_size:
+                        if args.volume_size:
+                            _args["Size"] = args.volume_size
+                        elif volume.size:
+                            _args["Size"] = volume.size
+                    if modify_iops:
+                        if args.disk_iops:
+                            _args["Iops"] = args.disk_iops
+                        elif volume.iops:
+                            _args["Iops"] = volume.iops
+                    if modify_throughput:
+                        if args.disk_throughput:
+                            _args["Throughput"] = args.disk_throughput
+                        elif volume.throughput:
+                            _args["Throughput"] = volume.throughput
+
+                    logging.info(
+                        "Modified volume %s: size=%s, iops=%s, throughput=%s",
+                        volume.id, _args.get("Size", volume.size), _args.get("Iops", volume.iops),
+                        _args.get("Throughput", volume.throughput))
+                    vol_ids.append(volume.id)
+                    ec2_client.modify_volume(**_args)
+
     # Wait for volumes to be ready.
-    _wait_for_disk_modifications(ec2_client, vol_ids)
+    if vol_ids:
+        _wait_for_disk_modifications(ec2_client, vol_ids)
 
 
-def change_instance_type(region, instance_id, new_instance_type):
+def change_instance_type(region, instance_id, instance_type):
     instance = get_client(region).Instance(instance_id)
 
     try:
         # Change instance type
-        instance.modify_attribute(Attribute='instanceType', Value=new_instance_type)
-        logging.info('Instance {}\'s type changed to {}'.format(instance_id, new_instance_type))
+        instance.modify_attribute(Attribute='instanceType', Value=instance_type)
     except Exception as e:
         raise YBOpsRuntimeError('error executing \"instance.modify_attribute\": {}'.format(repr(e)))
 
@@ -1228,8 +1342,10 @@ def _wait_for_disk_modifications(ec2_client, vol_ids):
     # This function returns as soon as the volume state is optimizing, not completed.
     num_vols_to_modify = len(vol_ids)
     # It should retry for a 1 hour time limit.
-    retry_num = int((1 * 3600) / AbstractCloud.SSH_WAIT_SECONDS) + 1
+    retry_num = int((1 * 3600) / AbstractCloud.SERVER_WAIT_SECONDS) + 1
     # Loop till all volumes are modified or the limit is reached.
+    num_vols_failed = 0
+
     while retry_num > 0:
         num_vols_modified = 0
         response = ec2_client.describe_volumes_modifications(VolumeIds=vol_ids)
@@ -1237,20 +1353,23 @@ def _wait_for_disk_modifications(ec2_client, vol_ids):
         # https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/ec2.html#EC2.Client.describe_volumes_modifications
         for entry in response["VolumesModifications"]:
             if entry["ModificationState"] == "failed":
-                raise YBOpsRuntimeError(("Mofication of disk {} failed.").format(
-                    entry['VolumeId']))
-
-            if entry["ModificationState"] == "optimizing" or \
-                    entry["ModificationState"] == "completed":
+                logging.error(
+                    f"Modification of {entry['VolumeId']} failed: {entry['StatusMessage']}")
+                num_vols_failed += 1
+            elif entry["ModificationState"] in {"optimizing", "completed"}:
                 # Modifying completed.
                 num_vols_modified += 1
 
-        # This means all volumes have completed modification.
-        if num_vols_modified == num_vols_to_modify:
+        # This means all volume modifications have succeeded/failed.
+        if num_vols_modified + num_vols_failed == num_vols_to_modify:
             break
 
-        time.sleep(AbstractCloud.SSH_WAIT_SECONDS)
+        num_vols_failed = 0
+        time.sleep(AbstractCloud.SERVER_WAIT_SECONDS)
         retry_num -= 1
+
+    if num_vols_failed:
+        raise YBOpsRecoverableError(f"Failed to modify {num_vols_failed} volumes")
 
     if retry_num <= 0:
         raise YBOpsRuntimeError("wait_for_disk_modifications failed. Retry limit reached.")

@@ -13,7 +13,7 @@
  *	void SpinLockAcquire(volatile slock_t *lock)
  *		Acquire a spinlock, waiting if necessary.
  *		Time out and abort() if unable to acquire the lock in a
- *		"reasonable" amount of time --- typically ~ 1 minute.
+ *		"reasonable" amount of time --- roughly 15s.
  *
  *	void SpinLockRelease(volatile slock_t *lock)
  *		Unlock a previously acquired lock.
@@ -41,7 +41,7 @@
  *	be again.
  *
  *
- * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/storage/spin.h
@@ -51,17 +51,30 @@
 #ifndef SPIN_H
 #define SPIN_H
 
+#include "miscadmin.h"
+#include "storage/proc.h"
 #include "storage/s_lock.h"
 #ifndef HAVE_SPINLOCKS
 #include "storage/pg_sema.h"
 #endif
 
-
 #define SpinLockInit(lock)	S_INIT_LOCK(lock)
 
-#define SpinLockAcquire(lock) S_LOCK(lock)
+#define SpinLockAcquire(lock) \
+	do \
+	{ \
+		if (IsUnderPostmaster && MyProc) \
+			MyProc->ybSpinLocksAcquired++; \
+		S_LOCK(lock); \
+	} while (0)
 
-#define SpinLockRelease(lock) S_UNLOCK(lock)
+#define SpinLockRelease(lock) \
+	do \
+	{ \
+		S_UNLOCK(lock); \
+		if (IsUnderPostmaster && MyProc && MyProc->ybSpinLocksAcquired >= 1) \
+			MyProc->ybSpinLocksAcquired--; \
+	} while (0)
 
 #define SpinLockFree(lock)	S_LOCK_FREE(lock)
 
@@ -71,7 +84,7 @@ extern Size SpinlockSemaSize(void);
 
 #ifndef HAVE_SPINLOCKS
 extern void SpinlockSemaInit(void);
-extern PGSemaphore *SpinlockSemaArray;
+extern PGDLLIMPORT PGSemaphore *SpinlockSemaArray;
 #endif
 
 #endif							/* SPIN_H */

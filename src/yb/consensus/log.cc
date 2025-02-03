@@ -43,12 +43,15 @@
 #include <shared_mutex>
 
 #include <boost/algorithm/string/predicate.hpp>
-#include <gflags/gflags.h>
 
+#include "yb/ash/wait_state.h"
+
+#include "yb/common/opid.h"
+#include "yb/common/schema_pbutil.h"
 #include "yb/common/schema.h"
-#include "yb/common/wire_protocol.h"
 
 #include "yb/consensus/consensus_util.h"
+#include "yb/consensus/log.messages.h"
 #include "yb/consensus/log_index.h"
 #include "yb/consensus/log_metrics.h"
 #include "yb/consensus/log_reader.h"
@@ -64,32 +67,32 @@
 #include "yb/gutil/walltime.h"
 
 #include "yb/util/async_util.h"
+#include "yb/util/callsite_profiling.h"
 #include "yb/util/countdown_latch.h"
 #include "yb/util/crc.h"
+#include "yb/util/debug-util.h"
 #include "yb/util/debug/long_operation_tracker.h"
 #include "yb/util/debug/trace_event.h"
-#include "yb/util/debug-util.h"
 #include "yb/util/env_util.h"
 #include "yb/util/fault_injection.h"
 #include "yb/util/file_util.h"
-#include "yb/util/flag_tags.h"
+#include "yb/util/flags.h"
+#include "yb/util/flag_validators.h"
 #include "yb/util/format.h"
 #include "yb/util/logging.h"
 #include "yb/util/metrics.h"
 #include "yb/util/operation_counter.h"
-#include "yb/util/opid.h"
 #include "yb/util/path_util.h"
 #include "yb/util/pb_util.h"
 #include "yb/util/random.h"
 #include "yb/util/scope_exit.h"
 #include "yb/util/shared_lock.h"
 #include "yb/util/size_literals.h"
-#include "yb/util/status.h"
 #include "yb/util/status_format.h"
 #include "yb/util/status_log.h"
+#include "yb/util/status.h"
 #include "yb/util/stopwatch.h"
 #include "yb/util/taskstream.h"
-#include "yb/util/thread.h"
 #include "yb/util/trace.h"
 #include "yb/util/tsan_util.h"
 #include "yb/util/unique_lock.h"
@@ -100,22 +103,20 @@ using namespace std::placeholders;
 
 // Log retention configuration.
 // -----------------------------
-DEFINE_int32(log_min_segments_to_retain, 2,
-             "The minimum number of past log segments to keep at all times,"
-             " regardless of what is required for durability. "
-             "Must be at least 1.");
-TAG_FLAG(log_min_segments_to_retain, runtime);
+DEFINE_RUNTIME_int32(log_min_segments_to_retain, 2,
+    "The minimum number of past log segments to keep at all times,"
+    " regardless of what is required for durability. "
+    "Must be at least 1.");
 TAG_FLAG(log_min_segments_to_retain, advanced);
 
-DEFINE_int32(log_min_seconds_to_retain, 900,
-             "The minimum number of seconds for which to keep log segments to keep at all times, "
-             "regardless of what is required for durability. Logs may be still retained for "
-             "a longer amount of time if they are necessary for correct restart. This should be "
-             "set long enough such that a tablet server which has temporarily failed can be "
-             "restarted within the given time period. If a server is down for longer than this "
-             "amount of time, it is possible that its tablets will be re-replicated on other "
-             "machines.");
-TAG_FLAG(log_min_seconds_to_retain, runtime);
+DEFINE_RUNTIME_int32(log_min_seconds_to_retain, 900,
+    "The minimum number of seconds for which to keep log segments to keep at all times, "
+    "regardless of what is required for durability. Logs may be still retained for "
+    "a longer amount of time if they are necessary for correct restart. This should be "
+    "set long enough such that a tablet server which has temporarily failed can be "
+    "restarted within the given time period. If a server is down for longer than this "
+    "amount of time, it is possible that its tablets will be re-replicated on other "
+    "machines.");
 TAG_FLAG(log_min_seconds_to_retain, advanced);
 
 // Flag to enable background log sync. When enabled, we DON'T wait for performing fsync until
@@ -130,48 +131,44 @@ TAG_FLAG(log_min_seconds_to_retain, advanced);
 //    (interval_durable_wal_write_ms * FLAGS_log_background_sync_interval_fraction) ms.
 // This is only true when durable_wal_write_ is false. If true, fsync in performed in-line on
 // every call to Log::Sync()
-DEFINE_bool(log_enable_background_sync, true,
+DEFINE_UNKNOWN_bool(log_enable_background_sync, true,
             "If true, log fsync operations in the aggresively performed in the background.");
-DEFINE_double(log_background_sync_data_fraction, 0.5,
+DEFINE_UNKNOWN_double(log_background_sync_data_fraction, 0.5,
              "When log_enable_background_sync is enabled and periodic_sync_unsynced_bytes_ "
              "reaches bytes_durable_wal_write_mb_*log_background_sync_data_fraction, the fsync "
              "task is pushed to the log-sync queue.");
-DEFINE_double(log_background_sync_interval_fraction, 0.6,
+DEFINE_UNKNOWN_double(log_background_sync_interval_fraction, 0.6,
              "When log_enable_background_sync is enabled and time passed since insertion of log "
              "entry exceeds interval_durable_wal_write_ms*log_background_sync_interval_fraction "
              "the fsync task is pushed to the log-sync queue.");
 
-
 // Flags for controlling kernel watchdog limits.
-DEFINE_int32(consensus_log_scoped_watch_delay_callback_threshold_ms, 1000,
-             "If calling consensus log callback(s) take longer than this, the kernel watchdog "
-             "will print out a stack trace.");
-TAG_FLAG(consensus_log_scoped_watch_delay_callback_threshold_ms, runtime);
+DEFINE_RUNTIME_int32(consensus_log_scoped_watch_delay_callback_threshold_ms, 1000,
+    "If calling consensus log callback(s) take longer than this, the kernel watchdog "
+    "will print out a stack trace.");
 TAG_FLAG(consensus_log_scoped_watch_delay_callback_threshold_ms, advanced);
-DEFINE_int32(consensus_log_scoped_watch_delay_append_threshold_ms, 1000,
-             "If consensus log append takes longer than this, the kernel watchdog "
-             "will print out a stack trace.");
-TAG_FLAG(consensus_log_scoped_watch_delay_append_threshold_ms, runtime);
+DEFINE_RUNTIME_int32(consensus_log_scoped_watch_delay_append_threshold_ms, 1000,
+    "If consensus log append takes longer than this, the kernel watchdog "
+    "will print out a stack trace.");
 TAG_FLAG(consensus_log_scoped_watch_delay_append_threshold_ms, advanced);
 
 // Fault/latency injection flags.
 // -----------------------------
-DEFINE_bool(log_inject_latency, false,
+DEFINE_UNKNOWN_bool(log_inject_latency, false,
             "If true, injects artificial latency in log sync operations. "
             "Advanced option. Use at your own risk -- has a negative effect "
             "on performance for obvious reasons!");
-DEFINE_int32(log_inject_latency_ms_mean, 100,
+DEFINE_UNKNOWN_int32(log_inject_latency_ms_mean, 100,
              "The number of milliseconds of latency to inject, on average. "
              "Only takes effect if --log_inject_latency is true");
-DEFINE_int32(log_inject_latency_ms_stddev, 100,
+DEFINE_UNKNOWN_int32(log_inject_latency_ms_stddev, 100,
              "The standard deviation of latency to inject in before log sync operations. "
              "Only takes effect if --log_inject_latency is true");
 TAG_FLAG(log_inject_latency, unsafe);
 TAG_FLAG(log_inject_latency_ms_mean, unsafe);
 TAG_FLAG(log_inject_latency_ms_stddev, unsafe);
 
-DEFINE_int32(log_inject_append_latency_ms_max, 0,
-             "The maximum latency to inject before the log append operation.");
+DEPRECATE_FLAG(int32, log_inject_append_latency_ms_max, "02_2024");
 
 DEFINE_test_flag(bool, log_consider_all_ops_safe, false,
             "If true, we consider all operations to be safe and will not wait"
@@ -185,41 +182,95 @@ DEFINE_test_flag(bool, pause_before_wal_sync, false, "Pause before doing work in
 
 DEFINE_test_flag(bool, set_pause_before_wal_sync, false,
                  "Set pause_before_wal_sync to true in Log::Sync.");
+DEFINE_test_flag(bool, disable_wal_retention_time, false,
+                 "If true, disables time-based wal retention.");
 
 // TaskStream flags.
 // We have to make the queue length really long.
 // TODO: Create new flags log_taskstream_queue_max_size and log_taskstream_queue_max_wait_ms
 // and deprecate these flags.
-DEFINE_int32(taskstream_queue_max_size, 100000,
+DEFINE_UNKNOWN_int32(taskstream_queue_max_size, 100000,
              "Maximum number of operations waiting in the taskstream queue.");
 
-DEFINE_int32(taskstream_queue_max_wait_ms, 1000,
+DEFINE_UNKNOWN_int32(taskstream_queue_max_wait_ms, 1000,
              "Maximum time in ms to wait for items in the taskstream queue to arrive.");
 
-DEFINE_int32(wait_for_safe_op_id_to_apply_default_timeout_ms, 15000 * yb::kTimeMultiplier,
+DEFINE_UNKNOWN_int32(wait_for_safe_op_id_to_apply_default_timeout_ms, 15000 * yb::kTimeMultiplier,
              "Timeout used by WaitForSafeOpIdToApply when it was not specified by caller.");
 
 DEFINE_test_flag(int64, log_fault_after_segment_allocation_min_replicate_index, 0,
                  "Fault of segment allocation when min replicate index is at least specified. "
                  "0 to disable.");
 
-DEFINE_int64(time_based_wal_gc_clock_delta_usec, 0,
+DEFINE_test_flag(bool, crash_before_wal_header_is_written, false,
+                 "Crash the server before WAL header is written");
+
+DEFINE_UNKNOWN_int64(time_based_wal_gc_clock_delta_usec, 0,
              "A delta in microseconds to add to the clock value used to determine if a WAL "
              "segment is safe to be garbage collected. This is needed for clusters running with a "
              "skewed hybrid clock, because the clock used for time-based WAL GC is the wall clock, "
              "not hybrid clock.");
 
-// Validate that log_min_segments_to_retain >= 1
-static bool ValidateLogsToRetain(const char* flagname, int value) {
-  if (value >= 1) {
-    return true;
-  }
-  LOG(ERROR) << strings::Substitute("$0 must be at least 1, value $1 is invalid",
-                                    flagname, value);
-  return false;
-}
-static bool dummy = google::RegisterFlagValidator(
-    &FLAGS_log_min_segments_to_retain, &ValidateLogsToRetain);
+DEFINE_RUNTIME_int64(reuse_unclosed_segment_threshold_bytes, INT64_MAX,
+            "If the last left in-progress segment size is smaller or equal to this threshold, "
+            "Log will reuse this last segment as writable active_segment at tablet bootstrap. "
+            "Otherwise, Log will create a new segment.");
+
+DEFINE_RUNTIME_int32(min_segment_size_bytes_to_rollover_at_flush, 0,
+                    "Only rotate wals at least of this size (in bytes) at tablet flush."
+                    "-1 to disable WAL rollover at flush. 0 to always rollover WAL at flush.");
+
+DEFINE_RUNTIME_uint32(max_disk_throughput_mbps, 300,
+    "The maximum disk throughput the disk attached to this node can support in MBps.");
+
+DEFINE_RUNTIME_uint32(reject_writes_min_disk_space_check_interval_sec, 60,
+    "Interval in seconds to check for disk space availability. The check will switch to aggressive "
+    "mode (every 10s) if the available disk space is less than --max_disk_throughput_mbps * "
+    "--reject_writes_min_disk_space_check_interval_sec. NOTE: Use a value higher than 10. If a "
+    "value less than 10 is used, then we always run in aggressive check mode, potentially causing "
+    "performance degradations.");
+
+DEFINE_RUNTIME_uint64(reject_writes_min_disk_space_mb, 0,
+    "Reject writes if less than this much disk space is available on the WAL directory and "
+    "--reject_writes_when_disk_full is enabled. If set to 0, defaults to "
+    "--max_disk_throughput_mbps * min(10, --reject_writes_min_disk_space_check_interval_sec).");
+
+DEFINE_validator(log_min_segments_to_retain, FLAG_GT_VALUE_VALIDATOR(0));
+DEFINE_validator(max_disk_throughput_mbps, FLAG_GT_VALUE_VALIDATOR(0));
+DEFINE_validator(reject_writes_min_disk_space_check_interval_sec, FLAG_GT_VALUE_VALIDATOR(0));
+
+DEFINE_RUNTIME_uint64(cdc_intent_retention_ms, 8 * 3600 * 1000,
+    "Interval up to which CDC consumer's checkpoint is considered for retaining intents."
+    "If we haven't received an updated checkpoint from CDC consumer within the interval "
+    "specified by cdc_checkpoint_opid_interval, then CDC does not consider that "
+    "consumer while determining which op IDs to delete from the intent.");
+TAG_FLAG(cdc_intent_retention_ms, advanced);
+
+DEFINE_RUNTIME_uint32(cdc_wal_retention_time_secs, 8 * 3600,
+    "WAL retention time in seconds to be used for tables which have a xCluster, "
+    "or CDCSDK outbound stream.");
+
+DEFINE_validator(cdc_intent_retention_ms,
+    FLAG_DELAYED_COND_VALIDATOR(
+        _value <= static_cast<uint64_t>(FLAGS_cdc_wal_retention_time_secs) * 1000,
+        "Must be less than cdc_wal_retention_time_secs * 1000"));
+
+DEFINE_validator(cdc_wal_retention_time_secs,
+    FLAG_DELAYED_COND_VALIDATOR(
+        FLAGS_cdc_intent_retention_ms <= static_cast<uint64_t>(_value) * 1000,
+        "Must be greater than cdc_intent_retention_ms (in seconds)"));
+
+DEFINE_RUNTIME_bool(enable_xcluster_timed_based_wal_retention, true,
+    "If true, enable time-based WAL retention for tables with xCluster "
+    "by using --cdc_wal_retention_time_secs.");
+
+DEFINE_RUNTIME_AUTO_bool(store_min_start_ht_running_txns, kLocalPersisted, false, true,
+                         "If enabled, minimum start hybrid time among running txns will be "
+                         "persisted in the segment footer during closing of the segment.");
+
+DEFINE_RUNTIME_AUTO_bool(store_last_wal_op_log_ht, kLocalPersisted, false, true,
+                         "If enabled, minimum between the last appended WAL OP's ht and callback "
+                         "value will be persisted in the footer field min_start_ht_running_txns");
 
 static std::string kSegmentPlaceholderFilePrefix = ".tmp.newsegment";
 static std::string kSegmentPlaceholderFileTemplate = kSegmentPlaceholderFilePrefix + "XXXXXX";
@@ -229,14 +280,19 @@ namespace log {
 
 using env_util::OpenFileForRandom;
 using std::shared_ptr;
-using std::shared_lock;
 using std::unique_ptr;
+using std::string;
 using strings::Substitute;
 
 namespace {
 
+bool IsRolloverMarkerType(LogEntryTypePB type) {
+  return type == LogEntryTypePB::SYNC_ROLLOVER_MARKER ||
+         type == LogEntryTypePB::ASYNC_ROLLOVER_AT_FLUSH_MARKER;
+}
+
 bool IsMarkerType(LogEntryTypePB type) {
-  return type == LogEntryTypePB::ROLLOVER_MARKER ||
+  return IsRolloverMarkerType(type) ||
          type == LogEntryTypePB::FLUSH_MARKER;
 }
 
@@ -244,9 +300,9 @@ bool IsMarkerType(LogEntryTypePB type) {
 
 // This class represents a batch of operations to be written and synced to the log. It is opaque to
 // the user and is managed by the Log class.
-class LogEntryBatch {
+class Log::LogEntryBatch {
  public:
-  LogEntryBatch(LogEntryTypePB type, LogEntryBatchPB&& entry_batch_pb);
+  LogEntryBatch(LogEntryTypePB type, std::shared_ptr<LWLogEntryBatchPB> entry_batch_pb);
   ~LogEntryBatch();
 
   std::string ToString() const {
@@ -300,6 +356,8 @@ class LogEntryBatch {
 
   bool IsSingleEntryOfType(LogEntryTypePB type) const;
 
+  bool IsRolloverMarker() const;
+
   size_t count() const { return count_; }
 
   // Returns the total size in bytes of the object.
@@ -310,12 +368,10 @@ class LogEntryBatch {
   // The highest OpId of a REPLICATE message in this batch.
   OpId MaxReplicateOpId() const {
     DCHECK_EQ(REPLICATE, type_);
-    int idx = entry_batch_pb_.entry_size() - 1;
-    if (idx < 0) {
+    if (entry_batch_pb_->entry().empty()) {
       return OpId::Invalid();
     }
-    DCHECK(entry_batch_pb_.entry(idx).replicate().IsInitialized());
-    return OpId::FromPB(entry_batch_pb_.entry(idx).replicate().id());
+    return OpId::FromPB(entry_batch_pb_->entry().back().replicate().id());
   }
 
   void SetReplicates(const ReplicateMsgs& replicates) {
@@ -326,10 +382,10 @@ class LogEntryBatch {
   const LogEntryTypePB type_;
 
   // Contents of the log entries that will be written to disk.
-  LogEntryBatchPB entry_batch_pb_;
+  std::shared_ptr<LWLogEntryBatchPB> entry_batch_pb_;
 
   // Total size in bytes of all entries
-  uint32_t total_size_bytes_ = 0;
+  size_t total_size_bytes_ = 0;
 
   // Number of entries in 'entry_batch_pb_'
   const size_t count_;
@@ -418,16 +474,26 @@ class Log::Appender {
 
   // Time at which current group was started
   MonoTime time_started_;
+
+  const yb::ash::WaitStateInfoPtr wait_state_;
 };
 
-Log::Appender::Appender(Log *log, ThreadPool* append_thread_pool)
+Log::Appender::Appender(Log* log, ThreadPool* append_thread_pool)
     : log_(log),
       task_stream_counter_(Format("Appender for $0", log->tablet_id())),
       task_stream_(new TaskStream<LogEntryBatch>(
           std::bind(&Log::Appender::ProcessBatch, this, _1), append_thread_pool,
           FLAGS_taskstream_queue_max_size,
-          MonoDelta::FromMilliseconds(FLAGS_taskstream_queue_max_wait_ms))) {
-  DCHECK(dummy);
+          MonoDelta::FromMilliseconds(FLAGS_taskstream_queue_max_wait_ms))),
+      wait_state_(ash::WaitStateInfo::CreateIfAshIsEnabled<ash::WaitStateInfo>()) {
+  if (wait_state_) {
+    wait_state_->set_root_request_id(yb::Uuid::Generate());
+    wait_state_->set_query_id(yb::to_underlying(yb::ash::FixedQueryId::kQueryIdForLogAppender));
+    wait_state_->UpdateAuxInfo({.tablet_id = log_->tablet_id(), .method = "RaftWAL"});
+    SET_WAIT_STATUS_TO(wait_state_, Idle);
+    yb::ash::RaftLogWaitStatesTracker().Track(wait_state_);
+  }
+  DCHECK(log_min_segments_to_retain_validator_registered);
 }
 
 Status Log::Appender::Init() {
@@ -443,6 +509,7 @@ Status Log::Appender::Init() {
 // fsync will eventually be called. [if there is a background thread executing DoSync in parallel,
 // it might OR might not flush the new dirty data in the current iteration due to race condition]
 void Log::Appender::ProcessBatch(LogEntryBatch* entry_batch) {
+  ADOPT_WAIT_STATE(wait_state_);
   // A callback function to TaskStream is expected to process the accumulated batch of entries.
   if (entry_batch == nullptr) {
     // Here, we do sync and call callbacks.
@@ -539,6 +606,9 @@ void Log::Appender::Shutdown() {
     VLOG_WITH_PREFIX(1) << "Log append task stream is shut down";
     task_stream_.reset();
   }
+  if (wait_state_) {
+    yb::ash::RaftLogWaitStatesTracker().Untrack(wait_state_);
+  }
 }
 
 // This task is submitted to allocation_pool_ in order to asynchronously pre-allocate new log
@@ -561,10 +631,11 @@ Status Log::Open(const LogOptions &options,
                  ThreadPool* append_thread_pool,
                  ThreadPool* allocation_thread_pool,
                  ThreadPool* background_sync_threadpool,
-                 int64_t cdc_min_replicated_index,
                  scoped_refptr<Log>* log,
-                 CreateNewSegment create_new_segment) {
-
+                 const PreLogRolloverCallback& pre_log_rollover_callback,
+                 NewSegmentAllocationCallback callback,
+                 CreateNewSegment create_new_segment,
+                 MinStartHTRunningTxnsCallback min_start_ht_running_txns_callback) {
   RETURN_NOT_OK_PREPEND(env_util::CreateDirIfMissing(options.env, DirName(wal_dir)),
                         Substitute("Failed to create table wal dir $0", DirName(wal_dir)));
 
@@ -582,7 +653,10 @@ Status Log::Open(const LogOptions &options,
                                      append_thread_pool,
                                      allocation_thread_pool,
                                      background_sync_threadpool,
-                                     create_new_segment));
+                                     callback,
+                                     pre_log_rollover_callback,
+                                     create_new_segment,
+                                     std::move(min_start_ht_running_txns_callback)));
   RETURN_NOT_OK(new_log->Init());
   log->swap(new_log);
   return Status::OK();
@@ -600,19 +674,22 @@ Log::Log(
     ThreadPool* append_thread_pool,
     ThreadPool* allocation_thread_pool,
     ThreadPool* background_sync_threadpool,
-    CreateNewSegment create_new_segment)
+    NewSegmentAllocationCallback callback,
+    const PreLogRolloverCallback& pre_log_rollover_callback,
+    CreateNewSegment create_new_segment,
+    MinStartHTRunningTxnsCallback min_start_ht_running_txns_callback)
     : options_(std::move(options)),
       wal_dir_(std::move(wal_dir)),
       tablet_id_(std::move(tablet_id)),
       peer_uuid_(std::move(peer_uuid)),
       schema_(std::make_unique<Schema>(schema)),
       schema_version_(schema_version),
-      active_segment_sequence_number_(options.initial_active_segment_sequence_number),
+      active_segment_sequence_number_(options_.initial_active_segment_sequence_number),
       log_state_(kLogInitialized),
       max_segment_size_(options_.segment_size_bytes),
       // We halve the initial log segment size here because we double it for every new segment,
       // including the very first segment.
-      cur_max_segment_size_((options.initial_segment_size_bytes + 1) / 2),
+      cur_max_segment_size_((options_.initial_segment_size_bytes + 1) / 2),
       appender_(new Appender(this, append_thread_pool)),
       allocation_token_(allocation_thread_pool->NewToken(ThreadPool::ExecutionMode::SERIAL)),
       background_sync_threadpool_token_(
@@ -626,15 +703,29 @@ Log::Log(
       tablet_metric_entity_(tablet_metric_entity),
       on_disk_size_(0),
       log_prefix_(consensus::MakeTabletLogPrefix(tablet_id_, peer_uuid_)),
-      create_new_segment_at_start_(create_new_segment) {
-  set_wal_retention_secs(options.retention_secs);
+      create_new_segment_at_start_(create_new_segment),
+      new_segment_allocation_callback_(callback),
+      pre_log_rollover_callback_(pre_log_rollover_callback),
+      background_synchronizer_wait_state_(
+          ash::WaitStateInfo::CreateIfAshIsEnabled<ash::WaitStateInfo>()),
+      min_start_ht_running_txns_callback_(std::move(min_start_ht_running_txns_callback)) {
+  set_wal_retention_secs(options_.retention_secs);
   if (table_metric_entity_ && tablet_metric_entity_) {
     metrics_.reset(new LogMetrics(table_metric_entity_, tablet_metric_entity_));
+  }
+  if (background_synchronizer_wait_state_) {
+    background_synchronizer_wait_state_->set_root_request_id(yb::Uuid::Generate());
+    background_synchronizer_wait_state_->set_query_id(
+        yb::to_underlying(yb::ash::FixedQueryId::kQueryIdForLogBackgroundSync));
+    background_synchronizer_wait_state_->UpdateAuxInfo(
+        {.tablet_id = tablet_id_, .method = "RaftWAL"});
+    SET_WAIT_STATUS_TO(background_synchronizer_wait_state_, Idle);
+    yb::ash::RaftLogWaitStatesTracker().Track(background_synchronizer_wait_state_);
   }
 }
 
 Status Log::Init() {
-  std::lock_guard<percpu_rwlock> write_lock(state_lock_);
+  std::lock_guard write_lock(state_lock_);
   CHECK_EQ(kLogInitialized, log_state_);
   // Init the index
   log_index_ = VERIFY_RESULT(LogIndex::NewLogIndex(wal_dir_));
@@ -682,7 +773,7 @@ Status Log::Init() {
   }
 
   if (create_new_segment_at_start_) {
-    RETURN_NOT_OK(EnsureInitialNewSegmentAllocated());
+    RETURN_NOT_OK(EnsureSegmentInitializedUnlocked());
   }
   return Status::OK();
 }
@@ -703,8 +794,8 @@ Status Log::CloseCurrentSegment() {
     VLOG_WITH_PREFIX(1) << "Writing a segment without any REPLICATE message. Segment: "
                         << active_segment_->path();
   }
-  VLOG_WITH_PREFIX(2) << "Segment footer for " << active_segment_->path()
-                      << ": " << footer_builder_.ShortDebugString();
+  VLOG_WITH_PREFIX(2) << "Segment footer for " << active_segment_->path() << ": "
+                      << footer_builder_.ShortDebugString();
 
   auto close_timestamp_micros = GetCurrentTimeMicros();
 
@@ -720,7 +811,7 @@ Status Log::CloseCurrentSegment() {
   footer_builder_.set_close_timestamp_micros(close_timestamp_micros);
   Status status;
   {
-    std::lock_guard<std::mutex> lock(active_segment_mutex_);
+    std::lock_guard lock(active_segment_mutex_);
     status = active_segment_->WriteIndexWithFooterAndClose(log_index_.get(),
                                                            &footer_builder_);
   }
@@ -732,6 +823,12 @@ Status Log::CloseCurrentSegment() {
 }
 
 Status Log::RollOver() {
+  if (pre_log_rollover_callback_) {
+    pre_log_rollover_callback_();
+  }
+
+  WriteLatestMinStartTimeRunningTxnsInFooterBuilder();
+
   LOG_SLOW_EXECUTION(WARNING, 50, LogPrefix() + "Log roll took a long time") {
     SCOPED_LATENCY_METRIC(metrics_, roll_latency);
     RSTATUS_DCHECK(active_segment_, InternalError, "Called RollOver without active segment.");
@@ -755,25 +852,26 @@ Status Log::RollOver() {
   return Status::OK();
 }
 
-void Log::Reserve(LogEntryTypePB type,
-                    LogEntryBatchPB* entry_batch,
-                    LogEntryBatch** reserved_entry) {
+Result<std::unique_ptr<Log::LogEntryBatch>> Log::Reserve(
+    LogEntryTypePB type, std::shared_ptr<LWLogEntryBatchPB> entry_batch) {
   TRACE_EVENT0("log", "Log::Reserve");
-  DCHECK(reserved_entry != nullptr);
   {
-    SharedLock<rw_spinlock> read_lock(state_lock_.get_lock());
-    CHECK_EQ(kLogWriting, log_state_);
+    PerCpuRwSharedLock read_lock(state_lock_);
+    if (log_state_ != kLogWriting) {
+      return STATUS_FORMAT(IllegalState, "Invalid log state $0, expected $1",
+          log_state_, kLogWriting);
+    }
   }
 
   // In DEBUG builds, verify that all of the entries in the batch match the specified type.  In
   // non-debug builds the foreach loop gets optimized out.
 #ifndef NDEBUG
-  for (const LogEntryPB& entry : entry_batch->entry()) {
-    DCHECK_EQ(entry.type(), type) << "Bad batch: " << entry_batch->DebugString();
+  for (const auto& entry : entry_batch->entry()) {
+    DCHECK_EQ(entry.type(), type) << "Bad batch: " << entry_batch->ShortDebugString();
   }
 #endif
 
-  auto new_entry_batch = std::make_unique<LogEntryBatch>(type, std::move(*entry_batch));
+  auto new_entry_batch = std::make_unique<LogEntryBatch>(type, std::move(entry_batch));
   new_entry_batch->MarkReserved();
 
   // Release the memory back to the caller: this will be freed when
@@ -781,19 +879,25 @@ void Log::Reserve(LogEntryTypePB type,
   //
   // TODO (perf) Use a ring buffer instead of a blocking queue and set
   // 'reserved_entry' to a pre-allocated slot in the buffer.
-  *reserved_entry = new_entry_batch.release();
+  return new_entry_batch;
 }
 
-Status Log::TEST_AsyncAppendWithReplicates(
-    LogEntryBatch* entry, const ReplicateMsgs& replicates, const StatusCallback& callback) {
+Status Log::TEST_ReserveAndAppend(
+    std::shared_ptr<LWLogEntryBatchPB> batch, const ReplicateMsgs& replicates,
+    const StatusCallback& callback) {
+  auto entry = VERIFY_RESULT(Reserve(REPLICATE, std::move(batch)));
   entry->SetReplicates(replicates);
-  return AsyncAppend(entry, callback);
+  return AsyncAppend(std::move(entry), callback);
 }
 
-Status Log::AsyncAppend(LogEntryBatch* entry_batch, const StatusCallback& callback) {
+Status Log::AsyncAppend(
+    std::unique_ptr<LogEntryBatch> entry_batch, const StatusCallback& callback) {
   {
-    SharedLock<rw_spinlock> read_lock(state_lock_.get_lock());
-    CHECK_EQ(kLogWriting, log_state_);
+    PerCpuRwSharedLock read_lock(state_lock_);
+    if (log_state_ != kLogWriting) {
+      return STATUS_FORMAT(IllegalState, "Invalid log state $0, expected $1",
+          log_state_, kLogWriting);
+    }
   }
 
   entry_batch->set_callback(callback);
@@ -803,13 +907,14 @@ Status Log::AsyncAppend(LogEntryBatch* entry_batch, const StatusCallback& callba
     last_submitted_op_id_ = entry_batch->MaxReplicateOpId();
   }
 
-  auto submit_status = appender_->Submit(entry_batch);
+  auto submit_status = appender_->Submit(entry_batch.get());
   if (PREDICT_FALSE(!submit_status.ok())) {
     LOG_WITH_PREFIX(WARNING)
         << "Failed to submit batch " << entry_batch->MaxReplicateOpId() << ": " << submit_status;
-    delete entry_batch;
     return kLogShutdownStatus;
   }
+
+  entry_batch.release();
 
   return Status::OK();
 }
@@ -819,41 +924,59 @@ Status Log::AsyncAppendReplicates(const ReplicateMsgs& msgs, const yb::OpId& com
                                   const StatusCallback& callback) {
   auto batch = CreateBatchFromAllocatedOperations(msgs);
   if (!committed_op_id.empty()) {
-    committed_op_id.ToPB(batch.mutable_committed_op_id());
+    committed_op_id.ToPB(batch->mutable_committed_op_id());
   }
   // Set batch mono time if it was specified.
   if (batch_mono_time != RestartSafeCoarseTimePoint()) {
-    batch.set_mono_time(batch_mono_time.ToUInt64());
+    batch->set_mono_time(batch_mono_time.ToUInt64());
   }
 
-  LogEntryBatch* reserved_entry_batch;
-  Reserve(REPLICATE, &batch, &reserved_entry_batch);
+  auto reserved_entry_batch = VERIFY_RESULT(Reserve(LogEntryTypePB::REPLICATE, std::move(batch)));
 
   // If we're able to reserve, set the vector of replicate shared pointers in the LogEntryBatch.
   // This will make sure there's a reference for each replicate while we're appending.
   reserved_entry_batch->SetReplicates(msgs);
 
-  RETURN_NOT_OK(AsyncAppend(reserved_entry_batch, callback));
-  return Status::OK();
+  return AsyncAppend(std::move(reserved_entry_batch), callback);
 }
 
-Status Log::DoAppend(LogEntryBatch* entry_batch,
-                     bool caller_owns_operation,
-                     bool skip_wal_write) {
+Status Log::DoAppend(LogEntryBatch* entry_batch, SkipWalWrite skip_wal_write) {
+  SCOPED_WAIT_STATUS(WAL_Append);
   if (!skip_wal_write) {
     RETURN_NOT_OK(entry_batch->Serialize());
     Slice entry_batch_data = entry_batch->data();
     LOG_IF(DFATAL, entry_batch_data.size() <= 0 && !entry_batch->IsMarker())
         << "Cannot call DoAppend() with no data";
 
-    if (entry_batch->IsSingleEntryOfType(ROLLOVER_MARKER)) {
-      VLOG_WITH_PREFIX_AND_FUNC(1) << "Got ROLLOVER_MARKER";
-      if (active_segment_ && footer_builder_.IsInitialized() && footer_builder_.num_entries() > 0) {
-        // Active segment is not empty - rollover.
+    if (entry_batch->IsRolloverMarker()) {
+      VLOG_WITH_PREFIX_AND_FUNC(1) << "Got marker " << LogEntryTypePB_Name(entry_batch->type_);
+      const auto has_entries =
+          active_segment_ && footer_builder_.IsInitialized() && footer_builder_.num_entries() > 0;
+      if (!has_entries) {
+        // Do nothing.
+      } else if (entry_batch->IsSingleEntryOfType(SYNC_ROLLOVER_MARKER)) {
         if (allocation_state() == SegmentAllocationState::kAllocationNotStarted) {
           RETURN_NOT_OK(AsyncAllocateSegment());
         }
         return RollOver();
+      } else if (entry_batch->IsSingleEntryOfType(ASYNC_ROLLOVER_AT_FLUSH_MARKER)) {
+        if (allocation_state() == SegmentAllocationState::kAllocationNotStarted) {
+          const auto min_size_to_rollover =
+              GetAtomicFlag(&FLAGS_min_segment_size_bytes_to_rollover_at_flush);
+          if (min_size_to_rollover < 0 || active_segment_->Size() < min_size_to_rollover) {
+            VLOG_WITH_PREFIX(1) << Format("Skipping async wal rotation at flush. "
+                                          "segment_size: $0 min_size_to_rollover: $1",
+                                          active_segment_->Size(), min_size_to_rollover);
+            return Status::OK();
+          }
+          next_max_segment_size_ = std::max<uint64_t>(
+              options_.initial_segment_size_bytes, cur_max_segment_size_ / 2);
+          RETURN_NOT_OK(AsyncAllocateSegment());
+        }
+        if (!options_.async_preallocate_segments) {
+          return RollOver();
+        }
+        return Status::OK();
       }
     }
 
@@ -907,14 +1030,6 @@ Status Log::DoAppend(LogEntryBatch* entry_batch,
   CHECK_OK(UpdateIndexForBatch(*entry_batch));
   UpdateFooterForBatch(entry_batch);
 
-  // We expect the caller to free the actual entries if caller_owns_operation is set.
-  if (caller_owns_operation) {
-    for (int i = 0; i < entry_batch->entry_batch_pb_.entry_size(); i++) {
-      LogEntryPB* entry_pb = entry_batch->entry_batch_pb_.mutable_entry(i);
-      entry_pb->release_replicate();
-    }
-  }
-
   return Status::OK();
 }
 
@@ -923,13 +1038,12 @@ Status Log::UpdateIndexForBatch(const LogEntryBatch& batch) {
     return Status::OK();
   }
 
-  for (const LogEntryPB& entry_pb : batch.entry_batch_pb_.entry()) {
-    LogIndexEntry index_entry;
-
-    index_entry.op_id = yb::OpId::FromPB(entry_pb.replicate().id());
-    index_entry.segment_sequence_number = batch.active_segment_sequence_number_;
-    index_entry.offset_in_segment = batch.offset_;
-    RETURN_NOT_OK(log_index_->AddEntry(index_entry));
+  for (const auto& entry_pb : batch.entry_batch_pb_->entry()) {
+    RETURN_NOT_OK(log_index_->AddEntry(LogIndexEntry {
+      .op_id = OpId::FromPB(entry_pb.replicate().id()),
+      .segment_sequence_number = batch.active_segment_sequence_number_,
+      .offset_in_segment = batch.offset_,
+    }));
   }
   return Status::OK();
 }
@@ -941,7 +1055,7 @@ void Log::UpdateFooterForBatch(LogEntryBatch* batch) {
   // startup.  We also retrieve the OpId of the first operation in the batch so that, if we roll
   // over to a new segment, we set the first operation in the footer immediately.
   // Update the index bounds for the current segment.
-  for (const LogEntryPB& entry_pb : batch->entry_batch_pb_.entry()) {
+  for (const auto& entry_pb : batch->entry_batch_pb_->entry()) {
     UpdateSegmentFooterIndexes(entry_pb.replicate(), &footer_builder_);
   }
   if (footer_builder_.has_min_replicate_index()) {
@@ -951,24 +1065,121 @@ void Log::UpdateFooterForBatch(LogEntryBatch* batch) {
 
 Status Log::AllocateSegmentAndRollOver() {
   VLOG_WITH_PREFIX_AND_FUNC(1) << "Start";
-  auto* reserved_entry_batch = ReserveMarker(ROLLOVER_MARKER);
+  auto reserved_entry_batch = VERIFY_RESULT(ReserveMarker(SYNC_ROLLOVER_MARKER));
   Synchronizer s;
-  RETURN_NOT_OK(AsyncAppend(reserved_entry_batch, s.AsStatusCallback()));
+  RETURN_NOT_OK(AsyncAppend(std::move(reserved_entry_batch), s.AsStatusCallback()));
   return s.Wait();
 }
 
-Status Log::EnsureInitialNewSegmentAllocated() {
+Status Log::AsyncAllocateSegmentAndRollover() {
+  VLOG_WITH_PREFIX_AND_FUNC(1) << "Start";
+  auto reserved_entry_batch = VERIFY_RESULT(ReserveMarker(ASYNC_ROLLOVER_AT_FLUSH_MARKER));
+  return AsyncAppend(std::move(reserved_entry_batch), {});
+}
+
+Result<bool> Log::ReuseAsActiveSegment(const scoped_refptr<ReadableLogSegment>& recover_segment) {
+  auto read_entries = recover_segment->ReadEntries();
+  RETURN_NOT_OK(read_entries.status);
+  int64_t file_size = read_entries.end_offset;
+  if (file_size > FLAGS_reuse_unclosed_segment_threshold_bytes) {
+    VLOG_WITH_PREFIX(2)
+        << "Cannot reuse last WAL segment " << recover_segment->path()
+        << " as active_segment due to its actual file size " << file_size
+        << " is greater than reuse threshold " << FLAGS_reuse_unclosed_segment_threshold_bytes;
+    RETURN_NOT_OK(recover_segment->RebuildFooterByScanning(read_entries));
+    return false;
+  }
+  next_segment_path_ = recover_segment->path();
+  auto opts = GetNewSegmentWritableFileOptions();
+  opts.mode = Env::OPEN_EXISTING;
+  opts.initial_offset = file_size;
+  // There are two reasons of why we want to set the initial offset:
+  // 1. Overwrite corrupted entry, because last entry in the segment is possible to be corrupted
+  //    under the case that server crashed in the middle of writing entry.
+  // 2. Before server crash, file might get preallocated to certain size.
+  //    This set intial offset option ensure we start with offset at last valid entry,
+  //    instead of at the end of preallocated block.
+  auto status = env_util::OpenFileForWrite(opts, get_env(), next_segment_path_,
+                                           &next_segment_file_);
+  if (!status.ok()) {
+      VLOG_WITH_PREFIX(2)
+          << "Cannot reuse last WAL segment " << next_segment_path_
+          << " as active_segment due to file could not be reopened: " << status.ToString();
+      RETURN_NOT_OK(recover_segment->RebuildFooterByScanning(read_entries));
+      return false;
+  }
+
+  uint64_t real_size = recover_segment->file_size();
+  if (options_.preallocate_segments) {
+    // File was likely to be pre-allocated. In this case, real_size is the preallocation size.
+    cur_max_segment_size_ = real_size;
+  } else {
+    cur_max_segment_size_ = options_.initial_segment_size_bytes;
+    while (cur_max_segment_size_ <= real_size) {
+      cur_max_segment_size_ *= 2;
+    }
+    cur_max_segment_size_ = std::min(cur_max_segment_size_, max_segment_size_);
+  }
+  // Restore footer_builder_ and log index for this segment first.
+  footer_builder_.Clear();
+  RETURN_NOT_OK(recover_segment->RestoreFooterBuilderAndLogIndex(&footer_builder_,
+                                                                 log_index_.get(),
+                                                                 read_entries));
+  if (footer_builder_.has_min_replicate_index()) {
+    min_replicate_index_.store(footer_builder_.min_replicate_index(),
+                               std::memory_order_release);
+  }
+  std::unique_ptr<WritableLogSegment> new_segment(
+      new WritableLogSegment(next_segment_path_, next_segment_file_));
+
+  active_segment_sequence_number_ = recover_segment->header().sequence_number();
+  RETURN_NOT_OK(new_segment->ReuseHeader(recover_segment->header(),
+                                         recover_segment->first_entry_offset()));
+
+  {
+    std::lock_guard lock(active_segment_mutex_);
+    active_segment_ = std::move(new_segment);
+  }
+  LOG(INFO) << "Successfully restored footer_builder_ and log_index_ for segment: "
+            << recover_segment->path() << ". Reopen the file for write with starting offset: "
+            << file_size;
+  return true;
+}
+
+Status Log::EnsureSegmentInitialized() {
+  std::lock_guard write_lock(state_lock_);
+  return EnsureSegmentInitializedUnlocked();
+}
+
+Status Log::EnsureSegmentInitializedUnlocked() {
   if (log_state_ == LogState::kLogWriting) {
     // New segment already created.
     return Status::OK();
   }
   if (log_state_ != LogState::kLogInitialized) {
     return STATUS_FORMAT(
-        IllegalState, "Unexpected log state in EnsureInitialNewSegmentAllocated: $0", log_state_);
+        IllegalState, "Unexpected log state in EnsureSegmentInitialized(): $0", log_state_);
   }
-  RETURN_NOT_OK(AsyncAllocateSegment());
-  RETURN_NOT_OK(allocation_status_.Get());
-  RETURN_NOT_OK(SwitchToAllocatedSegment());
+
+  bool reuse_last_segment = false;
+  // For last segment that doesn't have a footer, if its file size (last readable offset)
+  // is within the reuse_unclosed_segment_threshold_bytes, we will reuse it as active_segment_.
+  // Otherwise, close this segment by building a footer in memory.
+  SegmentSequence segments;
+  RETURN_NOT_OK(reader_->GetSegmentsSnapshot(&segments));
+  if (!segments.empty()) {
+    const scoped_refptr<ReadableLogSegment>& last_segment = VERIFY_RESULT(segments.back());
+    if (!last_segment->HasFooter()) {
+      // Reuse this segment as writable active_segment.
+      reuse_last_segment = VERIFY_RESULT(ReuseAsActiveSegment(last_segment));
+    }
+  }
+  // Allocate new segment as writable active_segment.
+  if (!reuse_last_segment) {
+    RETURN_NOT_OK(AsyncAllocateSegment());
+    RETURN_NOT_OK(allocation_status_.Get());
+    RETURN_NOT_OK(SwitchToAllocatedSegment());
+  }
   log_index_->SetMinIndexedSegmentNumber(active_segment_sequence_number_);
 
   RETURN_NOT_OK(appender_->Init());
@@ -1004,7 +1215,8 @@ Status Log::EnsureInitialNewSegmentAllocated() {
 // might not be necessary. We only call ::DoSync directly before we call ::CloseCurrentSegment
 Status Log::DoSync() {
   // Acquire the lock over active_segment_ to prevent segment rollover in the interim.
-  std::lock_guard<std::mutex> lock(active_segment_mutex_);
+  SCOPED_WAIT_STATUS(WAL_Sync);
+  std::lock_guard lock(active_segment_mutex_);
   if (active_segment_->IsClosed()) {
     return Status::OK();
   }
@@ -1031,6 +1243,7 @@ Status Log::DoSync() {
 // have to use active_segment_sequence_number_ instead of fsync_task_in_queue_, in ::Sync(), to
 // determine if there is a pending fsync task corresponding to the current active segment.
 void Log::DoSyncAndResetTaskInQueue() {
+  ADOPT_WAIT_STATE(background_synchronizer_wait_state_);
   auto status = DoSync();
   if (!status.ok()) {
     // ensure that fsync gets called on the subsequent call to Log::Sync() function
@@ -1164,9 +1377,9 @@ Status Log::UpdateSegmentReadableOffset() {
   // Update the reader on how far it can read the active segment.
   RETURN_NOT_OK(reader_->UpdateLastSegmentOffset(active_segment_->written_offset()));
   {
-    std::lock_guard<std::mutex> write_lock(last_synced_entry_op_id_mutex_);
+    std::lock_guard write_lock(last_synced_entry_op_id_mutex_);
     last_synced_entry_op_id_.store(last_appended_entry_op_id_, boost::memory_order_release);
-    last_synced_entry_op_id_cond_.notify_all();
+    YB_PROFILE(last_synced_entry_op_id_cond_.notify_all());
   }
   return Status::OK();
 }
@@ -1178,13 +1391,28 @@ Status Log::GetSegmentsToGCUnlocked(int64_t min_op_idx, SegmentSequence* segment
   // avoid concurrently deleting those ops, we bump min_op_idx here to be at-least as
   // low as log_copy_min_index_.
   min_op_idx = std::min(log_copy_min_index_, min_op_idx);
+
+  auto xrepl_min_replicated_index = cdc_min_replicated_index_.load(std::memory_order_acquire);
+
+  {
+    std::lock_guard l(get_xcluster_index_lock_);
+    if (get_xcluster_min_index_to_retain_) {
+      xrepl_min_replicated_index =
+          std::min(xrepl_min_replicated_index, get_xcluster_min_index_to_retain_(tablet_id_));
+    }
+  }
+
   // Find the prefix of segments in the segment sequence that is guaranteed not to include
   // 'min_op_idx'.
   RETURN_NOT_OK(reader_->GetSegmentPrefixNotIncluding(
-      min_op_idx, cdc_min_replicated_index_.load(std::memory_order_acquire), segments_to_gc));
+      min_op_idx, xrepl_min_replicated_index, segments_to_gc));
 
-  auto max_to_delete = std::max<ssize_t>(
-      reader_->num_segments() - FLAGS_log_min_segments_to_retain, 0);
+  if (segments_to_gc->size() > 0) {
+    UpdateMinStartTimeRunningTxnsFromGCSegments((*segments_to_gc));
+  }
+
+  const auto max_to_delete =
+      std::max<ssize_t>(reader_->num_segments() - FLAGS_log_min_segments_to_retain, 0);
   ssize_t segments_to_gc_size = segments_to_gc->size();
   if (segments_to_gc_size > max_to_delete) {
     VLOG_WITH_PREFIX(2)
@@ -1198,6 +1426,19 @@ Status Log::GetSegmentsToGCUnlocked(int64_t min_op_idx, SegmentSequence* segment
     VLOG_WITH_PREFIX(2) << "Too many log segments, need to GC " << extra_segments << " more.";
   }
 
+  if PREDICT_TRUE(!FLAGS_TEST_disable_wal_retention_time) {
+    ApplyTimeRetentionPolicy(segments_to_gc);
+  }
+
+  return Status::OK();
+}
+
+Status Log::GetSegmentsToGC(int64_t min_op_idx, SegmentSequence* segments_to_gc) const {
+  PerCpuRwSharedLock read_lock(state_lock_);
+  return GetSegmentsToGCUnlocked(min_op_idx, segments_to_gc);
+}
+
+void Log::ApplyTimeRetentionPolicy(SegmentSequence* segments_to_gc) const {
   // Don't GC segments that are newer than the configured time-based retention.
   int64_t now = GetCurrentTimeMicros() + FLAGS_time_based_wal_gc_clock_delta_usec;
 
@@ -1219,20 +1460,18 @@ Status Log::GetSegmentsToGCUnlocked(int64_t min_op_idx, SegmentSequence* segment
       break;
     }
   }
-
-  return Status::OK();
 }
 
-Status Log::Append(LogEntryPB* phys_entry,
-                   LogEntryMetadata entry_metadata,
-                   bool skip_wal_write) {
-  LogEntryBatchPB entry_batch_pb;
+Status Log::Append(
+     const std::shared_ptr<LWLogEntryPB>& phys_entry, LogEntryMetadata entry_metadata,
+     SkipWalWrite skip_wal_write) {
+  auto& entry_batch_pb = *phys_entry->arena().NewObject<LWLogEntryBatchPB>(&phys_entry->arena());
   if (entry_metadata.entry_time != RestartSafeCoarseTimePoint()) {
     entry_batch_pb.set_mono_time(entry_metadata.entry_time.ToUInt64());
   }
 
-  entry_batch_pb.mutable_entry()->AddAllocated(phys_entry);
-  LogEntryBatch entry_batch(phys_entry->type(), std::move(entry_batch_pb));
+  entry_batch_pb.mutable_entry()->push_back_ref(phys_entry.get());
+  LogEntryBatch entry_batch(phys_entry->type(), {phys_entry, &entry_batch_pb});
   // Mark this as reserved, as we're building it from preallocated data.
   entry_batch.state_ = LogEntryBatch::kEntryReserved;
   // Ready assumes the data is reserved before it is ready.
@@ -1242,28 +1481,25 @@ Status Log::Append(LogEntryPB* phys_entry,
     entry_batch.offset_ = entry_metadata.offset;
     entry_batch.active_segment_sequence_number_ = entry_metadata.active_segment_sequence_number;
   }
-  Status s = DoAppend(&entry_batch, false, skip_wal_write);
+  Status s = DoAppend(&entry_batch, skip_wal_write);
   if (s.ok() && !skip_wal_write) {
     // Only sync if we actually performed a wal write.
     s = Sync();
   }
-  entry_batch.entry_batch_pb_.mutable_entry()->ExtractSubrange(0, 1, nullptr);
   return s;
 }
 
-LogEntryBatch* Log::ReserveMarker(LogEntryTypePB type) {
-  LogEntryBatchPB entry_batch;
-  entry_batch.add_entry()->set_type(type);
-  LogEntryBatch* reserved_entry_batch;
-  Reserve(type, &entry_batch, &reserved_entry_batch);
-  return reserved_entry_batch;
+Result<std::unique_ptr<Log::LogEntryBatch>> Log::ReserveMarker(LogEntryTypePB type) {
+  auto entry_batch = rpc::MakeSharedMessage<LWLogEntryBatchPB>();
+  entry_batch->add_entry()->set_type(type);
+  return Reserve(type, std::move(entry_batch));
 }
 
 Status Log::WaitUntilAllFlushed() {
   // In order to make sure we empty the queue we need to use the async API.
-  auto* reserved_entry_batch = ReserveMarker(FLUSH_MARKER);
+  auto reserved_entry_batch = VERIFY_RESULT(ReserveMarker(FLUSH_MARKER));
   Synchronizer s;
-  RETURN_NOT_OK(AsyncAppend(reserved_entry_batch, s.AsStatusCallback()));
+  RETURN_NOT_OK(AsyncAppend(std::move(reserved_entry_batch), s.AsStatusCallback()));
   return s.Wait();
 }
 
@@ -1274,6 +1510,17 @@ void Log::set_wal_retention_secs(uint32_t wal_retention_secs) {
 
 uint32_t Log::wal_retention_secs() const {
   uint32_t wal_retention_secs = wal_retention_secs_.load(std::memory_order_acquire);
+
+  {
+    // If tablet is under xCluster, adjust WAL retention time for xCluster.
+    std::lock_guard l(get_xcluster_index_lock_);
+    if (FLAGS_enable_xcluster_timed_based_wal_retention &&
+        get_xcluster_min_index_to_retain_ &&
+        get_xcluster_min_index_to_retain_(tablet_id_) != std::numeric_limits<int64_t>::max()) {
+      wal_retention_secs = std::max(wal_retention_secs, FLAGS_cdc_wal_retention_time_secs);
+    }
+  }
+
   auto flag_wal_retention = ANNOTATE_UNPROTECTED_READ(FLAGS_log_min_seconds_to_retain);
   return flag_wal_retention > 0 ?
       std::max(wal_retention_secs, static_cast<uint32_t>(flag_wal_retention)) :
@@ -1338,7 +1585,7 @@ Status Log::GC(int64_t min_op_idx, int32_t* num_gced) {
     SegmentSequence segments_to_delete;
 
     {
-      std::lock_guard<percpu_rwlock> l(state_lock_);
+      std::lock_guard l(state_lock_);
       CHECK_EQ(kLogWriting, log_state_);
 
       RETURN_NOT_OK(GetSegmentsToGCUnlocked(min_op_idx, &segments_to_delete));
@@ -1375,6 +1622,7 @@ Status Log::GC(int64_t min_op_idx, int32_t* num_gced) {
       log_index_->GC(min_remaining_op_idx);
     }
   }
+
   return Status::OK();
 }
 
@@ -1386,7 +1634,7 @@ Status Log::GetGCableDataSize(int64_t min_op_idx, int64_t* total_size) const {
   SegmentSequence segments_to_delete;
   *total_size = 0;
   {
-    SharedLock<rw_spinlock> read_lock(state_lock_.get_lock());
+    PerCpuRwSharedLock read_lock(state_lock_);
     if (log_state_ != kLogWriting) {
       return STATUS_FORMAT(IllegalState, "Invalid log state $0, expected $1",
           log_state_, kLogWriting);
@@ -1408,7 +1656,7 @@ LogReader* Log::GetLogReader() const {
 }
 
 Status Log::GetSegmentsSnapshot(SegmentSequence* segments) const {
-  SharedLock<rw_spinlock> read_lock(state_lock_.get_lock());
+  PerCpuRwSharedLock read_lock(state_lock_);
   if (!reader_) {
     return STATUS(IllegalState, "Log already closed");
   }
@@ -1419,7 +1667,7 @@ Status Log::GetSegmentsSnapshot(SegmentSequence* segments) const {
 uint64_t Log::OnDiskSize() {
   SegmentSequence segments;
   {
-    shared_lock<rw_spinlock> l(state_lock_.get_lock());
+    PerCpuRwSharedLock l(state_lock_);
     // If the log is closed, the tablet is either being deleted or tombstoned,
     // so we don't count the size of its log anymore as it should be deleted.
     if (log_state_ == kLogClosed || !reader_->GetSegmentsSnapshot(&segments).ok()) {
@@ -1437,20 +1685,27 @@ uint64_t Log::OnDiskSize() {
 
 void Log::SetSchemaForNextLogSegment(const Schema& schema,
                                      uint32_t version) {
-  std::lock_guard<rw_spinlock> l(schema_lock_);
+  std::lock_guard l(schema_lock_);
   *schema_ = schema;
   schema_version_ = version;
 }
 
+Status Log::TEST_WriteCorruptedEntryBatchAndSync() {
+  return active_segment_->TEST_WriteCorruptedEntryBatchAndSync();
+}
+
 Status Log::Close() {
-  if (PREDICT_FALSE(FLAGS_TEST_simulate_abrupt_server_restart)) {
-    return Status::OK();
-  }
   // Allocation pool is used from appender pool, so we should shutdown appender first.
   appender_->Shutdown();
   allocation_token_.reset();
 
-  std::lock_guard<percpu_rwlock> l(state_lock_);
+  if (PREDICT_FALSE(FLAGS_TEST_simulate_abrupt_server_restart)) {
+    return Status::OK();
+  }
+
+  WriteLatestMinStartTimeRunningTxnsInFooterBuilder();
+
+  std::lock_guard l(state_lock_);
   switch (log_state_) {
     case kLogWriting:
       // Appender uses background_sync_threadpool_token_, so we should reset it
@@ -1462,6 +1717,9 @@ Status Log::Close() {
       RETURN_NOT_OK(CloseCurrentSegment());
       RETURN_NOT_OK(ReplaceSegmentInReaderUnlocked());
       log_state_ = kLogClosed;
+      if (background_synchronizer_wait_state_) {
+        yb::ash::RaftLogWaitStatesTracker().Untrack(background_synchronizer_wait_state_);
+      }
       VLOG_WITH_PREFIX(1) << "Log closed";
 
       // Release FDs held by these objects.
@@ -1480,12 +1738,12 @@ Status Log::Close() {
 }
 
 size_t Log::num_segments() const {
-  std::shared_lock<rw_spinlock> read_lock(state_lock_.get_lock());
+  PerCpuRwSharedLock read_lock(state_lock_);
   return reader_ ? reader_->num_segments() : 0;
 }
 
 Result<scoped_refptr<ReadableLogSegment>> Log::GetSegmentBySequenceNumber(const int64_t seq) const {
-  SharedLock<rw_spinlock> read_lock(state_lock_.get_lock());
+  PerCpuRwSharedLock read_lock(state_lock_);
   if (!reader_) {
     return STATUS(NotFound, "LogReader is not initialized");
   }
@@ -1530,7 +1788,7 @@ Result<SegmentOpIdRelation> Log::GetSegmentOpIdRelation(
   auto read_entries = segment->ReadEntries();
   RETURN_NOT_OK(read_entries.status);
 
-  const auto has_replicate = [](const std::unique_ptr<LogEntryPB>& entry) {
+  const auto has_replicate = [](const auto& entry) {
     return entry->has_replicate();
   };
   const auto first_replicate =
@@ -1609,16 +1867,16 @@ Status Log::CopyTo(const std::string& dest_wal_dir, const OpId max_included_op_i
   VLOG_WITH_PREFIX_AND_FUNC(1) << "dest_wal_dir: " << dest_wal_dir
                                << " max_included_op_id: " << AsString(max_included_op_id);
   // We mainly need log_copy_mutex_ to simplify managing of log_copy_min_index_.
-  std::lock_guard<decltype(log_copy_mutex_)> log_copy_lock(log_copy_mutex_);
+  std::lock_guard log_copy_lock(log_copy_mutex_);
   auto se = ScopeExit([this]() {
-    std::lock_guard<percpu_rwlock> l(state_lock_);
+    std::lock_guard l(state_lock_);
     log_copy_min_index_ = std::numeric_limits<int64_t>::max();
   });
 
   SegmentSequence segments;
   scoped_refptr<LogIndex> log_index;
   {
-    UniqueLock<percpu_rwlock> l(state_lock_);
+    UniqueLock<PerCpuRwMutex> l(state_lock_);
     if (log_state_ != kLogInitialized) {
       SCHECK_EQ(log_state_, kLogWriting, IllegalState, Format("Invalid log state: $0", log_state_));
       ReverseLock<decltype(l)> rlock(l);
@@ -1681,7 +1939,7 @@ Status Log::CopyTo(const std::string& dest_wal_dir, const OpId max_included_op_i
 }
 
 uint64_t Log::NextSegmentDesiredSize() {
-  return std::min(cur_max_segment_size_ * 2, max_segment_size_);
+  return next_max_segment_size_.value_or(std::min(cur_max_segment_size_ * 2, max_segment_size_));
 }
 
 WritableFileOptions Log::GetNewSegmentWritableFileOptions() {
@@ -1707,6 +1965,10 @@ Status Log::PreAllocateNewSegment() {
     RETURN_NOT_OK(next_segment_file_->PreAllocate(next_segment_size));
   }
 
+  if (new_segment_allocation_callback_) {
+    RETURN_NOT_OK(new_segment_allocation_callback_());
+  }
+
   allocation_state_.store(SegmentAllocationState::kAllocationFinished, std::memory_order_release);
   return Status::OK();
 }
@@ -1715,11 +1977,6 @@ Status Log::SwitchToAllocatedSegment() {
   CHECK_EQ(allocation_state(), SegmentAllocationState::kAllocationFinished);
   // Increment "next" log segment seqno.
   active_segment_sequence_number_++;
-  const string new_segment_path =
-      FsManager::GetWalSegmentFilePath(wal_dir_, active_segment_sequence_number_);
-
-  RETURN_NOT_OK(get_env()->RenameFile(next_segment_path_, new_segment_path));
-  RETURN_NOT_OK(get_env()->SyncDir(wal_dir_));
 
   int64_t fault_after_min_replicate_index =
       FLAGS_TEST_log_fault_after_segment_allocation_min_replicate_index;
@@ -1731,7 +1988,7 @@ Status Log::SwitchToAllocatedSegment() {
 
   // Create a new segment.
   std::unique_ptr<WritableLogSegment> new_segment(
-      new WritableLogSegment(new_segment_path, next_segment_file_));
+      new WritableLogSegment(next_segment_path_, next_segment_file_));
 
   // Set up the new header and footer.
   LogSegmentHeaderPB header;
@@ -1744,19 +2001,47 @@ Status Log::SwitchToAllocatedSegment() {
   footer_builder_.Clear();
   footer_builder_.set_num_entries(0);
 
+  // As this is an active segment, set the min_start_time_running_txns as kInvalid since we want CDC
+  // to stream all records from this segment based on the tablet leader safe time.
+  if (GetAtomicFlag(&FLAGS_store_min_start_ht_running_txns)) {
+    footer_builder_.set_min_start_time_running_txns(HybridTime::kInvalid.ToUint64());
+  }
+
+  if (GetAtomicFlag(&FLAGS_store_last_wal_op_log_ht)) {
+    footer_builder_.set_last_wal_op_log_ht(HybridTime::kInvalid.ToUint64());
+  }
+
   // Set the new segment's schema.
   {
     SharedLock<decltype(schema_lock_)> l(schema_lock_);
-    SchemaToPB(*schema_, header.mutable_schema());
-    header.set_schema_version(schema_version_);
+    SchemaToPB(*schema_, header.mutable_deprecated_schema());
+    header.set_deprecated_schema_version(schema_version_);
   }
 
-  RETURN_NOT_OK(new_segment->WriteHeaderAndOpen(header));
+  if (PREDICT_FALSE(FLAGS_TEST_crash_before_wal_header_is_written)) {
+    LOG_WITH_PREFIX(FATAL) << "Crash before wal header is written";
+  }
+  RETURN_NOT_OK(new_segment->WriteHeader(header));
+  // Calling Sync() here is important because it ensures the file has a complete WAL header
+  // on disk before renaming the file.
+  {
+    SCOPED_WAIT_STATUS(WAL_Sync);
+    RETURN_NOT_OK(new_segment->Sync());
+  }
+
+  const auto new_segment_path =
+      FsManager::GetWalSegmentFilePath(wal_dir_, active_segment_sequence_number_);
+  // Rename should happen after writing the header and sync. Otherwise, if the server crashes
+  // immediately after the rename, an incomplete WAL headers could cause future tablet bootstrap
+  // to fail repeatedly.
+  RETURN_NOT_OK(get_env()->RenameFile(next_segment_path_, new_segment_path));
+  RETURN_NOT_OK(get_env()->SyncDir(wal_dir_));
+  new_segment->set_path(new_segment_path);
   // Transform the currently-active segment into a readable one, since we need to be able to replay
   // the segments for other peers.
   {
     if (active_segment_.get() != nullptr) {
-      std::lock_guard<decltype(state_lock_)> l(state_lock_);
+      std::lock_guard l(state_lock_);
       CHECK_OK(ReplaceSegmentInReaderUnlocked());
     }
   }
@@ -1772,11 +2057,12 @@ Status Log::SwitchToAllocatedSegment() {
   RETURN_NOT_OK(reader_->AppendEmptySegment(readable_segment));
   // Now set 'active_segment_' to the new segment.
   {
-    std::lock_guard<std::mutex> lock(active_segment_mutex_);
+    std::lock_guard lock(active_segment_mutex_);
     active_segment_ = std::move(new_segment);
   }
 
   cur_max_segment_size_ = NextSegmentDesiredSize();
+  next_max_segment_size_.reset();
 
   allocation_state_.store(
       SegmentAllocationState::kAllocationNotStarted, std::memory_order_release);
@@ -1829,14 +2115,18 @@ Status Log::ResetLastSyncedEntryOpId(const OpId& op_id) {
 
   OpId old_value;
   {
-    std::lock_guard<std::mutex> write_lock(last_synced_entry_op_id_mutex_);
+    std::lock_guard write_lock(last_synced_entry_op_id_mutex_);
     old_value = last_synced_entry_op_id_.load(boost::memory_order_acquire);
     last_synced_entry_op_id_.store(op_id, boost::memory_order_release);
-    last_synced_entry_op_id_cond_.notify_all();
+    YB_PROFILE(last_synced_entry_op_id_cond_.notify_all());
   }
   LOG_WITH_PREFIX(INFO) << "Reset last synced entry op id from " << old_value << " to " << op_id;
 
   return Status::OK();
+}
+
+HybridTime Log::GetMinStartHTOfRunningTxnsFromGCSegments() const {
+  return min_start_time_running_txns_from_gc_segments_.load(std::memory_order_acquire);
 }
 
 Log::~Log() {
@@ -1846,39 +2136,36 @@ Log::~Log() {
 // ------------------------------------------------------------------------------------------------
 // LogEntryBatch
 
-LogEntryBatch::LogEntryBatch(LogEntryTypePB type, LogEntryBatchPB&& entry_batch_pb)
+Log::LogEntryBatch::LogEntryBatch(
+    LogEntryTypePB type, std::shared_ptr<LWLogEntryBatchPB> entry_batch_pb)
     : type_(type),
       entry_batch_pb_(std::move(entry_batch_pb)),
-      count_(entry_batch_pb_.entry().size()) {
+      count_(entry_batch_pb_->entry().size()) {
   if (!IsMarkerType(type_)) {
-    DCHECK_NE(entry_batch_pb_.mono_time(), 0);
+    DCHECK_NE(entry_batch_pb_->mono_time(), 0);
   }
 }
 
-LogEntryBatch::~LogEntryBatch() {
-  // ReplicateMsg objects are pointed to by LogEntryBatchPB but are really owned by shared pointers
-  // in replicates_. To avoid double freeing, release them from the protobuf.
-  for (auto& entry : *entry_batch_pb_.mutable_entry()) {
-    if (entry.has_replicate()) {
-      entry.release_replicate();
-    }
-  }
-}
+Log::LogEntryBatch::~LogEntryBatch() = default;
 
-void LogEntryBatch::MarkReserved() {
+void Log::LogEntryBatch::MarkReserved() {
   DCHECK_EQ(state_, kEntryInitialized);
   state_ = kEntryReserved;
 }
 
-bool LogEntryBatch::IsMarker() const {
-  return count() == 1 && IsMarkerType(entry_batch_pb_.entry(0).type());
+bool Log::LogEntryBatch::IsMarker() const {
+  return count() == 1 && IsMarkerType(entry_batch_pb_->entry().front().type());
 }
 
-bool LogEntryBatch::IsSingleEntryOfType(LogEntryTypePB type) const {
-  return count() == 1 && entry_batch_pb_.entry(0).type() == type;
+bool Log::LogEntryBatch::IsSingleEntryOfType(LogEntryTypePB type) const {
+  return count() == 1 && entry_batch_pb_->entry().front().type() == type;
 }
 
-Status LogEntryBatch::Serialize() {
+bool Log::LogEntryBatch::IsRolloverMarker() const {
+  return count() == 1 && IsRolloverMarkerType(entry_batch_pb_->entry().front().type());
+}
+
+Status Log::LogEntryBatch::Serialize() {
   DCHECK_EQ(state_, kEntryReady);
   buffer_.clear();
   // *_MARKER LogEntries are markers and are not serialized.
@@ -1887,19 +2174,140 @@ Status LogEntryBatch::Serialize() {
     state_ = kEntrySerialized;
     return Status::OK();
   }
-  DCHECK_NE(entry_batch_pb_.mono_time(), 0);
-  total_size_bytes_ = entry_batch_pb_.ByteSize();
-  buffer_.reserve(total_size_bytes_);
-
-  RETURN_NOT_OK(pb_util::AppendToString(entry_batch_pb_, &buffer_));
+  SCHECK_NE(entry_batch_pb_->mono_time(), 0ULL, IllegalState, "Mono time should be specified");
+  total_size_bytes_ = entry_batch_pb_->SerializedSize();
+  buffer_.resize(total_size_bytes_);
+  entry_batch_pb_->SerializeToArray(buffer_.data());
 
   state_ = kEntrySerialized;
   return Status::OK();
 }
 
-void LogEntryBatch::MarkReady() {
+void Log::LogEntryBatch::MarkReady() {
   DCHECK_EQ(state_, kEntryReserved);
   state_ = kEntryReady;
+}
+
+bool Log::HasSufficientDiskSpaceForWrite() {
+  const auto now = CoarseMonoClock::Now();
+  const auto last_disk_space_check_time =
+      last_disk_space_check_time_.load(std::memory_order_acquire);
+
+  auto check_interval_sec = disk_space_frequent_check_interval_sec_.load(std::memory_order_acquire);
+  if (check_interval_sec == 0) {
+    check_interval_sec = FLAGS_reject_writes_min_disk_space_check_interval_sec;
+  }
+
+  if (IsInitialized(last_disk_space_check_time) &&
+      (now - last_disk_space_check_time < check_interval_sec * 1s)) {
+    return has_free_disk_space_.load(std::memory_order_acquire);
+  }
+
+  std::unique_lock l(disk_space_mutex_, std::defer_lock);
+  if (!l.try_lock_for(std::chrono::milliseconds(0))) {
+    // Someone else is already checking disk space. Just use the cached value.
+
+    if (!IsInitialized(last_disk_space_check_time)) {
+      // Always wait for the initial value to be valid.
+      SharedLock shared_l(disk_space_mutex_);
+    }
+
+    return has_free_disk_space_.load(std::memory_order_acquire);
+  }
+
+  std::string path;
+  {
+    std::lock_guard lock(active_segment_mutex_);
+    path = active_segment_->path();
+  }
+
+  bool has_space = true;
+  const uint32 kAggressiveCheckIntervalSec = 10;
+  // Lets assume we need to check frequently. If we have enough space, we will increment to a
+  // higher value.
+  check_interval_sec =
+      std::min(kAggressiveCheckIntervalSec, FLAGS_reject_writes_min_disk_space_check_interval_sec);
+
+  const uint64 min_allowed_disk_space_mb =
+      FLAGS_reject_writes_min_disk_space_mb ? FLAGS_reject_writes_min_disk_space_mb
+                                            : FLAGS_max_disk_throughput_mbps * check_interval_sec;
+
+  const uint64 min_space_to_trigger_aggressive_check_mb =
+      FLAGS_max_disk_throughput_mbps * FLAGS_reject_writes_min_disk_space_check_interval_sec;
+
+  auto free_space_result = get_env()->GetFreeSpaceBytes(path);
+  if (!free_space_result.ok()) {
+    YB_LOG_EVERY_N_SECS(WARNING, 300) << "Unable to get free space: " << free_space_result;
+
+    // Fallback to the last known value.
+    return has_free_disk_space_.load(std::memory_order_acquire);
+  }
+  const auto free_space_mb = *free_space_result / 1024 / 1024;
+
+  if (free_space_mb < min_allowed_disk_space_mb) {
+    YB_LOG_EVERY_N_SECS(ERROR, 600) << "Not enough disk space available on " << path
+                                    << ". Free space: " << *free_space_result << " bytes";
+    has_space = false;
+  } else if (free_space_mb < min_space_to_trigger_aggressive_check_mb) {
+    YB_LOG_EVERY_N_SECS(WARNING, 600)
+        << "Low disk space on " << path << ". Free space: " << *free_space_result << " bytes";
+  } else {
+    // We have enough space so no need to check frequently.
+    check_interval_sec = FLAGS_reject_writes_min_disk_space_check_interval_sec;
+  }
+
+  disk_space_frequent_check_interval_sec_.store(check_interval_sec, std::memory_order_release);
+  has_free_disk_space_.store(has_space, std::memory_order_release);
+  last_disk_space_check_time_.store(now, std::memory_order_release);
+
+  return has_space;
+}
+
+void Log::WriteLatestMinStartTimeRunningTxnsInFooterBuilder() {
+  if (!GetAtomicFlag(&FLAGS_store_min_start_ht_running_txns)) {
+    return;
+  }
+  HybridTime min_start_ht_running_txns = HybridTime::kInitial;
+  if (min_start_ht_running_txns_callback_ && GetAtomicFlag(&FLAGS_store_last_wal_op_log_ht)) {
+    min_start_ht_running_txns = min_start_ht_running_txns_callback_();
+    VLOG_WITH_PREFIX(2) << "min_start_ht_running_txns from callback: " << min_start_ht_running_txns;
+    DCHECK_NE(min_start_ht_running_txns, HybridTime::kInvalid);
+    if (footer_builder_.has_last_wal_op_log_ht()) {
+      auto last_wal_op_ht = HybridTime(footer_builder_.last_wal_op_log_ht());
+      VLOG_WITH_PREFIX(2) << "last WAL OP's log HT: " << last_wal_op_ht;
+      min_start_ht_running_txns = std::min(min_start_ht_running_txns, last_wal_op_ht);
+    }
+  }
+
+  // If callback is not specified, we want to set min_start_time_running_txns to a valid value
+  // (in this case, kInitial) as it was set to kInvalid at the creation of this segment. This is to
+  // preserve the semantics that min_start_time_running_txns of a closed segment will always hold a
+  // valid HT value.
+  VLOG_WITH_PREFIX(2) << "setting min_start_ht_running_txns to " << min_start_ht_running_txns;
+  footer_builder_.set_min_start_time_running_txns(min_start_ht_running_txns.ToUint64());
+}
+
+void Log::UpdateMinStartTimeRunningTxnsFromGCSegments(const SegmentSequence& segments_to_gc) const {
+  for (const auto& segment : segments_to_gc) {
+    if (segment->HasFooter() && segment->footer().has_min_start_time_running_txns()) {
+      auto curr_seg_min_start_time =
+          HybridTime(segment->footer().min_start_time_running_txns());
+      VLOG_WITH_PREFIX(3) << "Current segment's minimum start HT of running txns: "
+                          << curr_seg_min_start_time;
+
+      auto curr_min_start_time_running_txns_from_gc_segments_ =
+          GetMinStartHTOfRunningTxnsFromGCSegments();
+      if (!curr_min_start_time_running_txns_from_gc_segments_.is_valid() ||
+          curr_seg_min_start_time > curr_min_start_time_running_txns_from_gc_segments_) {
+        VLOG_WITH_PREFIX(1) << "Setting min_start_time_running_txns_from_gc_segments to "
+                            << curr_seg_min_start_time
+                            << ", previous min_start_time_running_txns_from_gc_segments: "
+                            << curr_min_start_time_running_txns_from_gc_segments_;
+        min_start_time_running_txns_from_gc_segments_.store(
+            curr_seg_min_start_time, std::memory_order_release);
+      }
+    }
+  }
 }
 
 }  // namespace log

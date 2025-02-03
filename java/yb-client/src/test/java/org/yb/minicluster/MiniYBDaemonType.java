@@ -28,6 +28,29 @@ public enum MiniYBDaemonType {
 
     @Override
     public String humanReadableName() { return "tablet server"; }
+  },
+  YBCONTROLLER {
+    @Override
+    public String shortStr() {
+      return "yb-controller";
+    }
+
+    @Override
+    public String humanReadableName() {
+      return "yb controller server";
+    }
+  },
+  YUGABYTED {
+
+    @Override
+    public String shortStr() {
+        return "ybd";
+    }
+
+    @Override
+    public String humanReadableName() {
+        return "yugabyted";
+    }
   };
 
   abstract String shortStr();

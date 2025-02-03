@@ -6,9 +6,14 @@ import static com.yugabyte.yw.common.AlertTemplate.MEMORY_CONSUMPTION;
 import static com.yugabyte.yw.models.helpers.CommonUtils.nowMinusWithoutMillis;
 import static com.yugabyte.yw.models.helpers.CommonUtils.nowPlusWithoutMillis;
 import static com.yugabyte.yw.models.helpers.CommonUtils.nowWithoutMillis;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.mock;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.yugabyte.yw.commissioner.Common;
@@ -18,16 +23,22 @@ import com.yugabyte.yw.common.TableSpaceStructures.TableSpaceInfo;
 import com.yugabyte.yw.common.alerts.AlertChannelEmailParams;
 import com.yugabyte.yw.common.alerts.AlertChannelParams;
 import com.yugabyte.yw.common.alerts.AlertChannelSlackParams;
+import com.yugabyte.yw.common.alerts.impl.AlertTemplateService;
+import com.yugabyte.yw.common.alerts.impl.AlertTemplateService.AlertTemplateDescription;
 import com.yugabyte.yw.common.certmgmt.CertConfigType;
+import com.yugabyte.yw.common.config.RuntimeConfGetter;
+import com.yugabyte.yw.common.inject.StaticInjectorHolder;
 import com.yugabyte.yw.common.kms.EncryptionAtRestManager;
 import com.yugabyte.yw.common.kms.services.EncryptionAtRestService;
 import com.yugabyte.yw.common.metrics.MetricLabelsBuilder;
+import com.yugabyte.yw.common.utils.Pair;
 import com.yugabyte.yw.forms.AlertingData;
 import com.yugabyte.yw.forms.BackupTableParams;
 import com.yugabyte.yw.forms.CreateTablespaceParams;
 import com.yugabyte.yw.forms.UniverseDefinitionTaskParams;
 import com.yugabyte.yw.forms.UniverseDefinitionTaskParams.Cluster;
 import com.yugabyte.yw.forms.UniverseDefinitionTaskParams.UserIntent;
+import com.yugabyte.yw.forms.UniverseDefinitionTaskParams.UserIntent.K8SNodeResourceSpec;
 import com.yugabyte.yw.forms.filters.AlertConfigurationApiFilter;
 import com.yugabyte.yw.models.Alert;
 import com.yugabyte.yw.models.AlertChannel;
@@ -42,31 +53,42 @@ import com.yugabyte.yw.models.AvailabilityZone;
 import com.yugabyte.yw.models.Backup;
 import com.yugabyte.yw.models.CertificateInfo;
 import com.yugabyte.yw.models.Customer;
+import com.yugabyte.yw.models.InstanceType;
 import com.yugabyte.yw.models.KmsConfig;
 import com.yugabyte.yw.models.MaintenanceWindow;
 import com.yugabyte.yw.models.Provider;
+import com.yugabyte.yw.models.ProviderDetails;
 import com.yugabyte.yw.models.Region;
 import com.yugabyte.yw.models.Schedule;
 import com.yugabyte.yw.models.Universe;
 import com.yugabyte.yw.models.Universe.UniverseUpdater;
 import com.yugabyte.yw.models.Users;
-import com.yugabyte.yw.models.Users.Role;
 import com.yugabyte.yw.models.common.Condition;
 import com.yugabyte.yw.models.common.Unit;
 import com.yugabyte.yw.models.configs.CustomerConfig;
+import com.yugabyte.yw.models.helpers.CloudInfoInterface;
 import com.yugabyte.yw.models.helpers.CloudSpecificInfo;
 import com.yugabyte.yw.models.helpers.NodeDetails;
+import com.yugabyte.yw.models.helpers.NodeDetails.NodeState;
 import com.yugabyte.yw.models.helpers.PlacementInfo;
 import com.yugabyte.yw.models.helpers.PlacementInfo.PlacementAZ;
 import com.yugabyte.yw.models.helpers.PlacementInfo.PlacementCloud;
 import com.yugabyte.yw.models.helpers.PlacementInfo.PlacementRegion;
 import com.yugabyte.yw.models.helpers.TaskType;
+import com.yugabyte.yw.models.rbac.ResourceGroup;
+import com.yugabyte.yw.models.rbac.Role;
+import com.yugabyte.yw.models.rbac.RoleBinding;
+import com.yugabyte.yw.models.rbac.RoleBinding.RoleBindingType;
+import db.migration.default_.common.R__Sync_System_Roles;
+import io.ebean.DB;
 import java.io.IOException;
 import java.security.NoSuchAlgorithmException;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -75,7 +97,8 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
-import net.logstash.logback.encoder.org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.RandomStringUtils;
+import org.apache.commons.lang3.StringUtils;
 import play.libs.Json;
 
 public class ModelFactory {
@@ -104,15 +127,31 @@ public class ModelFactory {
   }
 
   public static Users testUser(Customer customer, String email) {
-    return testUser(customer, email, Role.Admin);
+    return testUser(customer, email, Users.Role.Admin);
   }
 
-  public static Users testUser(Customer customer, Role role) {
+  public static Users testUser(Customer customer, Users.Role role) {
     return testUser(customer, "test@customer.com", role);
   }
 
-  public static Users testUser(Customer customer, String email, Role role) {
-    return Users.create(email, "password", role, customer.uuid, false);
+  public static Users testUser(Customer customer, String email, Users.Role role) {
+    return Users.create(email, "password", role, customer.getUuid(), false);
+  }
+
+  public static Users testSuperAdminUserNewRbac(Customer customer) {
+    // Create test user.
+    Users testUser =
+        Users.create(
+            "test@customer.com", "password", Users.Role.SuperAdmin, customer.getUuid(), false);
+    // Create all built in roles.
+    R__Sync_System_Roles.syncSystemRoles();
+    Role testSuperAdminRole = Role.getOrBadRequest(customer.getUuid(), "SuperAdmin");
+    // Need to define all available resources in resource group as default.
+    ResourceGroup resourceGroup =
+        ResourceGroup.getSystemDefaultResourceGroup(customer.getUuid(), testUser);
+    // Create a single role binding for the user with super admin role.
+    RoleBinding.create(testUser, RoleBindingType.System, testSuperAdminRole, resourceGroup);
+    return testUser;
   }
 
   /*
@@ -120,36 +159,45 @@ public class ModelFactory {
    */
 
   public static Provider awsProvider(Customer customer) {
-    return Provider.create(customer.uuid, Common.CloudType.aws, "Amazon");
+    return Provider.create(customer.getUuid(), Common.CloudType.aws, "Amazon");
   }
 
   public static Provider gcpProvider(Customer customer) {
-    return Provider.create(customer.uuid, Common.CloudType.gcp, "Google");
+    return Provider.create(customer.getUuid(), Common.CloudType.gcp, "Google");
   }
 
   public static Provider azuProvider(Customer customer) {
-    return Provider.create(customer.uuid, Common.CloudType.azu, "Azure");
+    return Provider.create(customer.getUuid(), Common.CloudType.azu, "Azure");
   }
 
   public static Provider onpremProvider(Customer customer) {
-    return Provider.create(customer.uuid, Common.CloudType.onprem, "OnPrem");
+    return Provider.create(customer.getUuid(), Common.CloudType.onprem, "OnPrem");
   }
 
   public static Provider kubernetesProvider(Customer customer) {
-    return Provider.create(customer.uuid, Common.CloudType.kubernetes, "Kubernetes");
+    return Provider.create(customer.getUuid(), Common.CloudType.kubernetes, "Kubernetes");
+  }
+
+  public static Provider kubernetesProvider(Customer customer, String name) {
+    return Provider.create(customer.getUuid(), Common.CloudType.kubernetes, name);
   }
 
   public static Provider newProvider(Customer customer, Common.CloudType cloud) {
-    return Provider.create(customer.uuid, cloud, cloud.toString());
+    return Provider.create(customer.getUuid(), cloud, cloud.toString());
   }
 
   public static Provider newProvider(Customer customer, Common.CloudType cloud, String name) {
-    return Provider.create(customer.uuid, cloud, name);
+    return Provider.create(customer.getUuid(), cloud, name);
   }
 
   public static Provider newProvider(
       Customer customer, Common.CloudType cloud, Map<String, String> config) {
-    return Provider.create(customer.uuid, cloud, cloud.toString(), config);
+    return Provider.create(customer.getUuid(), cloud, cloud.toString(), config);
+  }
+
+  public static Provider newProvider(
+      Customer customer, Common.CloudType cloud, ProviderDetails details) {
+    return Provider.create(customer.getUuid(), cloud, cloud.toString(), details);
   }
 
   /*
@@ -220,39 +268,107 @@ public class ModelFactory {
       boolean enableYbc) {
     Customer c = Customer.get(customerId);
     // Custom setup a default AWS provider, can be overridden later.
-    List<Provider> providerList = Provider.get(c.uuid, cloudType);
+    List<Provider> providerList = Provider.get(c.getUuid(), cloudType);
     Provider p = providerList.isEmpty() ? newProvider(c, cloudType) : providerList.get(0);
 
     UniverseDefinitionTaskParams.UserIntent userIntent =
         new UniverseDefinitionTaskParams.UserIntent();
     userIntent.universeName = universeName;
-    userIntent.provider = p.uuid.toString();
+    userIntent.provider = p.getUuid().toString();
     userIntent.providerType = cloudType;
+    userIntent.ybSoftwareVersion = "2.17.0.0-b1";
     UniverseDefinitionTaskParams params = new UniverseDefinitionTaskParams();
-    params.universeUUID = universeUUID;
+    params.setUniverseUUID(universeUUID);
     params.nodeDetailsSet = new HashSet<>();
     params.nodePrefix = universeName;
     params.rootCA = rootCA;
-    params.enableYbc = enableYbc;
-    params.ybcInstalled = enableYbc;
+    params.setEnableYbc(enableYbc);
+    params.setYbcInstalled(enableYbc);
+    params.nodePrefix = Util.getNodePrefix(customerId, universeName);
     if (enableYbc) {
-      params.ybcSoftwareVersion = "1.0.0-b1";
+      params.setYbcSoftwareVersion("1.0.0-b1");
       NodeDetails node = new NodeDetails();
+      node.nodeUuid = UUID.randomUUID();
       node.cloudInfo = new CloudSpecificInfo();
       node.cloudInfo.private_ip = "127.0.0.1";
       params.nodeDetailsSet.add(node);
       NodeDetails node2 = node.clone();
+      node2.nodeUuid = UUID.randomUUID();
       node2.cloudInfo.private_ip = "127.0.0.2";
       params.nodeDetailsSet.add(node2);
-      userIntent.ybSoftwareVersion = "2.14.0.0-b1";
     }
     params.upsertPrimaryCluster(userIntent, pi);
     return Universe.create(params, customerId);
   }
 
+  public static Universe createK8sUniverseCustomCores(
+      String universeName,
+      UUID universeUUID,
+      long customerId,
+      PlacementInfo pi,
+      UUID rootCA,
+      boolean enableYbc,
+      double cores) {
+    Customer c = Customer.get(customerId);
+    // Custom setup a default AWS provider, can be overridden later.
+    List<Provider> providerList = Provider.get(c.getUuid(), CloudType.kubernetes);
+    Provider p =
+        providerList.isEmpty() ? newProvider(c, CloudType.kubernetes) : providerList.get(0);
+
+    UniverseDefinitionTaskParams.UserIntent userIntent =
+        new UniverseDefinitionTaskParams.UserIntent();
+    userIntent.universeName = universeName;
+    userIntent.provider = p.getUuid().toString();
+    userIntent.providerType = CloudType.kubernetes;
+    userIntent.ybSoftwareVersion = "2.17.0.0-b1";
+    K8SNodeResourceSpec spec = new K8SNodeResourceSpec();
+    spec.cpuCoreCount = cores;
+    userIntent.tserverK8SNodeResourceSpec = spec;
+    UniverseDefinitionTaskParams params = new UniverseDefinitionTaskParams();
+    params.setUniverseUUID(universeUUID);
+    params.nodeDetailsSet = new HashSet<>();
+    params.nodePrefix = universeName;
+    params.rootCA = rootCA;
+    params.setEnableYbc(enableYbc);
+    params.setYbcInstalled(enableYbc);
+    params.nodePrefix = Util.getNodePrefix(customerId, universeName);
+    params.upsertPrimaryCluster(userIntent, pi);
+    Universe u = Universe.create(params, customerId);
+    Map<String, String> config = new HashMap<>();
+    config.put(Universe.HELM2_LEGACY, Universe.HelmLegacy.V3.toString());
+    u.setConfig(config);
+    u.update();
+    return addNodesToUniverse(u.getUniverseUUID(), 3);
+  }
+
+  public static Universe addNodesToUniverse(UUID universeUUID, int numNodesToAdd) {
+    return Universe.saveDetails(
+        universeUUID,
+        new UniverseUpdater() {
+          @Override
+          public void run(Universe universe) {
+            UniverseDefinitionTaskParams params = universe.getUniverseDetails();
+            if (params.nodeDetailsSet == null) {
+              params.nodeDetailsSet = new HashSet<>();
+            }
+            for (int i = 1; i <= numNodesToAdd; i++) {
+              NodeDetails node = new NodeDetails();
+              node.cloudInfo = new CloudSpecificInfo();
+              node.state = NodeState.Live;
+              node.isTserver = true;
+              node.placementUuid = params.getPrimaryCluster().uuid;
+              node.cloudInfo.private_ip = "127.0.0." + Integer.toString(i);
+              params.nodeDetailsSet.add(node);
+            }
+            universe.setUniverseDetails(params);
+          }
+        },
+        false);
+  }
+
   public static CustomerConfig createS3StorageConfig(Customer customer, String configName) {
     JsonNode formData = getS3ConfigFormData(configName);
-    return CustomerConfig.createWithFormData(customer.uuid, formData);
+    return CustomerConfig.createWithFormData(customer.getUuid(), formData);
   }
 
   public static JsonNode getS3ConfigFormData(String configName) {
@@ -272,17 +388,31 @@ public class ModelFactory {
                 + "\", \"name\": \"S3\","
                 + " \"type\": \"STORAGE\", \"data\": {\"BACKUP_LOCATION\": \"s3://foo\","
                 + " \"IAM_INSTANCE_PROFILE\": \"true\"}}");
-    return CustomerConfig.createWithFormData(customer.uuid, formData);
+    return CustomerConfig.createWithFormData(customer.getUuid(), formData);
   }
 
   public static CustomerConfig createNfsStorageConfig(Customer customer, String configName) {
+    return createNfsStorageConfig(customer, configName, "/foo/bar");
+  }
+
+  public static CustomerConfig createNfsStorageConfig(
+      Customer customer, String configName, String backupLocation) {
+    return createNfsStorageConfig(customer, configName, backupLocation, "yugabyte_backup");
+  }
+
+  public static CustomerConfig createNfsStorageConfig(
+      Customer customer, String configName, String backupLocation, String bucketName) {
     JsonNode formData =
         Json.parse(
             "{\"configName\": \""
                 + configName
                 + "\", \"name\": \"NFS\","
-                + " \"type\": \"STORAGE\", \"data\": {\"BACKUP_LOCATION\": \"/foo/bar\"}}");
-    return CustomerConfig.createWithFormData(customer.uuid, formData);
+                + " \"type\": \"STORAGE\", \"data\": {\"BACKUP_LOCATION\": \""
+                + backupLocation
+                + "\", \"NFS_BUCKET\": \""
+                + bucketName
+                + "\"}}");
+    return CustomerConfig.createWithFormData(customer.getUuid(), formData);
   }
 
   public static CustomerConfig createGcsStorageConfig(Customer customer, String configName) {
@@ -293,7 +423,7 @@ public class ModelFactory {
                 + "\", \"name\": \"GCS\","
                 + " \"type\": \"STORAGE\", \"data\": {\"BACKUP_LOCATION\": \"gs://foo\","
                 + " \"GCS_CREDENTIALS_JSON\": \"G-CREDS\"}}");
-    return CustomerConfig.createWithFormData(customer.uuid, formData);
+    return CustomerConfig.createWithFormData(customer.getUuid(), formData);
   }
 
   public static CustomerConfig createAZStorageConfig(Customer customer, String configName) {
@@ -306,13 +436,13 @@ public class ModelFactory {
                 + " \"data\":"
                 + " {\"BACKUP_LOCATION\": \"https://foo.blob.core.windows.net/azurecontainer\","
                 + " \"AZURE_STORAGE_SAS_TOKEN\": \"AZ-TOKEN\"}}");
-    return CustomerConfig.createWithFormData(customer.uuid, formData);
+    return CustomerConfig.createWithFormData(customer.getUuid(), formData);
   }
 
   public static Backup createBackup(UUID customerUUID, UUID universeUUID, UUID configUUID) {
     BackupTableParams params = new BackupTableParams();
     params.storageConfigUUID = configUUID;
-    params.universeUUID = universeUUID;
+    params.setUniverseUUID(universeUUID);
     params.setKeyspace("foo");
     params.setTableName("bar");
     params.tableUUID = UUID.randomUUID();
@@ -323,7 +453,7 @@ public class ModelFactory {
   public static Backup restoreBackup(UUID customerUUID, UUID universeUUID, UUID configUUID) {
     BackupTableParams params = new BackupTableParams();
     params.storageConfigUUID = configUUID;
-    params.universeUUID = universeUUID;
+    params.setUniverseUUID(universeUUID);
     params.setKeyspace("foo");
     params.setTableName("bar");
     params.tableUUID = UUID.randomUUID();
@@ -335,7 +465,7 @@ public class ModelFactory {
       UUID customerUUID, UUID universeUUID, UUID configUUID, UUID scheduleUUID) {
     BackupTableParams params = new BackupTableParams();
     params.storageConfigUUID = configUUID;
-    params.universeUUID = universeUUID;
+    params.setUniverseUUID(universeUUID);
     params.setKeyspace("foo");
     params.setTableName("bar");
     params.tableUUID = UUID.randomUUID();
@@ -348,7 +478,7 @@ public class ModelFactory {
       UUID customerUUID, UUID universeUUID, UUID configUUID) {
     BackupTableParams params = new BackupTableParams();
     params.storageConfigUUID = configUUID;
-    params.universeUUID = universeUUID;
+    params.setUniverseUUID(universeUUID);
     params.setKeyspace("foo");
     params.setTableName("bar");
     params.tableUUID = UUID.randomUUID();
@@ -360,7 +490,7 @@ public class ModelFactory {
       UUID customerUUID, UUID universeUUID, UUID configUUID) {
     BackupTableParams params = new BackupTableParams();
     params.storageConfigUUID = configUUID;
-    params.universeUUID = universeUUID;
+    params.setUniverseUUID(universeUUID);
     params.setKeyspace("foo");
     params.setTableName("bar");
     params.tableUUID = UUID.randomUUID();
@@ -368,7 +498,7 @@ public class ModelFactory {
   }
 
   public static CustomerConfig setCallhomeLevel(Customer customer, String level) {
-    return CustomerConfig.createCallHomeConfig(customer.uuid, level);
+    return CustomerConfig.createCallHomeConfig(customer.getUuid(), level);
   }
 
   public static CustomerConfig createAlertConfig(
@@ -378,7 +508,7 @@ public class ModelFactory {
     data.alertingEmail = alertingEmail;
     data.reportOnlyErrors = reportOnlyErrors;
 
-    CustomerConfig config = CustomerConfig.createAlertConfig(customer.uuid, Json.toJson(data));
+    CustomerConfig config = CustomerConfig.createAlertConfig(customer.getUuid(), Json.toJson(data));
     config.save();
     return config;
   }
@@ -431,7 +561,6 @@ public class ModelFactory {
         new AlertDefinition()
             .setConfigurationUUID(configuration.getUuid())
             .setCustomerUUID(customer.getUuid())
-            .setQuery("query {{ query_condition }} {{ query_threshold }}")
             .generateUUID();
     if (universe != null) {
       alertDefinition.setLabels(
@@ -480,6 +609,10 @@ public class ModelFactory {
 
   public static Alert createAlert(
       Customer customer, Universe universe, AlertDefinition definition, Consumer<Alert> modifier) {
+    AlertTemplateService alertTemplateService =
+        StaticInjectorHolder.injector().instanceOf(AlertTemplateService.class);
+    RuntimeConfGetter runtimeConfGetter =
+        StaticInjectorHolder.injector().instanceOf(RuntimeConfGetter.class);
     Alert alert =
         new Alert()
             .setCustomerUUID(customer.getUuid())
@@ -497,13 +630,20 @@ public class ModelFactory {
       definition = createAlertDefinition(customer, universe, configuration);
     }
     AlertConfiguration configuration =
-        AlertConfiguration.db().find(AlertConfiguration.class, definition.getConfigurationUUID());
+        DB.getDefault().find(AlertConfiguration.class, definition.getConfigurationUUID());
     alert.setConfigurationUuid(definition.getConfigurationUUID());
     alert.setConfigurationType(configuration.getTargetType());
     alert.setDefinitionUuid(definition.getUuid());
+    AlertTemplateDescription alertTemplateDescription =
+        alertTemplateService.getTemplateDescription(configuration.getTemplate());
     List<AlertLabel> labels =
         definition
-            .getEffectiveLabels(configuration, null, AlertConfiguration.Severity.SEVERE)
+            .getEffectiveLabels(
+                alertTemplateDescription,
+                configuration,
+                null,
+                AlertConfiguration.Severity.SEVERE,
+                runtimeConfGetter)
             .stream()
             .map(l -> new AlertLabel(l.getName(), l.getValue()))
             .collect(Collectors.toList());
@@ -596,7 +736,11 @@ public class ModelFactory {
 
   public static KmsConfig createKMSConfig(
       UUID customerUUID, String keyProvider, ObjectNode authConfig, String configName) {
-    EncryptionAtRestManager keyManager = new EncryptionAtRestManager();
+    RuntimeConfGetter mockRuntimeConfGetter = mock(RuntimeConfGetter.class);
+    lenient()
+        .when(mockRuntimeConfGetter.getConfForScope(any(Universe.class), any()))
+        .thenReturn(false);
+    EncryptionAtRestManager keyManager = new EncryptionAtRestManager(mockRuntimeConfGetter);
     EncryptionAtRestService keyService = keyManager.getServiceInstance(keyProvider);
     return keyService.createAuthConfig(customerUUID, configName, authConfig);
   }
@@ -608,7 +752,14 @@ public class ModelFactory {
       UUID customerUUID, String certificate, CertConfigType certType)
       throws IOException, NoSuchAlgorithmException {
     return CertificateInfo.create(
-        UUID.randomUUID(), customerUUID, "test", new Date(), new Date(), "", certificate, certType);
+        UUID.randomUUID(),
+        customerUUID,
+        "test-" + RandomStringUtils.randomAlphanumeric(8),
+        new Date(),
+        new Date(),
+        "",
+        certificate,
+        certType);
   }
 
   // Create a universe from the configuration string. The configuration string
@@ -628,13 +779,14 @@ public class ModelFactory {
   // - For each mentioned regions we are trying to find it at first. If the region
   // isn't found, it is created. The same is about availability zones.
   public static Universe createFromConfig(Provider provider, String univName, String config) {
-    Customer customer = Customer.get(provider.customerUUID);
-    Universe universe = createUniverse(univName, customer.getCustomerId());
+    Customer customer = Customer.get(provider.getCustomerUUID());
+    Universe universe =
+        createUniverse(univName, UUID.randomUUID(), customer.getId(), provider.getCloudCode());
 
     UUID placementUuid = universe.getUniverseDetails().getPrimaryCluster().uuid;
     PlacementCloud cloud = new PlacementCloud();
-    cloud.uuid = provider.uuid;
-    cloud.code = provider.code;
+    cloud.uuid = provider.getUuid();
+    cloud.code = provider.getCode();
 
     PlacementInfo placementInfo = new PlacementInfo();
     placementInfo.cloudList.add(cloud);
@@ -661,7 +813,6 @@ public class ModelFactory {
           !azOpt.isPresent()
               ? AvailabilityZone.createOrThrow(region, zone, zone, "subnet-" + zone)
               : azOpt.get();
-
       int count = Integer.parseInt(parts[2]);
       if (count == 0) {
         // No nodes in this zone yet.
@@ -680,17 +831,17 @@ public class ModelFactory {
                 NodeDetails.NodeState.Live,
                 mastersCount-- > 0,
                 true,
-                "aws",
+                provider.getCode(),
                 regionCode,
-                az.code,
+                az.getCode(),
                 null);
         node.placementUuid = placementUuid;
-        node.azUuid = az.uuid;
+        node.azUuid = az.getUuid();
         nodes.add(node);
 
         zonePlacement.numNodesInAZ++;
       }
-      regionList.add(region.uuid);
+      regionList.add(region.getUuid());
     }
 
     // Update userIntent for Universe
@@ -698,13 +849,14 @@ public class ModelFactory {
     userIntent.universeName = univName;
     userIntent.replicationFactor = rf;
     userIntent.numNodes = numNodes;
-    userIntent.provider = provider.code;
+    userIntent.provider = provider.getUuid().toString();
     userIntent.regionList = regionList;
     userIntent.instanceType = ApiUtils.UTIL_INST_TYPE;
     userIntent.ybSoftwareVersion = "0.0.1";
     userIntent.accessKeyCode = "akc";
-    userIntent.providerType = CloudType.aws;
+    userIntent.providerType = provider.getCloudCode();
     userIntent.preferredRegion = null;
+    userIntent.deviceInfo = ApiUtils.getDummyDeviceInfo(1, 100);
 
     UniverseUpdater updater =
         u -> {
@@ -715,15 +867,15 @@ public class ModelFactory {
           primaryCluster.placementInfo = placementInfo;
         };
 
-    return Universe.saveDetails(universe.universeUUID, updater);
+    return Universe.saveDetails(universe.getUniverseUUID(), updater);
   }
 
   private static PlacementRegion createRegionPlacement(Region region) {
     PlacementRegion regionPlacement;
     regionPlacement = new PlacementRegion();
-    regionPlacement.code = region.code;
-    regionPlacement.name = region.name;
-    regionPlacement.uuid = region.uuid;
+    regionPlacement.code = region.getCode();
+    regionPlacement.name = region.getName();
+    regionPlacement.uuid = region.getUuid();
     return regionPlacement;
   }
 
@@ -733,10 +885,10 @@ public class ModelFactory {
    */
   public static PlacementAZ getOrCreatePlacementAZ(
       PlacementInfo pi, Region region, AvailabilityZone az) {
-    PlacementAZ zonePlacement = PlacementInfoUtil.findPlacementAzByUuid(pi, az.uuid);
+    PlacementAZ zonePlacement = PlacementInfoUtil.findPlacementAzByUuid(pi, az.getUuid());
     if (zonePlacement == null) {
       // Need to add the zone itself.
-      PlacementRegion regionPlacement = findPlacementRegionByUuid(pi, region.uuid);
+      PlacementRegion regionPlacement = findPlacementRegionByUuid(pi, region.getUuid());
       if (regionPlacement == null) {
         // The region is missed as well.
         regionPlacement = createRegionPlacement(region);
@@ -744,8 +896,8 @@ public class ModelFactory {
       }
 
       zonePlacement = new PlacementAZ();
-      zonePlacement.name = az.name;
-      zonePlacement.uuid = az.uuid;
+      zonePlacement.name = az.getName();
+      zonePlacement.uuid = az.getUuid();
       regionPlacement.azList.add(zonePlacement);
     }
     return zonePlacement;
@@ -760,6 +912,159 @@ public class ModelFactory {
       }
     }
     return null;
+  }
+
+  public static PlacementInfo constructPlacementInfoObject(Map<UUID, Integer> azToNumNodesMap) {
+    Map<UUID, PlacementInfo.PlacementCloud> placementCloudMap = new HashMap<>();
+    Map<UUID, PlacementInfo.PlacementRegion> placementRegionMap = new HashMap<>();
+    for (UUID azUUID : azToNumNodesMap.keySet()) {
+      AvailabilityZone currentAz = AvailabilityZone.get(azUUID);
+
+      // Get existing PlacementInfo Cloud or set up a new one.
+      Provider currentProvider = currentAz.getProvider();
+      PlacementInfo.PlacementCloud cloudItem =
+          placementCloudMap.getOrDefault(currentProvider.getUuid(), null);
+      if (cloudItem == null) {
+        cloudItem = new PlacementInfo.PlacementCloud();
+        cloudItem.uuid = currentProvider.getUuid();
+        cloudItem.code = currentProvider.getCode();
+        cloudItem.regionList = new ArrayList<>();
+        placementCloudMap.put(currentProvider.getUuid(), cloudItem);
+      }
+
+      // Get existing PlacementInfo Region or set up a new one.
+      Region currentRegion = currentAz.getRegion();
+      PlacementInfo.PlacementRegion regionItem =
+          placementRegionMap.getOrDefault(currentRegion.getUuid(), null);
+      if (regionItem == null) {
+        regionItem = new PlacementInfo.PlacementRegion();
+        regionItem.uuid = currentRegion.getUuid();
+        regionItem.name = currentRegion.getName();
+        regionItem.code = currentRegion.getCode();
+        regionItem.azList = new ArrayList<>();
+        cloudItem.regionList.add(regionItem);
+        placementRegionMap.put(currentRegion.getUuid(), regionItem);
+      }
+
+      // Get existing PlacementInfo AZ or set up a new one.
+      PlacementInfo.PlacementAZ azItem = new PlacementInfo.PlacementAZ();
+      azItem.name = currentAz.getName();
+      azItem.subnet = currentAz.getSubnet();
+      azItem.replicationFactor = 1;
+      azItem.uuid = currentAz.getUuid();
+      azItem.numNodesInAZ = azToNumNodesMap.get(azUUID);
+      regionItem.azList.add(azItem);
+    }
+    PlacementInfo placementInfo = new PlacementInfo();
+    placementInfo.cloudList = ImmutableList.copyOf(placementCloudMap.values());
+    return placementInfo;
+  }
+
+  public static Pair<ObjectNode, List<AvailabilityZone>> addClusterAndNodeDetailsK8s(
+      String ybVersion, boolean createRR, Customer customer, ObjectNode deviceInfo) {
+    Provider p = ModelFactory.kubernetesProvider(customer);
+    Region r = Region.create(p, "region-1", "PlacementRegion 1", "default-image");
+    AvailabilityZone az1 = AvailabilityZone.createOrThrow(r, "az-1", "PlacementAZ 1", "subnet-1");
+    AvailabilityZone az2 = AvailabilityZone.createOrThrow(r, "az-2", "PlacementAZ 2", "subnet-2");
+    AvailabilityZone az3 = AvailabilityZone.createOrThrow(r, "az-3", "PlacementAZ 3", "subnet-3");
+    Map<String, String> config = new HashMap<>();
+    config.put("KUBECONFIG", "xyz");
+    CloudInfoInterface.setCloudProviderInfoFromConfig(p, config);
+    p.getDetails().getCloudInfo().getKubernetes().setLegacyK8sProvider(false);
+    p.save();
+    InstanceType i =
+        InstanceType.upsert(p.getUuid(), "small", 10, 5.5, new InstanceType.InstanceTypeDetails());
+    ObjectNode bodyJson = Json.newObject();
+    ObjectNode userIntentJson =
+        Json.newObject()
+            .put("universeName", "K8sUniverseNewStyle")
+            .put("instanceType", i.getInstanceTypeCode())
+            .put("replicationFactor", 3)
+            .put("numNodes", 3)
+            .put("provider", p.getUuid().toString())
+            .put("providerType", "kubernetes")
+            .put("ybSoftwareVersion", ybVersion);
+    ArrayNode regionList = Json.newArray().add(r.getUuid().toString());
+
+    userIntentJson.set("regionList", regionList);
+    userIntentJson.set("deviceInfo", deviceInfo);
+    UniverseDefinitionTaskParams.Cluster cluster =
+        new UniverseDefinitionTaskParams.Cluster(
+            UniverseDefinitionTaskParams.ClusterType.PRIMARY,
+            Json.fromJson(userIntentJson, UserIntent.class));
+    Map<UUID, Integer> azToNumNodesMap = new HashMap<>();
+    azToNumNodesMap.put(az1.getUuid(), 1);
+    azToNumNodesMap.put(az2.getUuid(), 1);
+    azToNumNodesMap.put(az3.getUuid(), 1);
+    PlacementInfo pi = ModelFactory.constructPlacementInfoObject(azToNumNodesMap);
+    cluster.placementInfo = pi;
+
+    NodeDetails node1 = new NodeDetails();
+    node1.cloudInfo = new CloudSpecificInfo();
+    node1.cloudInfo.instance_type = i.getInstanceTypeCode();
+    node1.cloudInfo.az = az1.getName();
+    node1.cloudInfo.region = r.getName();
+    node1.azUuid = az1.getUuid();
+    node1.placementUuid = cluster.uuid;
+    node1.isMaster = true;
+    node1.state = NodeState.ToBeAdded;
+    NodeDetails node2 = new NodeDetails();
+    node2.cloudInfo = new CloudSpecificInfo();
+    node2.cloudInfo.instance_type = i.getInstanceTypeCode();
+    node2.cloudInfo.az = az2.getName();
+    node2.cloudInfo.region = r.getName();
+    node2.azUuid = az2.getUuid();
+    node2.placementUuid = cluster.uuid;
+    node2.isMaster = true;
+    node2.state = NodeState.ToBeAdded;
+    NodeDetails node3 = new NodeDetails();
+    node3.cloudInfo = new CloudSpecificInfo();
+    node3.cloudInfo.instance_type = i.getInstanceTypeCode();
+    node3.cloudInfo.az = az3.getName();
+    node3.cloudInfo.region = r.getName();
+    node3.azUuid = az3.getUuid();
+    node3.placementUuid = cluster.uuid;
+    node3.isMaster = true;
+    node3.state = NodeState.ToBeAdded;
+
+    ArrayNode clusters = Json.newArray();
+    clusters.add(Json.toJson(cluster));
+
+    ArrayNode nodes = Json.newArray();
+    nodes.add(Json.toJson(node1)).add(Json.toJson(node2)).add(Json.toJson(node3));
+
+    List<AvailabilityZone> azs = new ArrayList<>(Arrays.asList(az1, az2, az3));
+
+    if (createRR) {
+      AvailabilityZone az4 = AvailabilityZone.createOrThrow(r, "az-4", "PlacementAZ 4", "subnet-4");
+      ObjectNode rrIntentJson = userIntentJson.deepCopy();
+      rrIntentJson.put("numNodes", 1);
+      rrIntentJson.put("replicationFactor", 1);
+      UniverseDefinitionTaskParams.Cluster rrCluster =
+          new UniverseDefinitionTaskParams.Cluster(
+              UniverseDefinitionTaskParams.ClusterType.ASYNC,
+              Json.fromJson(rrIntentJson, UserIntent.class));
+      Map<UUID, Integer> azToNumNodesMapRR = new HashMap<>();
+      azToNumNodesMapRR.put(az4.getUuid(), 1);
+      PlacementInfo piRR = ModelFactory.constructPlacementInfoObject(azToNumNodesMapRR);
+      rrCluster.placementInfo = piRR;
+      NodeDetails node1RR = new NodeDetails();
+      node1RR.cloudInfo = new CloudSpecificInfo();
+      node1RR.cloudInfo.instance_type = i.getInstanceTypeCode();
+      node1RR.cloudInfo.az = az4.getName();
+      node1RR.azUuid = az4.getUuid();
+      node1RR.state = NodeState.ToBeAdded;
+      node1RR.placementUuid = rrCluster.uuid;
+      clusters.add(Json.toJson(rrCluster));
+      nodes.add(Json.toJson(node1RR));
+      azs.add(az4);
+    }
+
+    bodyJson.set("clusters", clusters);
+    bodyJson.put("nodePrefix", Util.getNodePrefix(customer.getId(), "K8sUniverseNewStyle"));
+    bodyJson.set("nodeDetailsSet", nodes);
+    bodyJson.put("userAZSelected", true);
+    return new Pair<>(bodyJson, azs);
   }
 
   /*

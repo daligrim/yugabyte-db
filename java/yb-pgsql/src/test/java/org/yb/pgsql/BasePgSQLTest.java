@@ -13,7 +13,6 @@
 package org.yb.pgsql;
 
 import static com.google.common.base.Preconditions.checkArgument;
-import static com.google.common.base.Preconditions.checkNotNull;
 import static org.yb.AssertionWrappers.assertEquals;
 import static org.yb.AssertionWrappers.assertFalse;
 import static org.yb.AssertionWrappers.assertLessThan;
@@ -23,15 +22,12 @@ import static org.yb.AssertionWrappers.fail;
 import static org.yb.util.BuildTypeUtil.isASAN;
 import static org.yb.util.BuildTypeUtil.isTSAN;
 
-import java.io.ByteArrayOutputStream;
-import java.io.PrintStream;
 import java.io.File;
-import java.net.InetSocketAddress;
+import java.net.MalformedURLException;
 import java.net.URL;
 import java.net.URLConnection;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -41,16 +37,18 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Properties;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.Scanner;
 import java.util.Set;
-import java.util.TreeMap;
 import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -73,10 +71,15 @@ import org.yb.minicluster.MiniYBClusterBuilder;
 import org.yb.minicluster.MiniYBDaemon;
 import org.yb.minicluster.RocksDBMetrics;
 import org.yb.minicluster.YsqlSnapshotVersion;
-import org.yb.util.*;
+import org.yb.util.BuildTypeUtil;
 import org.yb.util.MiscUtil.ThrowingCallable;
+import org.yb.util.SystemUtil;
+import org.yb.util.ThrowingRunnable;
+import org.yb.util.YBBackupException;
+import org.yb.util.YBBackupUtil;
 
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Lists;
 import com.google.common.net.HostAndPort;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
@@ -91,7 +94,7 @@ import com.yugabyte.util.PSQLException;
 public class BasePgSQLTest extends BaseMiniClusterTest {
   private static final Logger LOG = LoggerFactory.getLogger(BasePgSQLTest.class);
 
-  /** Corresponds to the original value of YB_MIN_UNUSED_OID. */
+  /** Corresponds to the first OID used for YB system catalog objects. */
   protected final long FIRST_YB_OID = 8000;
 
   /** Matches Postgres' FirstBootstrapObjectId */
@@ -101,18 +104,20 @@ public class BasePgSQLTest extends BaseMiniClusterTest {
   protected final long FIRST_NORMAL_OID = 16384;
 
   // Postgres settings.
-  protected static final String DEFAULT_PG_DATABASE = "yugabyte";
+  // TODO(janand) GH #17899 Deduplicate DEFAULT_PG_DATABASE and TEST_PG_USER (present in
+  // BasePgSQLTest and ConnectionBuilder)
+  // NOTE: Values for DEFAULT_PG_DATABASE and TEST_PG_USER should be same in both
+  // org.yb.pgsql.ConnectionBuilder and org.yb.pgsql.BasePgSQLTest
+  protected static final String DEFAULT_PG_DATABASE = ConnectionBuilder.DEFAULT_PG_DATABASE;
   protected static final String DEFAULT_PG_USER = "yugabyte";
   protected static final String DEFAULT_PG_PASS = "yugabyte";
-  protected static final String TEST_PG_USER = "yugabyte_test";
+  protected static final String TEST_PG_USER = ConnectionBuilder.TEST_PG_USER;
+  protected static final String TEST_PG_PASS = "pass";
 
   // Non-standard PSQL states defined in yb_pg_errcodes.h
   protected static final String SERIALIZATION_FAILURE_PSQL_STATE = "40001";
   protected static final String SNAPSHOT_TOO_OLD_PSQL_STATE = "72000";
-
-  // Postgres flags.
-  private static final String MASTERS_FLAG = "FLAGS_pggate_master_addresses";
-  private static final String YB_ENABLED_IN_PG_ENV_VAR_NAME = "YB_ENABLED_IN_POSTGRES";
+  protected static final String DEADLOCK_DETECTED_PSQL_STATE = "40P01";
 
   // Metric names.
   protected static final String METRIC_PREFIX = "handler_latency_yb_ysqlserver_SQLProcessor_";
@@ -132,6 +137,82 @@ public class BasePgSQLTest extends BaseMiniClusterTest {
   protected static final String AGGREGATE_PUSHDOWNS_METRIC = METRIC_PREFIX + "AggregatePushdowns";
   protected static final String CATALOG_CACHE_MISSES_METRICS = METRIC_PREFIX + "CatalogCacheMisses";
 
+  // Some reasons why the test should not be run with connection manager
+  protected static final String UNIQUE_PHYSICAL_CONNS_NEEDED =
+      "Test needs two different physical connections. With Connection Manager the logical" +
+        " connections will share the same physical connection in a single threaded test if" +
+        " no active transactions are there on the first connection";
+
+  protected static final String CANNOT_GURANTEE_EXPECTED_PHYSICAL_CONN_FOR_CACHE =
+      "Test is designed in a way which requires every logical connection to have a dedicated " +
+      "physical connection. In the test backends are loaded with meta data of the object " +
+      "(tables) on executing DML with the premise (a) when withCachedMetadata is true, then " +
+      "the same backend processes the queries in a session (b) when withCachedMetadata is " +
+      "false, a new backend processes queries for a new connection (session). in both these " +
+      "cases the premise cannot be guaranteed when run with Connection Manager, hence skipping " +
+      "the tests with connection manager";
+
+  protected static final String LESSER_PHYSICAL_CONNS =
+      "Skipping this test with Ysql Connection Manager as logical connections " +
+        "created are lesser than physical connections and the real maximum limit for creating " +
+        "connections is never reached";
+
+  protected static final String NO_PHYSICAL_CONN_ATTACHED =
+      "Skipping this test with Ysql Connection Manager as no physical connection "+
+        "is being assigned therefore no backend id present when logical connection is not " +
+        "executing any transaction";
+
+  protected static final String SAME_PHYSICAL_CONN_AFFECTING_DIFF_LOGICAL_CONNS_MEM =
+      "Skipping this test with Ysql Connection Manager as all 3 logical " +
+        "connections will be using same physical conn, due to which it will affect the memory " +
+        "allocated to connection1 by connection2";
+
+  protected static final String CATALOG_CACHE_MISS_NEED_UNIQUE_PHYSICAL_CONN =
+      "Test needs two different physical connections while testing catalog cache misses." +
+      "With Connection Manager, logical connections will share the same physical connection " +
+      "due to which catalog cache hits occur for the same query executed on different logical " +
+      "connections";
+
+  protected static final String GUC_REPLAY_AFFECTS_CONN_STATE =
+      "Skipping this test with Connection Manager enabled. Connection Manager replays session " +
+        "variables at the beginning of transaction boundaries, causing erroneous results in " +
+        "the test, leading to failure.";
+
+  protected static final String INCORRECT_CONN_STATE_BEHAVIOR =
+      "Skipping this test with Connection Manager enabled. The connections may not be in the " +
+        "expected state due to the way physical connections are attached and detached from " +
+        "logical connections, where certain setting changes should only exist in new connections.";
+
+  protected static final String CONFIGURABLE_DEBUG_LOGS_NEEDED =
+      "(DB-12742) Skipping this test with Connection Manager enabled. The test requires the " +
+        "ability to configure debug logs for connection manager to be at the same levels as " +
+        "tserver log levels.";
+
+  protected static final String LONG_PASSWORD_SUPPORT_NEEDED =
+      "(DB-10387) This test leads to certain I/O errors due to the usage of long passwords when " +
+        "Connection Manager is enabled. Skipping this test with Connection Manager enabled.";
+
+  protected static final String RECREATE_USER_SUPPORT_NEEDED =
+      "(DB-10760) This test needs stricter statistic updates for when roles are recreated when " +
+        "Connection Manager is enabled. Skipping this test with Connection Manager enabled " +
+        "until the relevant code is pushed to master.";
+
+  protected static final String EXTENSION_NOT_SUPPORTED =
+      "The extension being used as part of the test is not supported with connection manager.";
+
+  // Warmup modes for Connection Manager during test runs.
+  protected static enum ConnectionManagerWarmupMode {
+    NONE,
+    RANDOM,
+    ROUND_ROBIN
+  }
+
+  protected static ConnectionManagerWarmupMode warmupMode = ConnectionManagerWarmupMode.RANDOM;
+
+  protected static final int CONN_MGR_WARMUP_BACKEND_COUNT = 3;
+
+  protected static boolean ysql_conn_mgr_superuser_sticky = false;
+
   // CQL and Redis settings, will be reset before each test via resetSettings method.
   protected boolean startCqlProxy = false;
   protected boolean startRedisProxy = false;
@@ -142,42 +223,14 @@ public class BasePgSQLTest extends BaseMiniClusterTest {
 
   protected static final int DEFAULT_STATEMENT_TIMEOUT_MS = 30000;
 
+  // Assuming maximum control connection created will be 3 in any test where config reload is
+  // required.
+  protected static final int MAX_ATTEMPTS_TO_DESTROY_CONTROL_CONN = 3;
+
   protected static ConcurrentSkipListSet<Integer> stuckBackendPidsConcMap =
       new ConcurrentSkipListSet<>();
 
   protected static boolean pgInitialized = false;
-
-  public void runPgRegressTest(
-      File inputDir, String schedule, long maxRuntimeMillis, File executable) throws Exception {
-    final int tserverIndex = 0;
-    PgRegressRunner pgRegress = new PgRegressRunner(inputDir, schedule, maxRuntimeMillis);
-    ProcessBuilder procBuilder = new PgRegressBuilder(executable)
-        .setDirs(inputDir, pgRegress.outputDir())
-        .setSchedule(schedule)
-        .setHost(getPgHost(tserverIndex))
-        .setPort(getPgPort(tserverIndex))
-        .setUser(DEFAULT_PG_USER)
-        .setDatabase("yugabyte")
-        .setEnvVars(getPgRegressEnvVars())
-        .getProcessBuilder();
-    pgRegress.run(procBuilder);
-  }
-
-  public void runPgRegressTest(File inputDir, String schedule) throws Exception {
-    runPgRegressTest(
-        inputDir, schedule, 0 /* maxRuntimeMillis */,
-        PgRegressBuilder.PG_REGRESS_EXECUTABLE);
-  }
-
-  public void runPgRegressTest(String schedule, long maxRuntimeMillis) throws Exception {
-    runPgRegressTest(
-        PgRegressBuilder.PG_REGRESS_DIR /* inputDir */, schedule, maxRuntimeMillis,
-        PgRegressBuilder.PG_REGRESS_EXECUTABLE);
-  }
-
-  public void runPgRegressTest(String schedule) throws Exception {
-    runPgRegressTest(schedule, 0 /* maxRuntimeMillis */);
-  }
 
   public static void perfAssertLessThan(double time1, double time2) {
     if (TestUtils.isReleaseBuild()) {
@@ -223,6 +276,26 @@ public class BasePgSQLTest extends BaseMiniClusterTest {
   }
 
   /**
+   * Add ysql_pg_conf_csv flag values using this method to avoid clobbering existing values.
+   * @param flagMap the map of flags to mutate
+   * @param value the raw text to append to the ysql_pg_conf_csv flag value
+   */
+  protected static void appendToYsqlPgConf(Map<String, String> flagMap, String value) {
+    final String flagName = "ysql_pg_conf_csv";
+    if (flagMap.containsKey(flagName)) {
+      flagMap.put(flagName, flagMap.get(flagName) + "," + value);
+    } else {
+      flagMap.put(flagName, value);
+    }
+  }
+
+  protected static void setFailOnConflictFlags(Map<String, String> flagMap) {
+    flagMap.put("enable_wait_queues", "false");
+    // The retries are set to 2 to speed up the tests.
+    appendToYsqlPgConf(flagMap, maxQueryLayerRetriesConf(2));
+  }
+
+  /**
    * @return flags shared between tablet server and initdb
    */
   @Override
@@ -245,9 +318,9 @@ public class BasePgSQLTest extends BaseMiniClusterTest {
     }
 
     flagMap.put("ysql_beta_features", "true");
-    flagMap.put("ysql_sleep_before_retry_on_txn_conflict", "false");
-    flagMap.put("ysql_max_write_restart_attempts", "2");
     flagMap.put("ysql_enable_reindex", "true");
+    flagMap.put("TEST_ysql_hide_catalog_version_increment_log", "true");
+    flagMap.put("ysql_conn_mgr_sequence_support_mode", "session");
 
     return flagMap;
   }
@@ -258,6 +331,7 @@ public class BasePgSQLTest extends BaseMiniClusterTest {
     flagMap.put("client_read_write_timeout_ms",
         String.valueOf(BuildTypeUtil.adjustTimeout(120000)));
     flagMap.put("memory_limit_hard_bytes", String.valueOf(2L * 1024 * 1024 * 1024));
+    flagMap.put("TEST_assert_no_future_catalog_version", "true");
     return flagMap;
   }
 
@@ -275,12 +349,23 @@ public class BasePgSQLTest extends BaseMiniClusterTest {
   protected void customizeMiniClusterBuilder(MiniYBClusterBuilder builder) {
     super.customizeMiniClusterBuilder(builder);
     builder.enableYsql(true);
+
+    if (isTestRunningWithConnectionManager()) {
+      builder.enableYsqlConnMgr(true);
+      builder.addCommonTServerFlag("ysql_conn_mgr_stats_interval",
+        Integer.toString(CONNECTIONS_STATS_UPDATE_INTERVAL_SECS));
+      builder.addCommonTServerFlag("ysql_conn_mgr_superuser_sticky",
+        Boolean.toString(ysql_conn_mgr_superuser_sticky));
+      builder.addCommonTServerFlag("TEST_ysql_conn_mgr_dowarmup_all_pools_mode",
+        warmupMode.toString().toLowerCase());
+    }
   }
 
   @Before
-  public void initYBBackupUtil() {
+  public void initYBBackupUtil() throws Exception {
     YBBackupUtil.setMasterAddresses(masterAddresses);
     YBBackupUtil.setPostgresContactPoint(miniCluster.getPostgresContactPoints().get(0));
+    YBBackupUtil.maybeStartYbControllers(miniCluster);
   }
 
   @Before
@@ -317,15 +402,26 @@ public class BasePgSQLTest extends BaseMiniClusterTest {
       connection = null;
     }
 
-    // Create test role.
+    connection = createTestRole();
+    allowSchemaPublic();
+    pgInitialized = true;
+  }
+
+  protected Connection createTestRole() throws Exception {
     try (Connection initialConnection = getConnectionBuilder().withUser(DEFAULT_PG_USER).connect();
          Statement statement = initialConnection.createStatement()) {
-      statement.execute(
-          "CREATE ROLE " + TEST_PG_USER + " SUPERUSER CREATEROLE CREATEDB BYPASSRLS LOGIN");
+        statement.execute(
+            String.format("CREATE ROLE %s SUPERUSER CREATEROLE CREATEDB BYPASSRLS LOGIN ",
+                          TEST_PG_USER));
     }
 
-    connection = getConnectionBuilder().connect();
-    pgInitialized = true;
+    return getConnectionBuilder().connect();
+  }
+
+  private void allowSchemaPublic() throws Exception {
+    try (Statement statement = connection.createStatement()) {
+      statement.execute("GRANT ALL ON SCHEMA public TO public");
+    }
   }
 
   public void restartClusterWithFlags(
@@ -334,6 +430,26 @@ public class BasePgSQLTest extends BaseMiniClusterTest {
     destroyMiniCluster();
 
     createMiniCluster(additionalMasterFlags, additionalTserverFlags);
+    pgInitialized = false;
+    initPostgresBefore();
+  }
+
+  public void restartClusterWithClusterBuilder(
+    Consumer<MiniYBClusterBuilder> customize) throws Exception {
+    destroyMiniCluster();
+
+    createMiniCluster(customize);
+    pgInitialized = false;
+    initPostgresBefore();
+  }
+
+  public void restartClusterWithFlagsAndEnv(
+      Map<String, String> additionalMasterFlags,
+      Map<String, String> additionalTserverFlags,
+      Map<String, String> additionalEnvironmentVars) throws Exception {
+    destroyMiniCluster();
+
+    createMiniCluster(additionalMasterFlags, additionalTserverFlags, additionalEnvironmentVars);
     pgInitialized = false;
     initPostgresBefore();
   }
@@ -363,25 +479,8 @@ public class BasePgSQLTest extends BaseMiniClusterTest {
     return miniCluster.getPostgresContactPoints().get(tserverIndex).getPort();
   }
 
-  protected Map<String, String> getPgRegressEnvVars() {
-    Map<String, String> pgRegressEnvVars = new TreeMap<>();
-    pgRegressEnvVars.put(MASTERS_FLAG, masterAddresses);
-    pgRegressEnvVars.put(YB_ENABLED_IN_PG_ENV_VAR_NAME, "1");
-
-    for (Map.Entry<String, String> entry : System.getenv().entrySet()) {
-      String envVarName = entry.getKey();
-      if (envVarName.startsWith("postgres_FLAGS_")) {
-        String downstreamEnvVarName = envVarName.substring(9);
-        LOG.info("Found env var " + envVarName + ", setting " + downstreamEnvVarName + " for " +
-                 "pg_regress to " + entry.getValue());
-        pgRegressEnvVars.put(downstreamEnvVarName, entry.getValue());
-      }
-    }
-
-    // A temporary workaround for a failure to look up a user name by uid in an LDAP environment.
-    pgRegressEnvVars.put("YB_PG_FALLBACK_SYSTEM_USER_NAME", "yugabyte");
-
-    return pgRegressEnvVars;
+  public int getYsqlConnMgrPort(int tserverIndex) {
+    return miniCluster.getYsqlConnMgrContactPoints().get(tserverIndex).getPort();
   }
 
   @After
@@ -403,6 +502,10 @@ public class BasePgSQLTest extends BaseMiniClusterTest {
       // TODO(dmitry): Workaround for #1721, remove after fix.
       stmt.execute("ROLLBACK");
       stmt.execute("DISCARD TEMP");
+
+      // TODO(tim): Workaround for DB-11127, remove after fix.
+      stmt.execute("RESET enable_seqscan");
+      stmt.execute("SET enable_bitmapscan = false");
     }
 
     cleanUpCustomDatabases();
@@ -421,6 +524,9 @@ public class BasePgSQLTest extends BaseMiniClusterTest {
    */
   private void cleanUpCustomDatabases() throws Exception {
     LOG.info("Cleaning up custom databases");
+    if (isTestRunningWithConnectionManager()) {
+      waitForStatsToGetUpdated();
+    }
     try (Statement stmt = connection.createStatement()) {
       for (int i = 0; i < 2; i++) {
         try {
@@ -448,6 +554,20 @@ public class BasePgSQLTest extends BaseMiniClusterTest {
     }
   }
 
+  public String formatPGId(String str) {
+    // For all details - see PG function: fmtId()
+    String result = "\"";
+    for (int i = 0; i < str.length(); ++i) {
+      // Quote: " -> ""
+      if (str.charAt(i) == '\"')
+        result += '\"';
+
+      result += str.charAt(i);
+    }
+    result += '\"';
+    return result;
+  }
+
   /** Drop entities owned by non-system roles, and drop custom roles. */
   private void cleanUpCustomEntities() throws Exception {
     LOG.info("Cleaning up roles");
@@ -465,7 +585,7 @@ public class BasePgSQLTest extends BaseMiniClusterTest {
           for (String role : roles) {
             boolean isPersistent = persistentUsers.contains(role);
             LOG.info("Cleaning up role {} (persistent? {})", role, isPersistent);
-            stmt.execute("DROP OWNED BY " + role + " CASCADE");
+            stmt.execute("DROP OWNED BY " + formatPGId(role) + " CASCADE");
           }
 
           // Documentation for DROP OWNED BY explicitly states that databases and tablespaces
@@ -487,7 +607,7 @@ public class BasePgSQLTest extends BaseMiniClusterTest {
             boolean isPersistent = persistentUsers.contains(role);
             if (!isPersistent) {
               LOG.info("Dropping role {}", role);
-              stmt.execute("DROP ROLE " + role);
+              stmt.execute("DROP ROLE " + formatPGId(role));
             }
           }
         } catch (Exception e) {
@@ -513,6 +633,63 @@ public class BasePgSQLTest extends BaseMiniClusterTest {
       destroyMiniCluster();
       miniCluster = null;
     }
+  }
+
+  protected static boolean isTestRunningWithConnectionManager() {
+    return ConnectionEndpoint.DEFAULT == ConnectionEndpoint.YSQL_CONN_MGR;
+  }
+
+  /*
+   * On setting up a GUC variable using yb-ts-cli, it leads to reloading postgres config file at
+   * run time which is not supported with Ysql Connection Manager. In order to make a successfull
+   * connection, make as many connection attempts as there are control connections before setting
+   * GUC variable. The goal is to avoid using any control connection (for authentication) created
+   * before setting up a GUC variabe as it will be config reload prone. Therefore with every
+   * attempt a control connection will be destroyed and client connection will fail.
+   * Once all existing control connections are exhausted, any further attempt will lead to a
+   * successful connection as new control connection will be created with updated config
+   * file.
+   */
+
+  protected void closeControlConnOnReloadConfig(int attempts) {
+    assert(isTestRunningWithConnectionManager());
+
+    for (int i = 0;i < attempts;i++) {
+      try (Connection initialConnection = getConnectionBuilder().withUser(DEFAULT_PG_USER)
+                                                                .connect()) {
+        LOG.info("After few fail attempts, able to create connection with a new control " +
+                "connection created");
+        return;
+      }
+      catch (Exception e) {
+        LOG.info ("expected to fail");
+      }
+    }
+  }
+
+  protected
+  void enableStickySuperuserConnsAndRestartCluster() throws Exception {
+    if (!isTestRunningWithConnectionManager()) {
+      return;
+    }
+
+    ysql_conn_mgr_superuser_sticky = true;
+    restartCluster();
+  }
+
+  protected
+  void setConnMgrWarmupModeAndRestartCluster(ConnectionManagerWarmupMode wm) throws Exception {
+    if (!isTestRunningWithConnectionManager()) {
+      return;
+    }
+
+    warmupMode = wm;
+    restartCluster();
+  }
+
+  protected boolean isConnMgrWarmupRoundRobinMode() {
+    return isTestRunningWithConnectionManager() &&
+      warmupMode == ConnectionManagerWarmupMode.ROUND_ROBIN;
   }
 
   protected void recreateWithYsqlVersion(YsqlSnapshotVersion version) throws Exception {
@@ -555,6 +732,24 @@ public class BasePgSQLTest extends BaseMiniClusterTest {
   }
 
   protected static int getPgBackendPid(Connection connection) {
+    if (isTestRunningWithConnectionManager()) {
+      // getBackendPID(), a JDBC api, caches the pid of the backend process at
+      // the time of creating a connection. With connection manager it do not
+      // return a valid pid as no dedicated backend process is attached to
+      // connection. Therefore execute sql query to find out.
+      assertTrue(warmupMode == ConnectionManagerWarmupMode.NONE);
+      try (Statement stmt = connection.createStatement()) {
+        ResultSet rs = stmt.executeQuery("SELECT pg_backend_pid()");
+        assertTrue(rs.next());
+        return rs.getInt(1);
+      }
+      catch (Exception e) {
+        LOG.error("Got Exception while fetching pid with connection manager",
+                  e);
+        fail();
+        return -1;
+      }
+    }
     return toPgConnection(connection).getBackendPID();
   }
 
@@ -581,13 +776,12 @@ public class BasePgSQLTest extends BaseMiniClusterTest {
                                       ts.getLocalhostIP(),
                                       ts.getPgsqlWebPort()));
       Scanner scanner = new Scanner(url.openConnection().getInputStream());
-      JsonParser parser = new JsonParser();
-      JsonElement tree = parser.parse(scanner.useDelimiter("\\A").next());
+      JsonElement tree = JsonParser.parseString(scanner.useDelimiter("\\A").next());
       JsonObject obj = tree.getAsJsonObject();
       YSQLStat ysqlStat = new Metrics(obj, true).getYSQLStat(statName);
       if (ysqlStat != null) {
         value.count += ysqlStat.calls;
-        value.value += ysqlStat.total_time;
+        value.value += ysqlStat.total_exec_time;
         value.rows += ysqlStat.rows;
       }
       scanner.close();
@@ -638,30 +832,51 @@ public class BasePgSQLTest extends BaseMiniClusterTest {
     verifyStatementStats(stmt, sql, statName, numLoopsAfterReset, oldValue);
   }
 
-  private JsonArray[] getRawMetric(
-      Function<MiniYBDaemon, Integer> portFetcher) throws Exception {
+  private URL[] getMetricSources(
+      Collection<MiniYBDaemon> servers, Function<MiniYBDaemon, Integer> portFetcher)
+        throws MalformedURLException {
+    URL[] result = new URL[servers.size()];
+    int index = 0;
+    for (MiniYBDaemon s : servers) {
+      result[index++] = new URL(String.format(
+          "http://%s:%d/metrics", s.getLocalhostIP(), portFetcher.apply(s)));
+    }
+    return result;
+  }
+
+  protected URL[] getTSMetricSources() throws MalformedURLException {
+    return getMetricSources(miniCluster.getTabletServers().values(), (s) -> s.getWebPort());
+  }
+
+  protected URL[] getYSQLMetricSources() throws MalformedURLException {
+    return getMetricSources(miniCluster.getTabletServers().values(), (s) -> s.getPgsqlWebPort());
+  }
+
+  protected URL[] getMasterMetricSources() throws MalformedURLException {
+    return getMetricSources(miniCluster.getMasters().values(), (s) -> s.getWebPort());
+  }
+
+  private JsonArray[] getRawMetric(URL[] sources) throws Exception {
     Collection<MiniYBDaemon> servers = miniCluster.getTabletServers().values();
     JsonArray[] result = new JsonArray[servers.size()];
     int index = 0;
-    for (MiniYBDaemon ts : servers) {
-      URLConnection connection = new URL(String.format("http://%s:%d/metrics",
-          ts.getLocalhostIP(),
-          portFetcher.apply(ts))).openConnection();
+    for (URL url : sources) {
+      URLConnection connection = url.openConnection();
       connection.setUseCaches(false);
       Scanner scanner = new Scanner(connection.getInputStream());
       result[index++] =
-          new JsonParser().parse(scanner.useDelimiter("\\A").next()).getAsJsonArray();
+          JsonParser.parseString(scanner.useDelimiter("\\A").next()).getAsJsonArray();
       scanner.close();
     }
     return result;
   }
 
   protected JsonArray[] getRawTSMetric() throws Exception {
-    return getRawMetric((ts) -> ts.getWebPort());
+    return getRawMetric(getTSMetricSources());
   }
 
   protected JsonArray[] getRawYSQLMetric() throws Exception {
-    return getRawMetric((ts) -> ts.getPgsqlWebPort());
+    return getRawMetric(getYSQLMetricSources());
   }
 
   protected AggregatedValue getMetric(String metricName) throws Exception {
@@ -678,10 +893,10 @@ public class BasePgSQLTest extends BaseMiniClusterTest {
     return value;
   }
 
-  protected Long getTserverMetricCountForTable(String metricName, String tableName)
-      throws Exception {
+  protected long getMetricCountForTable(
+      URL[] sources, String metricName, String tableName) throws Exception {
     long count = 0;
-    for (JsonArray rawMetric : getRawTSMetric()) {
+    for (JsonArray rawMetric : getRawMetric(sources)) {
       for (JsonElement elem : rawMetric.getAsJsonArray()) {
         JsonObject obj = elem.getAsJsonObject();
         if (obj.get("type").getAsString().equals("tablet") &&
@@ -701,13 +916,17 @@ public class BasePgSQLTest extends BaseMiniClusterTest {
     return count;
   }
 
-  protected AggregatedValue getTServerMetric(String metricName) throws Exception {
+  protected long getTserverMetricCountForTable(
+      String metricName, String tableName) throws Exception {
+    return getMetricCountForTable(getTSMetricSources(), metricName, tableName);
+  }
+
+  protected AggregatedValue getServerMetric(URL[] sources, String metricName) throws Exception {
     AggregatedValue value = new AggregatedValue();
-    for (JsonArray rawMetric : getRawTSMetric()) {
+    for (JsonArray rawMetric : getRawMetric(sources)) {
       for (JsonElement elem : rawMetric.getAsJsonArray()) {
         JsonObject obj = elem.getAsJsonObject();
         if (obj.get("type").getAsString().equals("server")) {
-          assertEquals(obj.get("id").getAsString(), "yb.tabletserver");
           Metrics.Histogram histogram = new Metrics(obj).getHistogram(metricName);
           value.count += histogram.totalCount;
           value.value += histogram.totalSum;
@@ -715,6 +934,14 @@ public class BasePgSQLTest extends BaseMiniClusterTest {
       }
     }
     return value;
+  }
+
+  protected AggregatedValue getReadRPCMetric(URL[] sources) throws Exception {
+    return getServerMetric(sources, "handler_latency_yb_tserver_TabletServerService_Read");
+  }
+
+  protected AggregatedValue getTServerMetric(String metricName) throws Exception {
+    return getServerMetric(getTSMetricSources(), metricName);
   }
 
   protected List<String> getTabletsForTable(
@@ -1057,6 +1284,10 @@ public class BasePgSQLTest extends BaseMiniClusterTest {
 
     String getString(int index) {
       return (String) elems.get(index);
+    }
+
+    Float getFloat(int index) {
+      return (Float) elems.get(index);
     }
 
     public boolean elementEquals(int idx, Object value) {
@@ -1489,6 +1720,11 @@ public class BasePgSQLTest extends BaseMiniClusterTest {
     return doesQueryPlanContainsSubstring(stmt, query, "Filter:");
   }
 
+  /** Whether or not this query pushes down a filter condition */
+  protected boolean doesPushdownCondition(Statement stmt, String query) throws SQLException {
+    return doesQueryPlanContainsSubstring(stmt, query, "Storage Filter:");
+  }
+
   /**
    * Return whether this select query uses a partitioned index in an IndexScan for ordering.
    */
@@ -1498,7 +1734,6 @@ public class BasePgSQLTest extends BaseMiniClusterTest {
     throws SQLException {
 
     String query_plan = getQueryPlanString(stmt, query);
-    assertTrue(query_plan.contains("Merge Append"));
     assertTrue(query_plan.contains("Index Scan using " + index));
   }
 
@@ -1512,7 +1747,6 @@ public class BasePgSQLTest extends BaseMiniClusterTest {
     throws SQLException {
 
     String query_plan = getQueryPlanString(stmt, query);
-    assertTrue(query_plan.contains("Merge Append"));
     assertTrue(query_plan.contains("Index Only Scan using " + index));
   }
 
@@ -1679,48 +1913,58 @@ public class BasePgSQLTest extends BaseMiniClusterTest {
   }
 
   /**
-   * @param statement The statement used to execute the query.
-   * @param query The query string.
-   * @param errorSubstring A (case-insensitive) substring of the expected error message.
+   * @param statement       The statement used to execute the query.
+   * @param query           The query string.
+   * @param errorSubstrings An array of (case-insensitive) substrings of the expected error
+   *                        messages.
    */
-  protected void runInvalidQuery(Statement statement, String query, String errorSubstring) {
-    try {
-      statement.execute(query);
-      fail(String.format("Statement did not fail: %s", query));
-    } catch (SQLException e) {
-      if (StringUtils.containsIgnoreCase(e.getMessage(), errorSubstring)) {
-        LOG.info("Expected exception", e);
-      } else {
-        fail(String.format("Unexpected Error Message. Got: '%s', Expected to contain: '%s'",
-                           e.getMessage(), errorSubstring));
-      }
-    }
+  protected void runInvalidQuery(Statement statement, String query, String... errorSubstrings) {
+    runInvalidQuery(statement, query, false, errorSubstrings);
   }
 
   /**
-   * @param statement The statement used to execute the query.
-   * @param query The query string.
-   * @param errorSubstrings An array of (case-insensitive) substrings of the
-   * expected error messages.
+   * @param statement       The statement used to execute the query.
+   * @param query           The query string.
+   * @param matchAll        A flag to indicate whether all errorSubstrings must be present (true)
+   *                       or if only one is sufficient (false).
+   * @param errorSubstrings An array of (case-insensitive) substrings of the expected error
+   *                        messages.
    */
-  protected void runInvalidQuery(Statement statement, String query, String[] errorSubstrings) {
+  protected void runInvalidQuery(Statement statement, String query, boolean matchAll,
+                                 String... errorSubstrings) {
     try {
       statement.execute(query);
       fail(String.format("Statement did not fail: %s", query));
     } catch (SQLException e) {
-      for (String errorSubstring : errorSubstrings) {
-        if (StringUtils.containsIgnoreCase(e.getMessage(), errorSubstring)) {
-          LOG.info("Expected exception", e);
-          return;
+      if (matchAll) {
+        List<String> missingSubstrings = new ArrayList<>();
+
+        for (String errorSubstring : errorSubstrings) {
+          if (!StringUtils.containsIgnoreCase(e.getMessage(), errorSubstring)) {
+            missingSubstrings.add(errorSubstring);
+          }
         }
+
+        if (!missingSubstrings.isEmpty()) {
+          String missingSubstringsStr = missingSubstrings.stream().map(s -> "'" + s + "'")
+            .collect(Collectors.joining(", "));
+          fail(String.format("Unexpected Error Message. Got: '%s', Expected to contain: %s",
+            e.getMessage(), missingSubstringsStr));
+        }
+      } else {
+        for (String errorSubstring : errorSubstrings) {
+          if (StringUtils.containsIgnoreCase(e.getMessage(), errorSubstring)) {
+            LOG.info("Expected exception", e);
+            return;
+          }
+        }
+
+        final String expectedErrMsg = Arrays.asList(errorSubstrings).stream().map(i -> "'" + i +
+            "'").collect(Collectors.joining(", "));
+        final String failMessage = String.format("Unexpected Error Message. Got: '%s', Expected " +
+          "to contain one of the error messages: %s.", e.getMessage(), expectedErrMsg);
+        fail(failMessage);
       }
-      String faillMessage = "Unexpected Error Message. Got: '" + e.getMessage() +
-          "', Expected to contain one of the error messages: ";
-      for (int i = 0; i < errorSubstrings.length-1; i++) {
-        faillMessage.concat("'").concat(errorSubstrings[i]).concat("', ");
-      }
-      faillMessage.concat("'").concat(errorSubstrings[errorSubstrings.length-1]).concat("'.");
-      fail(faillMessage);
     }
   }
 
@@ -1849,6 +2093,12 @@ public class BasePgSQLTest extends BaseMiniClusterTest {
     // Wait an extra heartbeat interval to avoid race conditions due to deviations
     // in the real heartbeat frequency (due to latency, scheduling, etc.).
     Thread.sleep(MiniYBCluster.TSERVER_HEARTBEAT_INTERVAL_MS * 2);
+  }
+
+  void waitForTServerHeartbeatIfConnMgrEnabled() throws InterruptedException {
+    if (isTestRunningWithConnectionManager()) {
+      waitForTServerHeartbeat();
+    }
   }
 
   /** Run a query and check row-count. */
@@ -2065,9 +2315,35 @@ public class BasePgSQLTest extends BaseMiniClusterTest {
     }
   }
 
-  protected Long getNumDocdbRequests(Statement stmt, String query) throws Exception {
+  static final Pattern roundtrips_pattern = Pattern.compile("Storage Read Requests: (\\d+)\\s*$");
+
+  protected Long getNumStorageRoundtrips(Statement stmt, String query) throws Exception {
+    try (ResultSet rs = stmt.executeQuery(
+        "EXPLAIN (ANALYZE, DIST, COSTS OFF, TIMING OFF) " + query)) {
+      while (rs.next()) {
+        String line = rs.getString(1);
+        Matcher m = roundtrips_pattern.matcher(line);
+        if (m.find()) {
+          return Long.parseLong(m.group(1));
+        }
+      }
+    }
+    return null;
+  }
+
+  protected long getNumDocdbRequests(Statement stmt, String query) throws Exception {
     // Executing query once just in case if master catalog cache is not refreshed
     stmt.execute(query);
+
+    // Execute query twice more to deterministically populate all caches if
+    // connection manager is enabled in round robin allocation mode.
+    // Additionally execute it once more to allow rotation onto a new physical
+    // connection before executing the subsequent queries.
+    if (isConnMgrWarmupRoundRobinMode()) {
+      for (int i = 0; i < CONN_MGR_WARMUP_BACKEND_COUNT; i++) {
+        stmt.execute(query);
+      }
+    }
     Long rpc_count_before =
       getTServerMetric("handler_latency_yb_tserver_PgClientService_Perform").count;
     stmt.execute(query);
@@ -2076,12 +2352,18 @@ public class BasePgSQLTest extends BaseMiniClusterTest {
     return rpc_count_after - rpc_count_before;
   }
 
+  /** Creates a new tserver and returns its id. **/
+  protected int spawnTServer() throws Exception {
+    return spawnTServerWithFlags(new HashMap<String, String>());
+  }
+
+  /** Creates a new tserver with additional flags and returns its id. **/
   protected int spawnTServerWithFlags(Map<String, String> additionalFlags) throws Exception {
     Map<String, String> tserverFlags = getTServerFlags();
     tserverFlags.putAll(additionalFlags);
-    int tserver = miniCluster.getNumTServers();
+    int tserverId = miniCluster.getNumTServers();
     miniCluster.startTServer(tserverFlags);
-    return tserver;
+    return tserverId;
   }
 
   /**
@@ -2128,6 +2410,8 @@ public class BasePgSQLTest extends BaseMiniClusterTest {
                "-force",
                flag,
                value);
+    if (isTestRunningWithConnectionManager())
+      closeControlConnOnReloadConfig(MAX_ATTEMPTS_TO_DESTROY_CONTROL_CONN);
   }
 
   /*
@@ -2140,203 +2424,57 @@ public class BasePgSQLTest extends BaseMiniClusterTest {
     }
   }
 
-  public static class ConnectionBuilder implements Cloneable {
-    private static final int MAX_CONNECTION_ATTEMPTS = 15;
-    private static final int INITIAL_CONNECTION_DELAY_MS = 500;
+  protected static void withRoles(Statement statement, RoleSet roles,
+                                  ThrowingRunnable runnable) throws Exception {
+    for (String role : roles.roleSet) {
+      withRole(statement, role, runnable);
+    }
+  }
 
-    private final MiniYBCluster miniCluster;
-    private boolean loadBalance;
+  protected static void withRole(Statement statement, String role,
+                                 ThrowingRunnable runnable) throws Exception {
+    String sessionUser = getSessionUser(statement);
+    try {
+      statement.execute(String.format("SET SESSION AUTHORIZATION %s", role));
+      runnable.run();
+    } finally {
+      statement.execute(String.format("SET SESSION AUTHORIZATION %s", sessionUser));
+    }
+  }
 
-    private int tserverIndex = 0;
-    private String database = DEFAULT_PG_DATABASE;
-    private String user = TEST_PG_USER;
-    private String password = null;
-    private String preferQueryMode = null;
-    private String sslmode = null;
-    private String sslcert = null;
-    private String sslkey = null;
-    private String sslrootcert = null;
-    private IsolationLevel isolationLevel = IsolationLevel.DEFAULT;
-    private AutoCommit autoCommit = AutoCommit.DEFAULT;
+  protected static class RoleSet {
+    private HashSet<String> roleSet;
 
-    ConnectionBuilder(MiniYBCluster miniCluster) {
-      this.miniCluster = checkNotNull(miniCluster);
+    RoleSet(String... roles) {
+      this.roleSet = new HashSet<String>();
+      this.roleSet.addAll(Lists.newArrayList(roles));
     }
 
-    ConnectionBuilder withTServer(int tserverIndex) {
-      ConnectionBuilder copy = clone();
-      copy.tserverIndex = tserverIndex;
-      return copy;
+    RoleSet excluding(String... roles) {
+      RoleSet newSet = new RoleSet(roles);
+      newSet.roleSet.removeAll(Lists.newArrayList(roles));
+      return newSet;
     }
+  }
 
-    ConnectionBuilder withDatabase(String database) {
-      ConnectionBuilder copy = clone();
-      copy.database = database;
-      return copy;
-    }
+  protected static String getSessionUser(Statement statement) throws Exception {
+    ResultSet resultSet = statement.executeQuery("SELECT SESSION_USER");
+    resultSet.next();
+    return resultSet.getString(1);
+  }
 
-    ConnectionBuilder withUser(String user) {
-      ConnectionBuilder copy = clone();
-      copy.user = user;
-      return copy;
-    }
+  protected static String getCurrentUser(Statement statement) throws Exception {
+    ResultSet resultSet = statement.executeQuery("SELECT CURRENT_USER");
+    resultSet.next();
+    return resultSet.getString(1);
+  }
 
-    ConnectionBuilder withPassword(String password) {
-      ConnectionBuilder copy = clone();
-      copy.password = password;
-      return copy;
-    }
+  // yb-tserver flag ysql_conn_mgr_stats_interval (stats_interval field
+  // in the odyssey's config) controls the interval at which the
+  // stats gets updated (src/odyssey/sources/cron.c:332).
+  public static final int CONNECTIONS_STATS_UPDATE_INTERVAL_SECS = 1;
 
-    ConnectionBuilder withIsolationLevel(IsolationLevel isolationLevel) {
-      ConnectionBuilder copy = clone();
-      copy.isolationLevel = isolationLevel;
-      return copy;
-    }
-
-    ConnectionBuilder withAutoCommit(AutoCommit autoCommit) {
-      ConnectionBuilder copy = clone();
-      copy.autoCommit = autoCommit;
-      return copy;
-    }
-
-    ConnectionBuilder withPreferQueryMode(String preferQueryMode) {
-      ConnectionBuilder copy = clone();
-      copy.preferQueryMode = preferQueryMode;
-      return copy;
-    }
-
-    ConnectionBuilder withSslMode(String sslmode) {
-      ConnectionBuilder copy = clone();
-      copy.sslmode = sslmode;
-      return copy;
-    }
-
-    ConnectionBuilder withSslCert(String sslcert) {
-      ConnectionBuilder copy = clone();
-      copy.sslcert = sslcert;
-      return copy;
-    }
-
-    ConnectionBuilder withSslKey(String sslkey) {
-      ConnectionBuilder copy = clone();
-      copy.sslkey = sslkey;
-      return copy;
-    }
-
-    ConnectionBuilder withSslRootCert(String sslrootcert) {
-      ConnectionBuilder copy = clone();
-      copy.sslrootcert = sslrootcert;
-      return copy;
-    }
-
-    @Override
-    protected ConnectionBuilder clone() {
-      try {
-        return (ConnectionBuilder) super.clone();
-      } catch (CloneNotSupportedException ex) {
-        throw new RuntimeException("This can't happen, but to keep compiler happy", ex);
-      }
-    }
-
-    Connection connect() throws Exception {
-      final InetSocketAddress postgresAddress = miniCluster.getPostgresContactPoints()
-          .get(tserverIndex);
-      String url = String.format(
-          "jdbc:yugabytedb://%s:%d/%s",
-          postgresAddress.getHostName(),
-          postgresAddress.getPort(),
-          database
-      );
-
-      Properties props = new Properties();
-      props.setProperty("user", user);
-      if (password != null) {
-        props.setProperty("password", password);
-      }
-      if (preferQueryMode != null) {
-        props.setProperty("preferQueryMode", preferQueryMode);
-      }
-      if (sslmode != null) {
-        props.setProperty("sslmode", sslmode);
-      }
-      if (sslcert != null) {
-        props.setProperty("sslcert", sslcert);
-      }
-      if (sslkey != null) {
-        props.setProperty("sslkey", sslkey);
-      }
-      if (sslrootcert != null) {
-        props.setProperty("sslrootcert", sslrootcert);
-      }
-      if (EnvAndSysPropertyUtil.isEnvVarOrSystemPropertyTrue("YB_PG_JDBC_TRACE_LOGGING")) {
-        props.setProperty("loggerLevel", "TRACE");
-      }
-
-      boolean loadBalance = getLoadBalance();
-      String lbValue = loadBalance ? "true" : "false";
-      props.setProperty("load-balance", lbValue);
-      int delayMs = INITIAL_CONNECTION_DELAY_MS;
-      for (int attempt = 1; attempt <= MAX_CONNECTION_ATTEMPTS; ++attempt) {
-        Connection connection = null;
-        try {
-          connection = checkNotNull(DriverManager.getConnection(url, props));
-
-          if (isolationLevel != null) {
-            connection.setTransactionIsolation(isolationLevel.pgIsolationLevel);
-          }
-          if (autoCommit != null) {
-            connection.setAutoCommit(autoCommit.enabled);
-          }
-          return connection;
-        } catch (SQLException sqlEx) {
-          // Close the connection now if we opened it, instead of waiting until the end of the test.
-          if (connection != null) {
-            try {
-              connection.close();
-            } catch (SQLException closingError) {
-              LOG.error("Failure to close connection during failure cleanup before a retry:",
-                  closingError);
-              LOG.error("When handling this exception when opening/setting up connection:", sqlEx);
-            }
-          }
-
-          boolean retry = false;
-
-          if (attempt < MAX_CONNECTION_ATTEMPTS) {
-            if (sqlEx.getMessage().contains("FATAL: the database system is starting up")
-                || sqlEx.getMessage().contains("refused. Check that the hostname and port are " +
-                "correct and that the postmaster is accepting")) {
-              retry = true;
-
-              LOG.info("Postgres is still starting up, waiting for " + delayMs + " ms. " +
-                  "Got message: " + sqlEx.getMessage());
-            } else if (sqlEx.getMessage().contains("the database system is in recovery mode")) {
-              retry = true;
-
-              LOG.info("Postgres is in recovery mode, waiting for " + delayMs + " ms. " +
-                  "Got message: " + sqlEx.getMessage());
-            }
-          }
-
-          if (retry) {
-            Thread.sleep(delayMs);
-            delayMs = Math.min(delayMs + 500, 10000);
-          } else {
-            LOG.error("Exception while trying to create connection (after " + attempt +
-                " attempts): " + sqlEx.getMessage());
-            throw sqlEx;
-          }
-        }
-      }
-      throw new IllegalStateException("Should not be able to reach here");
-    }
-
-    public boolean getLoadBalance() {
-      return loadBalance;
-    }
-
-    public void setLoadBalance(boolean lb) {
-      loadBalance = lb;
-    }
+  public static void waitForStatsToGetUpdated() throws InterruptedException {
+    Thread.sleep(CONNECTIONS_STATS_UPDATE_INTERVAL_SECS * 1000 * 2);
   }
 }

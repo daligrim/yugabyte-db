@@ -11,12 +11,19 @@
 // under the License.
 //
 
-#ifndef YB_CONSENSUS_RETRYABLE_REQUESTS_H
-#define YB_CONSENSUS_RETRYABLE_REQUESTS_H
+#pragma once
 
+#include "yb/common/entity_ids_types.h"
 #include "yb/common/retryable_request.h"
 #include "yb/consensus/consensus_fwd.h"
 
+#include "yb/fs/fs_manager.h"
+
+#include "yb/server/server_fwd.h"
+#include "yb/tablet/operations/operation.h"
+
+#include "yb/util/mem_tracker.h"
+#include "yb/util/pb_util.h"
 #include "yb/util/restart_safe_clock.h"
 #include "yb/util/status_fwd.h"
 
@@ -35,28 +42,41 @@ struct RetryableRequestsCounts {
 // Holds information about retryable requests.
 class RetryableRequests {
  public:
-  explicit RetryableRequests(std::string log_prefix = std::string());
+  explicit RetryableRequests(const MemTrackerPtr& tablet_mem_tracker = {},
+                             std::string log_prefix = std::string());
   ~RetryableRequests();
+
+  RetryableRequests(const RetryableRequests& rhs);
 
   RetryableRequests(RetryableRequests&& rhs);
   void operator=(RetryableRequests&& rhs);
+
+  void CopyFrom(const RetryableRequests& rhs);
+
+  OpId GetMaxReplicatedOpId() const;
+  void SetLastFlushedOpId(const OpId& op_id);
+  OpId GetLastFlushedOpId() const;
+  void ToPB(TabletBootstrapStatePB* pb) const;
+  void FromPB(const TabletBootstrapStatePB& pb);
+  bool HasUnflushedData() const;
 
   // Tries to register a new running retryable request.
   // Returns error or false if request with such id is already present.
   Result<bool> Register(
       const ConsensusRoundPtr& round,
+      tablet::IsLeaderSide is_leader_side,
       RestartSafeCoarseTimePoint entry_time = RestartSafeCoarseTimePoint());
 
   // Cleans expires replicated requests and returns min op id of running request.
-  yb::OpId CleanExpiredReplicatedAndGetMinOpId();
+  OpId CleanExpiredReplicatedAndGetMinOpId();
 
   // Mark appropriate request as replicated, i.e. move it from set of running requests to
   // replicated.
   void ReplicationFinished(
-      const ReplicateMsg& replicate_msg, const Status& status, int64_t leader_term);
+      const LWReplicateMsg& replicate_msg, const Status& status, int64_t leader_term);
 
   // Adds new replicated request that was loaded during tablet bootstrap.
-  void Bootstrap(const ReplicateMsg& replicate_msg, RestartSafeCoarseTimePoint entry_time);
+  void Bootstrap(const LWReplicateMsg& replicate_msg, RestartSafeCoarseTimePoint entry_time);
 
   RestartSafeCoarseMonoClock& Clock();
 
@@ -67,6 +87,13 @@ class RetryableRequests {
 
   void SetMetricEntity(const scoped_refptr<MetricEntity>& metric_entity);
 
+  void set_log_prefix(const std::string& log_prefix);
+
+  void SetServerClock(const server::ClockPtr& clock);
+
+  void SetRequestTimeout(int timeout_secs);
+  int request_timeout_secs();
+
  private:
   class Impl;
   std::unique_ptr<Impl> impl_;
@@ -74,5 +101,3 @@ class RetryableRequests {
 
 } // namespace consensus
 } // namespace yb
-
-#endif // YB_CONSENSUS_RETRYABLE_REQUESTS_H

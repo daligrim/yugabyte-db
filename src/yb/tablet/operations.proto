@@ -18,8 +18,9 @@ option java_package = "org.yb.tablet";
 
 import "yb/common/common.proto";
 import "yb/common/transaction.proto";
-import "yb/consensus/metadata.proto";
+import "yb/common/wire_protocol.proto";
 import "yb/docdb/docdb.proto";
+import "yb/rpc/lightweight_message.proto";
 import "yb/tablet/metadata.proto";
 
 message TransactionStatePB {
@@ -27,8 +28,10 @@ message TransactionStatePB {
   optional TransactionStatus status = 2;
 
   // tablets has different meaning, depending on status:
+  // PENDING - list of involved tablets, if FLAGS_disable_heartbeat_send_involved_tablets = false.
   // COMMITTED - list of involved tablets
   // APPLYING - single entry, status tablet of this transaction
+  // PROMOTING - single entry, new status tablet of this transaction
   // APPLIED - single entry, tablet that applied this transaction
   // Not used is other cases.
   repeated bytes tablets = 3;
@@ -46,13 +49,38 @@ message TransactionStatePB {
   optional bool sealed = 6;
 
   // Set of subtransaction IDs which are aborted.
-  optional AbortedSubTransactionSetPB aborted = 7;
+  optional SubtxnSetPB aborted = 7;
 
-  // For xcluster writes, the propagated commit ht from the source.
-  optional fixed64 external_commit_ht = 8;
+  // Reserved for deprecated xcluster fields external_hybrid_time and external_status_tablet_id.
+  reserved 8, 9;
+
+  // The time at which this transaction started at the client.
+  optional fixed64 start_time = 10;
+
+  // Stores the uuid of the node hosting the transaction at the query layer.
+  optional string host_node_uuid = 11;
+
+  // Status containing deadlock info if the transaction was aborted due to deadlock.
+  optional AppStatusPB deadlock_reason = 12;
+
+  // Reserved for deprecated object-locks field txn_reuse_version.
+  reserved 13;
+
+  // Fields 14, 15 are used for session level transactions alone (when session advisory locks
+  // feature is enabled).
+  // The current pg session request version is propagated on transaction heartbeats. If the
+  // coordinator has a higher version than the one received in the request, it errors with the
+  // status holding the active pg session request version, post which YBTransaction updates
+  // its state.
+  optional uint64 pg_session_req_version = 14;
+
+  // For detection deadlocks spanning session advisory locks and row-level locks, the status tablet
+  // needs to be made aware of the active regular docdb transaction of the ysql session, if any.
+  optional TransactionMetadataPB background_transaction_meta = 15;
 }
 
 message TruncatePB {
+  option (yb.rpc.lightweight_message).force_arena = true;
 }
 
 message WritePB {
@@ -71,6 +99,8 @@ message WritePB {
   optional fixed64 external_hybrid_time = 19;
 
   optional uint64 batch_idx = 20;
+
+  optional uint64 start_time_micros = 21;
 }
 
 message ChangeMetadataRequestPB {
@@ -113,6 +143,15 @@ message ChangeMetadataRequestPB {
 
   // Used for AlterTable to determine if active transactions on the tablet needs to be aborted.
   optional bool should_abort_active_txns = 16 [ default = false ];
+
+  // For CDCSDK Stream creation with consistent snapshot
+  optional bytes retention_requester_id = 18;
+  optional bool cdc_sdk_require_history_cutoff = 19;
+
+  // Will insert the new schema into historical packing schema with schema version
+  // [schema_version - 1], and then reinsert the current packing schema with [schema_version].
+  // Schema version must be bumped by 2 before this call is made.
+  optional bool insert_packed_schema = 20;
 }
 
 message SplitTabletRequestPB {
@@ -137,4 +176,40 @@ message SplitTabletRequestPB {
 
   // Parent tablet leader UUID from SPLIT_OP term.
   optional string split_parent_leader_uuid = 8;
+}
+
+message CloneTabletRequestPB {
+  // UUID of server this request is addressed to.
+  optional bytes dest_uuid = 1;
+
+  optional fixed64 propagated_hybrid_time = 2;
+
+  // Not called source_tablet_id because some templated functions use req->tablet_id().
+  optional string tablet_id = 3;
+  optional string target_tablet_id = 4;
+
+  optional bytes source_snapshot_id = 5;
+  optional bytes target_snapshot_id = 6;
+
+  optional string target_table_id = 7;
+  optional string target_namespace_name = 8;
+
+  optional uint32 clone_request_seq_no = 9;
+
+  optional string target_pg_table_id = 10;
+  optional IndexInfoPB target_index_info = 11;
+  optional SchemaPB target_schema = 12;
+  optional PartitionSchemaPB target_partition_schema = 13;
+  optional bool target_skip_table_tombstone_check = 14;
+
+  // If set, checkout the active rocksdb folder to the target snapshot.
+  // This is set for tablets that were hidden before the snapshot that covers the clone time was
+  // taken (we do not take snapshots after hiding a tablet).
+  optional bool clone_from_active_rocksdb = 15;
+  // The colocated tables' infos used to build the superblock of the parent tablet. The colocated
+  // tables' info cannot be copied from the source tablet becuase:
+  // 1- The colocated tables don't have the same table ids in both source and target databases.
+  // 2- The colocated tables on the target can have different schemas than the tables on the source
+  // tablet. i.e when cloning to a time before DDl operations happened on the source tablet.
+  repeated TableInfoPB colocated_tables = 16;
 }

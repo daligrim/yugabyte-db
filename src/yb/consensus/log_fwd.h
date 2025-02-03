@@ -11,8 +11,7 @@
 // under the License.
 //
 
-#ifndef YB_CONSENSUS_LOG_FWD_H
-#define YB_CONSENSUS_LOG_FWD_H
+#pragma once
 
 #include <vector>
 
@@ -21,12 +20,13 @@
 #include "yb/util/numbered_deque.h"
 
 namespace yb {
+class HybridTime;
+
 namespace log {
 
 class Log;
 class LogAnchorRegistry;
 using LogPtr = scoped_refptr<Log>;
-class LogEntryBatch;
 class LogEntryBatchPB;
 class LogEntryPB;
 class LogIndex;
@@ -46,8 +46,8 @@ struct LogOptions;
 using LogAnchorRegistryPtr = scoped_refptr<LogAnchorRegistry>;
 using ReadableLogSegmentPtr = scoped_refptr<ReadableLogSegment>;
 using SegmentSequence = NumberedDeque<int64_t, ReadableLogSegmentPtr>;
+using PreLogRolloverCallback = std::function<void()>;
+using MinStartHTRunningTxnsCallback = std::function<HybridTime(void)>;
 
 }  // namespace log
 }  // namespace yb
-
-#endif  // YB_CONSENSUS_LOG_FWD_H

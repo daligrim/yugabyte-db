@@ -1,69 +1,76 @@
 package com.yugabyte.yw.controllers;
 
+import static com.yugabyte.yw.common.audit.AuditService.IS_AUDITED;
 import static play.mvc.Http.Status.INTERNAL_SERVER_ERROR;
 
+import com.google.common.collect.ImmutableSet;
 import com.google.inject.Inject;
 import com.yugabyte.yw.common.PlatformServiceException;
-import com.yugabyte.yw.common.config.RuntimeConfigFactory;
+import com.yugabyte.yw.common.config.GlobalConfKeys;
+import com.yugabyte.yw.common.config.RuntimeConfGetter;
 import java.util.List;
 import java.util.concurrent.CompletionStage;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import java.util.concurrent.atomic.AtomicBoolean;
 import play.mvc.Action;
-import play.mvc.Http.Context;
+import play.mvc.Http.Request;
 import play.mvc.Result;
 import play.routing.Router;
 
 public class AuditAction extends Action.Simple {
-
-  public static final Logger LOG = LoggerFactory.getLogger(AuditAction.class);
-  private final RuntimeConfigFactory runtimeConfigFactory;
-  private static final String YB_AUDIT_LOG_VERIFY_LOGGING = "yb.audit.log.verifyLogging";
+  private final RuntimeConfGetter confGetter;
 
   @Inject
-  public AuditAction(RuntimeConfigFactory runtimeConfigFactory) {
-    this.runtimeConfigFactory = runtimeConfigFactory;
+  public AuditAction(RuntimeConfGetter confGetter) {
+    this.confGetter = confGetter;
   }
 
   @Override
-  public CompletionStage<Result> call(Context ctx) {
+  public CompletionStage<Result> call(Request request) {
+    AtomicBoolean isAudited = new AtomicBoolean(false);
+    RequestContext.put(IS_AUDITED, isAudited);
+    try {
+      if (!confGetter.getGlobalConf(GlobalConfKeys.auditVerifyLogging)) {
+        return delegate.call(request);
+      } else {
+        return delegate
+            .call(request)
+            .thenApply(
+                result -> {
+                  if (result.status() == 200) {
+                    // modifiers are to be added in v1.routes file
+                    List<String> modifiers =
+                        request.attrs().get(Router.Attrs.HANDLER_DEF).getModifiers();
 
-    if (!runtimeConfigFactory.globalRuntimeConf().getBoolean(YB_AUDIT_LOG_VERIFY_LOGGING)) {
-      return delegate.call(ctx);
-    } else {
-      return delegate
-          .call(ctx)
-          .thenApply(
-              result -> {
-                if (result.status() == 200) {
-                  boolean isAudited = (boolean) ctx.args.getOrDefault("isAudited", false);
+                    boolean shouldBeAudited = !request.method().equals("GET");
+                    boolean hasForceNoAuditModifier = modifiers.contains("forceNoAudit");
+                    boolean hasForceAuditModifier = modifiers.contains("forceAudit");
 
-                  // modifiers are to be added in v1.routes file
-                  List<String> modifiers =
-                      ctx.request().attrs().get(Router.Attrs.HANDLER_DEF).getModifiers();
+                    if (hasForceNoAuditModifier && hasForceAuditModifier) {
+                      throw new PlatformServiceException(
+                          INTERNAL_SERVER_ERROR,
+                          " Method can't have both forceAudit and forceNoAudit.");
+                    } else if (hasForceNoAuditModifier) {
+                      shouldBeAudited = false;
+                    } else if (hasForceAuditModifier) {
+                      shouldBeAudited = true;
+                    }
 
-                  boolean shouldBeAudited = !ctx.request().method().equals("GET");
-                  boolean hasForceNoAuditModifier = modifiers.contains("forceNoAudit");
-                  boolean hasForceAuditModifier = modifiers.contains("forceAudit");
-
-                  if (hasForceNoAuditModifier && hasForceAuditModifier) {
-                    throw new PlatformServiceException(
-                        INTERNAL_SERVER_ERROR,
-                        " Method can't have both forceAudit and forceNoAudit.");
-                  } else if (hasForceNoAuditModifier) {
-                    shouldBeAudited = false;
-                  } else if (hasForceAuditModifier) {
-                    shouldBeAudited = true;
+                    if (isAudited.get() != shouldBeAudited) {
+                      throw new PlatformServiceException(
+                          INTERNAL_SERVER_ERROR,
+                          " Mismatch in Audit Logging intent for "
+                              + request.path()
+                              + ": isAudited="
+                              + isAudited
+                              + ", but shouldBeAudited="
+                              + shouldBeAudited);
+                    }
                   }
-
-                  if (isAudited != shouldBeAudited) {
-                    throw new PlatformServiceException(
-                        INTERNAL_SERVER_ERROR,
-                        " Mismatch in Audit Logging intent for " + ctx.request().path());
-                  }
-                }
-                return result;
-              });
+                  return result;
+                });
+      }
+    } finally {
+      RequestContext.clean(ImmutableSet.of(IS_AUDITED));
     }
   }
 }

@@ -3,96 +3,86 @@ title: Develop applications
 headerTitle: Develop
 linkTitle: Develop
 description: Build YugabyteDB application that use ecosystem integrations and GraphQL.
-headcontent: Get started building applications based on YugabyteDB.
-image: /images/section_icons/index/develop.png
+headcontent: Get started building applications based on YugabyteDB
 type: indexpage
 ---
-<div class="row">
 
-  <div class="col-12 col-md-6 col-lg-12 col-xl-6">
-    <a class="section-link icon-offset" href="learn/">
-      <div class="head">
-        <img class="icon" src="/images/section_icons/develop/learn.png" aria-hidden="true" />
-        <div class="articles">9 articles</div>
-        <div class="title">Learn app development</div>
-      </div>
-      <div class="body">
-        Learn how to build cloud services and applications on YugabyteDB.
-      </div>
-    </a>
-  </div>
+## Data modeling
 
-  <div class="col-12 col-md-6 col-lg-12 col-xl-6">
-    <a class="section-link icon-offset" href="realworld-apps/">
-      <div class="head">
-        <img class="icon" src="/images/section_icons/develop/real-world-apps.png" aria-hidden="true" />
-        <div class="articles">3 articles</div>
-        <div class="title">Real world examples</div>
-      </div>
-      <div class="body">
-        Try out e-commerce and IoT fleet management in these real world, end-to-end YugabyteDB applications.
-      </div>
-    </a>
-  </div>
+Although YugabyteDB is fully SQL compatible, modeling data for a distributed database is quite different from modeling for a monolithic database like MySQL or PostgreSQL. This is because the table data is distributed across different nodes. You must understand how to model your data for efficient storage and retrieval from a distributed system.
 
-  <div class="col-12 col-md-6 col-lg-12 col-xl-6">
-    <a class="section-link icon-offset" href="gitdev/">
-      <div class="head">
-        <img class="icon" src="/images/section_icons/develop/real-world-apps.png" aria-hidden="true" />
-        <div class="articles">2 articles</div>
-        <div class="title">Cloud-native development</div>
-      </div>
-      <div class="body">
-        Ready-to-code, fully-integrated, automated code workflows in the cloud.
-      </div>
-    </a>
-  </div>
+{{<lead link="./data-modeling/">}}
+To understand how to model your data for YugabyteDB, see [Distributed data modeling](./data-modeling/).
+{{</lead>}}
 
-  <div class="col-12 col-md-6 col-lg-12 col-xl-6">
-    <a class="section-link icon-offset" href="explore-sample-apps/">
-      <div class="head">
-        <img class="icon" src="/images/section_icons/develop/real-world-apps.png" aria-hidden="true" />
-        <div class="articles">3 articles</div>
-        <div class="title">Explore sample apps</div>
-      </div>
-      <div class="body">
-        A walk-through of real world, end-to-end applications build on top of YugabyteDB.
-      </div>
-    </a>
-  </div>
+## Global applications
 
-  <div class="col-12 col-md-6 col-lg-12 col-xl-6">
-    <a class="section-link icon-offset" href="best-practices-ycql/">
-      <div class="head">
-        <img class="icon" src="/images/section_icons/develop/real-world-apps.png" aria-hidden="true" />
-        <div class="articles">3 articles</div>
-        <div class="title">Best practices</div>
-      </div>
-      <div class="body">
-        Best practices for data modeling and cluster configuration.
-      </div>
-    </a>
-  </div>
+Today's applications have to cater to users distributed across the globe. Running applications across multiple data centers while providing the best user experience is no trivial task. Yugabyte provides some battle-tested design patterns for your global applications.
 
-  <div class="col-12 col-md-6 col-lg-12 col-xl-6">
-    <a class="section-link icon-offset" href="quality-of-service">
-      <div class="head">
-        <img class="icon" src="/images/section_icons/explore/fault_tolerance.png" aria-hidden="true" />
-        <div class="title">Quality of service</div>
-      </div>
-      <div class="body">
-        Handle scenarios with heavy load, and implement rate-limiting when running multi-tenant services.
-      </div>
-    </a>
-  </div>
+{{<lead link="./build-global-apps/">}}
+To learn more about building global applications, see [Build global applications](./build-global-apps/).
+{{</lead>}}
 
-<!--  <a class="section-link icon-offset" href="port-existing-apps/">
-    <div class="icon">
-      <i class="fas fa-sign-in" aria-hidden="true"></i>
-    </div>
-    <div class="text">
-      Port Existing Apps
-      <div class="caption">How you can port your existing applications to run on top of Yugabyte-DB.</div>
-    </div>
-  </a>-->
-</div>
+## Multi-cloud applications
+
+A multi-cloud strategy provides the flexibility to use the optimal computing environment for each specific workload, helps avoid vendor lock-in, lets you place data close to the users, and can minimize cost by choosing optimal pricing and performance of various cloud providers. You can also opt for a hybrid model as your path to migration onto the cloud.
+
+{{<lead link="./multi-cloud/">}}
+To understand how to build a multi-cloud setup with YugabyteDB, see [Build multi-cloud applications](./multi-cloud/).
+{{</lead>}}
+
+## Application development
+
+Although building scalable applications on top of YugabyteDB is straightforward, you need to understand certain fundamental concepts like transactions, search, and more to make the best use of them.
+
+{{<lead link="./learn/">}}
+To learn how to build applications on top of YugabyteDB, see [Learn app development](./learn/).
+{{</lead>}}
+
+## Best practices
+
+Use these best practices to build distributed applications on top of YugabyteDB; this includes a list of techniques that you can adopt to make your application perform its best.
+
+{{<lead link="./best-practices-ysql">}}
+For more details, see [Best practices](./best-practices-ysql).
+{{</lead>}}
+
+## Drivers and ORMs
+
+To communicate with YugabyteDB, applications need to use drivers. Applications can also be built using Object-Relational mappings, a technique used to communicate with the database using object-oriented techniques. We've tested various drivers and ORMs in multiple languages with the optimal configurations to get your applications up and running.
+
+{{<lead link="../drivers-orms/">}}
+For the list of drivers and ORMs with sample code, see [Drivers and ORMs](../drivers-orms/).
+{{</lead>}}
+
+## Quality of service
+
+Although YugabyteDB can scale horizontally when needed, it also includes safety measures and settings such as rate-limiting, admission control, transaction priorities, and more, to ensure applications can maintain a high quality of service for all users when the systems comes under heavy load.
+
+{{<lead link="./quality-of-service/">}}
+To learn more about how to use rate-limiting and other features, see [Quality of service](./quality-of-service/).
+{{</lead>}}
+
+## Cloud-native development
+
+Cloud-native development refers to building and running applications that fully exploit the advantages of cloud computing without needing to install any software on your development machine. Two prominent tools for cloud-native development environments are Gitpod and GitHub Codespaces. Both provide cloud-based development environments, but they have their own features and use cases.
+
+{{<lead link="./gitdev/">}}
+To learn more about how to use browser-based IDEs, see [Cloud-native development](./gitdev/).
+{{</lead>}}
+
+## Tutorials
+
+Yugabyte provides multiple step-by-step guides for building scalable and fault-tolerant applications with YugabyteDB using your favorite programming language, services, and frameworks, including Kafka, Gen-AI, and more.
+
+{{<lead link="/preview/tutorials/">}}
+For step-by-step guides for various frameworks, see [Tutorials](/preview/tutorials/).
+{{</lead>}}
+
+## PostgreSQL compatibility
+
+YugabyteDB aims to be a fully PostgreSQL-compatible distributed database that supports the majority of PostgreSQL syntax. This means that existing applications built on PostgreSQL can often be migrated to YugabyteDB without changing application code. YugabyteDB also includes many optimizations to enable PostgreSQL applications to run with predictable performance.
+
+{{<lead link="postgresql-compatibility/">}}
+To learn more, see [PostgreSQL compatibility](postgresql-compatibility/).
+{{</lead>}}

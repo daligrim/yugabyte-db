@@ -11,8 +11,7 @@
 // under the License.
 //
 
-#ifndef YB_RPC_RPC_METRICS_H
-#define YB_RPC_RPC_METRICS_H
+#pragma once
 
 #include "yb/util/metrics_fwd.h"
 
@@ -26,11 +25,12 @@ struct RpcMetrics {
   scoped_refptr<Counter> connections_created;
   scoped_refptr<AtomicGauge<int64_t>> inbound_calls_alive;
   scoped_refptr<Counter> inbound_calls_created;
+  scoped_refptr<Counter> inbound_calls_failed;
   scoped_refptr<AtomicGauge<int64_t>> outbound_calls_alive;
   scoped_refptr<Counter> outbound_calls_created;
+  scoped_refptr<Counter> outbound_calls_stuck;
+  scoped_refptr<AtomicGauge<int64_t>> busy_reactors;
 };
 
 } // namespace rpc
 } // namespace yb
-
-#endif // YB_RPC_RPC_METRICS_H

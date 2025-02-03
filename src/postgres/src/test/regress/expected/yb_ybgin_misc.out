@@ -2,8 +2,9 @@
 -- Yugabyte-owned test on ybgin index access method for things not covered
 -- elsewhere.
 --
--- Disable sequential scan so that index scan is always chosen.
+-- Always choose index scan.
 SET enable_seqscan = off;
+SET yb_test_ybgin_disable_cost_factor = 0.5;
 -- Set jsonbs to have jsonb_ops index, not jsonb_path_ops index.
 DROP INDEX jsonbs_j_idx;
 CREATE INDEX ON jsonbs USING ybgin (j);
@@ -303,10 +304,10 @@ DETAIL:  ybgin index method cannot use more than one required scan entry: got 2.
 -- OR between '@@' ops
 EXPLAIN (costs off)
 SELECT * FROM vectors WHERE v @@ 'a' or v @@ 'c';
-                           QUERY PLAN
-----------------------------------------------------------------
+                               QUERY PLAN
+------------------------------------------------------------------------
  Seq Scan on vectors
-   Filter: ((v @@ '''a'''::tsquery) OR (v @@ '''c'''::tsquery))
+   Storage Filter: ((v @@ '''a'''::tsquery) OR (v @@ '''c'''::tsquery))
 (2 rows)
 
 SELECT * FROM vectors WHERE v @@ 'a' or v @@ 'c';
@@ -446,3 +447,34 @@ SELECT * FROM garrays WHERE a && '{11}';
 -- Cleanup
 DROP TABLE garrays;
 DROP TABLEGROUP g;
+--
+-- ALTER TABLE ... COLUMN
+--
+-- Setup
+CREATE TABLE altercoltab (a int[], i int);
+CREATE INDEX NONCONCURRENTLY ON altercoltab USING ybgin (a);
+INSERT INTO altercoltab VALUES ('{1}', 2);
+-- Test
+ALTER TABLE altercoltab DROP COLUMN i;
+SELECT * FROM altercoltab WHERE a && '{1}';
+  a
+-----
+ {1}
+(1 row)
+
+ALTER TABLE altercoltab ADD COLUMN j int;
+SELECT * FROM altercoltab WHERE a && '{1}';
+  a  | j
+-----+---
+ {1} |
+(1 row)
+
+ALTER TABLE altercoltab RENAME COLUMN j TO k;
+SELECT * FROM altercoltab WHERE a && '{1}';
+  a  | k
+-----+---
+ {1} |
+(1 row)
+
+-- Cleanup
+DROP TABLE altercoltab;

@@ -49,6 +49,7 @@
 
 #include "yb/util/countdown_latch.h"
 #include "yb/util/metrics.h"
+#include "yb/util/range.h"
 #include "yb/util/result.h"
 #include "yb/util/size_literals.h"
 #include "yb/util/status_log.h"
@@ -58,8 +59,9 @@
 #include "yb/util/tsan_util.h"
 #include "yb/util/tostring.h"
 #include "yb/util/user.h"
+#include "yb/util/flags.h"
 
-DEFINE_bool(is_panic_test_child, false, "Used by TestRpcPanic");
+DEFINE_NON_RUNTIME_bool(is_panic_test_child, false, "Used by TestRpcPanic");
 DECLARE_bool(socket_inject_short_recvs);
 DECLARE_int32(rpc_slow_query_threshold_ms);
 DECLARE_int32(TEST_delay_connect_ms);
@@ -92,6 +94,7 @@ using yb::rpc_test::PingRequestPB;
 using yb::rpc_test::PingResponsePB;
 
 using std::vector;
+using std::string;
 
 using rpc_test::AddRequestPartialPB;
 using rpc_test::CalculatorServiceProxy;
@@ -150,7 +153,7 @@ TEST_F(RpcStubTest, TestSimpleCall) {
 }
 
 TEST_F(RpcStubTest, ConnectTimeout) {
-  FLAGS_TEST_delay_connect_ms = 5000;
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_delay_connect_ms) = 5000;
   CalculatorServiceProxy p(proxy_cache_.get(), server_hostport_);
   const MonoDelta kWaitTime = 1s;
   const MonoDelta kAllowedError = 100ms;
@@ -175,7 +178,8 @@ TEST_F(RpcStubTest, RandomTimeout) {
   const size_t kTotalCalls = 1000;
   const MonoDelta kMaxTimeout = 2s;
 
-  FLAGS_TEST_delay_connect_ms = narrow_cast<int>(kMaxTimeout.ToMilliseconds() / 2);
+  ANNOTATE_UNPROTECTED_WRITE(
+      FLAGS_TEST_delay_connect_ms) = narrow_cast<int>(kMaxTimeout.ToMilliseconds() / 2);
   CalculatorServiceProxy p(proxy_cache_.get(), server_hostport_);
 
   struct CallData {
@@ -221,7 +225,7 @@ TEST_F(RpcStubTest, RandomTimeout) {
 // reads and then makes a number of calls.
 TEST_F(RpcStubTest, TestShortRecvs) {
   google::FlagSaver saver;
-  FLAGS_socket_inject_short_recvs = true;
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_socket_inject_short_recvs) = true;
 
   CalculatorServiceProxy p(proxy_cache_.get(), server_hostport_);
 
@@ -693,11 +697,12 @@ class PingTestHelper {
   bool finished_ = false;
 };
 
-DEFINE_uint64(test_rpc_concurrency, 20, "Number of concurrent RPC requests");
-DEFINE_int32(test_rpc_count, 50000, "Total number of RPC requests");
+DEFINE_NON_RUNTIME_uint64(test_rpc_concurrency, 20, "Number of concurrent RPC requests");
+DEFINE_NON_RUNTIME_int32(test_rpc_count, 50000, "Total number of RPC requests");
 
 TEST_F(RpcStubTest, TestRpcPerformance) {
-  FLAGS_rpc_slow_query_threshold_ms = std::numeric_limits<int32_t>::max();
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_rpc_slow_query_threshold_ms) =
+      std::numeric_limits<int32_t>::max();
 
   MessengerOptions messenger_options = kDefaultClientMessengerOptions;
   messenger_options.n_reactors = 4;
@@ -771,7 +776,7 @@ TEST_F(RpcStubTest, TestRpcPerformance) {
 
 TEST_F(RpcStubTest, IPv6) {
   google::FlagSaver saver;
-  FLAGS_net_address_filter = "all";
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_net_address_filter) = "all";
   std::vector<IpAddress> addresses;
   ASSERT_OK(GetLocalAddresses(&addresses, AddressFilter::ANY));
 
@@ -833,30 +838,38 @@ TEST_F(RpcStubTest, ExpireInQueue) {
 }
 
 TEST_F(RpcStubTest, TrafficMetrics) {
-  constexpr size_t kStringLen = 1_KB;
-  constexpr size_t kUpperBytesLimit = kStringLen + 64;
+  constexpr std::pair<size_t, size_t> kRequestBounds = std::make_pair(1, 64);
+  constexpr std::pair<size_t, size_t> kResponseBounds = std::make_pair(1_KB, 1_KB + 64);
 
   CalculatorServiceProxy proxy(proxy_cache_.get(), server_hostport_);
 
   RpcController controller;
-  rpc_test::EchoRequestPB req;
-  req.set_data(RandomHumanReadableString(kStringLen));
-  rpc_test::EchoResponsePB resp;
-  ASSERT_OK(proxy.Echo(req, &resp, &controller));
+  rpc_test::RepeatedEchoRequestPB req;
+  req.set_character('a');
+  req.set_count(kResponseBounds.first);
+  rpc_test::RepeatedEchoResponsePB resp;
+  ASSERT_OK(proxy.RepeatedEcho(req, &resp, &controller));
 
+  auto find_metric_by_name = [](const MetricEntity::MetricMap& map,
+                                const std::string& name) -> Result<Counter*> {
+    auto it = std::find_if(
+        map.begin(), map.end(), [&name](const auto& entry) { return entry.first->name() == name; });
+    if (it == map.end()) {
+      return STATUS_FORMAT(NotFound, "Couldn't find metric $0", name);
+    }
+    return down_cast<Counter*>(it->second.get());
+  };
   auto server_metrics = server_messenger()->metric_entity()->UnsafeMetricsMapForTests();
-
-  auto* service_request_bytes = down_cast<Counter*>(FindOrDie(
-      server_metrics, &METRIC_service_request_bytes_yb_rpc_test_CalculatorService_Echo).get());
-  auto* service_response_bytes = down_cast<Counter*>(FindOrDie(
-      server_metrics, &METRIC_service_response_bytes_yb_rpc_test_CalculatorService_Echo).get());
+  auto* service_request_bytes = ASSERT_RESULT(find_metric_by_name(
+      server_metrics, "service_request_bytes_yb_rpc_test_CalculatorService_RepeatedEcho"));
+  auto* service_response_bytes = ASSERT_RESULT(find_metric_by_name(
+      server_metrics, "service_response_bytes_yb_rpc_test_CalculatorService_RepeatedEcho"));
 
   auto client_metrics = client_messenger_->metric_entity()->UnsafeMetricsMapForTests();
-
-  auto* proxy_request_bytes = down_cast<Counter*>(FindOrDie(
-      client_metrics, &METRIC_proxy_request_bytes_yb_rpc_test_CalculatorService_Echo).get());
-  auto* proxy_response_bytes = down_cast<Counter*>(FindOrDie(
-      client_metrics, &METRIC_proxy_response_bytes_yb_rpc_test_CalculatorService_Echo).get());
+  auto* proxy_request_bytes = ASSERT_RESULT(find_metric_by_name(
+      client_metrics, "proxy_request_bytes_yb_rpc_test_CalculatorService_RepeatedEcho"));
+  auto* proxy_response_bytes = ASSERT_RESULT(find_metric_by_name(
+      client_metrics, "proxy_response_bytes_yb_rpc_test_CalculatorService_RepeatedEcho"));
 
   LOG(INFO) << "Inbound request bytes: " << service_request_bytes->value()
             << ", response bytes: " << service_response_bytes->value();
@@ -866,14 +879,14 @@ TEST_F(RpcStubTest, TrafficMetrics) {
   // We don't expect that sent and received bytes on client and server matches, because some
   // auxilary fields are not calculated.
   // For instance request size is taken into account on client, but not server.
-  ASSERT_GE(service_request_bytes->value(), kStringLen);
-  ASSERT_LT(service_request_bytes->value(), kUpperBytesLimit);
-  ASSERT_GE(service_response_bytes->value(), kStringLen);
-  ASSERT_LT(service_response_bytes->value(), kUpperBytesLimit);
-  ASSERT_GE(proxy_request_bytes->value(), kStringLen);
-  ASSERT_LT(proxy_request_bytes->value(), kUpperBytesLimit);
-  ASSERT_GE(proxy_request_bytes->value(), kStringLen);
-  ASSERT_LT(proxy_request_bytes->value(), kUpperBytesLimit);
+  EXPECT_GE(service_request_bytes->value(), kRequestBounds.first);
+  EXPECT_LT(service_request_bytes->value(), kRequestBounds.second);
+  EXPECT_GE(service_response_bytes->value(), kResponseBounds.first);
+  EXPECT_LT(service_response_bytes->value(), kResponseBounds.second);
+  EXPECT_GE(proxy_request_bytes->value(), kRequestBounds.first);
+  EXPECT_LT(proxy_request_bytes->value(), kRequestBounds.second);
+  EXPECT_GE(proxy_response_bytes->value(), kResponseBounds.first);
+  EXPECT_LT(proxy_response_bytes->value(), kResponseBounds.second);
 }
 
 template <class T>
@@ -1021,7 +1034,7 @@ TEST_F(RpcStubTest, Lightweight) {
   req.mutable_map()->clear();
   std::string req_str = req.ShortDebugString();
 
-  auto lw_req = CopySharedMessage<rpc_test::LWLightweightRequestPB>(req);
+  auto lw_req = CopySharedMessage(req);
   req.Clear();
   ASSERT_STR_EQ(AsString(*lw_req), req_str);
   ASSERT_STR_EQ(AsString(resp.short_debug_string()), req_str);
@@ -1061,6 +1074,100 @@ TEST_F(RpcStubTest, Trivial) {
   ASSERT_OK(proxy.Trivial(req, &resp, &controller));
   ASSERT_TRUE(resp.has_error());
   ASSERT_EQ(resp.error().code(), Status::Code::kInvalidArgument);
+}
+
+TEST_F(RpcStubTest, OutboundSidecars) {
+  constexpr size_t kNumSidecars = 10;
+
+  CalculatorServiceProxy proxy(proxy_cache_.get(), server_hostport_);
+
+  RpcController controller;
+  controller.set_timeout(30s);
+
+  std::vector<std::string> values;
+  auto& sidecars = controller.outbound_sidecars();
+  for (auto i : Range(kNumSidecars)) {
+    auto data = RandomHumanReadableString(1_KB + 2_KB * i);
+    sidecars.Start().Append(Slice(data));
+    values.push_back(data);
+  }
+
+  rpc_test::SidecarRequestPB req;
+  req.set_num_sidecars(kNumSidecars);
+  rpc_test::SidecarResponsePB resp;
+  ASSERT_OK(proxy.Sidecar(req, &resp, &controller));
+
+  ASSERT_EQ(resp.num_sidecars(), kNumSidecars);
+  for (auto i : Range(kNumSidecars)) {
+    // Service reverses sidecar order.
+    auto received_sidecar = ASSERT_RESULT(controller.ExtractSidecar(kNumSidecars - i - 1));
+    ASSERT_EQ(values[i], received_sidecar.AsSlice());
+  }
+}
+
+TEST_F(RpcStubTest, StuckOutboundCallWithActiveConnection) {
+  SendSimpleCall();
+
+  rpc_test::ConcatRequestPB req;
+  req.set_lhs("yuga");
+  req.set_rhs("byte");
+  rpc_test::ConcatResponsePB resp;
+
+  RpcController controller;
+  controller.set_timeout(100ms);
+  controller.TEST_force_stuck_outbound_call();
+
+  rpc_test::AbacusServiceProxy proxy(proxy_cache_.get(), server_hostport_);
+  proxy.ConcatAsync(req, &resp, &controller, []() { LOG(INFO) << "Callback called"; });
+
+  std::this_thread::sleep_for(200ms);
+  ASSERT_FALSE(controller.finished());
+
+  // Dump the call state.
+  LOG(INFO) << controller.CallStateDebugString();
+
+  std::this_thread::sleep_for(2ms);
+
+  // Mark the call as failed.
+  controller.MarkCallAsFailed();
+
+  ASSERT_TRUE(controller.finished());
+  ASSERT_NOK(controller.status());
+}
+
+TEST_F(RpcStubTest, StuckOutboundCallWithClosedConnection) {
+  SendSimpleCall();
+
+  rpc_test::ConcatRequestPB req;
+  req.set_lhs("yuga");
+  req.set_rhs("byte");
+  rpc_test::ConcatResponsePB resp;
+
+  RpcController controller;
+  controller.set_timeout(100ms);
+  controller.TEST_force_stuck_outbound_call();
+
+  rpc_test::AbacusServiceProxy proxy(proxy_cache_.get(), server_hostport_);
+  proxy.ConcatAsync(req, &resp, &controller, []() { LOG(INFO) << "Callback called"; });
+
+  std::this_thread::sleep_for(100ms);
+
+  // Close the connection.
+  client_messenger_->BreakConnectivityTo(ASSERT_RESULT(HostToAddress(server_hostport_.host())));
+
+  ASSERT_FALSE(controller.finished());
+
+  // Dump the call state.
+  LOG(INFO) << controller.CallStateDebugString();
+
+  std::this_thread::sleep_for(2ms);
+
+  // Mark the call as failed.
+  controller.MarkCallAsFailed();
+
+  ASSERT_TRUE(controller.finished());
+  auto s = controller.status();
+  ASSERT_TRUE(s.IsTimedOut()) << s.ToString();
 }
 
 } // namespace rpc

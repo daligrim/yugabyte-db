@@ -29,14 +29,11 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_UTIL_COW_OBJECT_H
-#define YB_UTIL_COW_OBJECT_H
+#pragma once
 
 #include <fcntl.h>
 
 #include <algorithm>
-
-#include <glog/logging.h>
 
 #include "yb/gutil/macros.h"
 
@@ -76,7 +73,7 @@ class CowObject {
 
   // Lock the object for write (preventing concurrent mutators), and make a safe
   // copy of the object to mutate.
-  void StartMutation() {
+  void StartMutation() NO_THREAD_SAFETY_ANALYSIS {
     lock_.WriteLock();
     // Clone our object.
     dirty_state_.reset(new State(state_));
@@ -84,7 +81,7 @@ class CowObject {
 
   // Abort the current mutation. This drops the write lock without applying any
   // changes made to the mutable copy.
-  void AbortMutation() {
+  void AbortMutation() NO_THREAD_SAFETY_ANALYSIS {
     dirty_state_.reset();
     is_dirty_ = false;
     lock_.WriteUnlock();
@@ -103,11 +100,6 @@ class CowObject {
   }
 
   // Return the current state, not reflecting any in-progress mutations.
-  State& state() {
-    DCHECK(lock_.HasReaders() || lock_.HasWriteLock());
-    return state_;
-  }
-
   const State& state() const {
     DCHECK(lock_.HasReaders() || lock_.HasWriteLock());
     return state_;
@@ -118,20 +110,27 @@ class CowObject {
   State* mutable_dirty() {
     DCHECK(lock_.HasWriteLock());
     is_dirty_ = true;
-    return DCHECK_NOTNULL(dirty_state_.get());
+    return CHECK_NOTNULL(dirty_state_.get());
   }
 
-  const State& dirty() const {
-    return *DCHECK_NOTNULL(dirty_state_.get());
-  }
+  const State& dirty() const { return *CHECK_NOTNULL(dirty_state_.get()); }
 
   bool is_dirty() const {
     DCHECK(lock_.HasReaders() || lock_.HasWriteLock());
     return is_dirty_;
   }
 
-  void WriteLockThreadChanged() {
-    lock_.WriteLockThreadChanged();
+  // Return true if the current thread holds the write lock.
+  //
+  // If FLAGS_enable_rwc_lock_debugging is true this is accurate; we track the current holder's tid.
+  // Else, this may sometimes return true even if another thread is in fact the holder.
+  // Thus, this is only really useful in the context of a DCHECK assertion.
+  bool HasWriteLock() const { return lock_.HasWriteLock(); }
+
+  // Should be invoked only from ctor of appropriate object.
+  State& DirectStateForInitialSetup() {
+    DCHECK(!lock_.HasReaders() && !lock_.HasWriteLock());
+    return state_;
   }
 
  private:
@@ -289,10 +288,6 @@ class CowWriteLock {
     return cow_ != nullptr;
   }
 
-  void ThreadChanged() {
-    cow_->WriteLockThreadChanged();
-  }
-
   ~CowWriteLock() {
     Unlock();
   }
@@ -302,5 +297,3 @@ class CowWriteLock {
 };
 
 } // namespace yb
-
-#endif /* YB_UTIL_COW_OBJECT_H */

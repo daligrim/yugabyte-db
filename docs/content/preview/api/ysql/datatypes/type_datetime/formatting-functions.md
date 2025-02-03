@@ -3,9 +3,8 @@ title: Date and time formatting functions [YSQL]
 headerTitle: Date and time formatting functions
 linkTitle: Formatting functions
 description: Describes the date and time formatting functions. [YSQL]
-image: /images/section_icons/api/subsection.png
 menu:
-  preview:
+  preview_api:
     identifier: date-time-formatting-functions
     parent: api-ysql-datatypes-datetime
     weight: 100
@@ -14,7 +13,7 @@ type: docs
 
 This page describes all of the _date-time_ formatting functions, both in the direction _date-time_ value to _text_ value and in the direction _text_ value to _date-time_ value. The functions use a so-called _template_ to determine, in the to _text_ value direction, how the _date-time_ value will be rendered as a _text_ value and, in the to _date-time_ value direction, how the to-be-converted _text_ value is to be interpreted. The template, in turn, is made up of a mixture of pre-defined so-called _template patterns_ and free text, intermingled in a user-defined order. See the section [Date-time template patterns](#date-time-template-patterns). The effects of these template patterns, again in turn, can be modified. See the section [Date-time template pattern modifiers](#date-time-template-pattern-modifiers).
 
-Here's a simple example. It uses all of the relevant functions.
+Here's a basic example. It uses all of the relevant functions.
 
 ```plpgsql
 set timezone = 'Asia/Kathmandu';
@@ -71,7 +70,7 @@ select
 This is the result:
 
 ```output
- Here is the "year" component of a date\time value: 2021
+Here is the "year" component of a date\time value: 2021
 ```
 
 There is only one function for this conversion direction, _to_char()_. Here is the interesting part of the output from \\_df to_char()_:
@@ -255,7 +254,7 @@ This is the result:
  timestamp without time zone | 2021-05-17 15:00:00
 ```
 
-See the subsection [_timestamptz_ to plain _timestamp_](../typecasting-between-date-time-values/#timestamptz-to-plain-timestamp) on the [Typecasting between values of different _date-time_ datatypes](../typecasting-between-date-time-values/) page. It explains that, in the exact scenario that's shown here where a _text_ value is converted first to a _timestamptz_ value and then, in the same statement, typecast to a plain _timestamp_ value, the result is insensitive to the value of the session timezone.
+See the subsection [_timestamptz_ to plain _timestamp_](../typecasting-between-date-time-values/#timestamptz-to-plain-timestamp) on the [Typecasting between values of different _date-time_ data types](../typecasting-between-date-time-values/) page. It explains that, in the exact scenario that's shown here where a _text_ value is converted first to a _timestamptz_ value and then, in the same statement, typecast to a plain _timestamp_ value, the result is insensitive to the value of the session timezone.
 
 In _to_date()_ and _to_timestamp()_, free text asks simply to skip as many characters as it contains before resuming parsing for actual template patterns in the normal way. The characters that are used to specify the free text, in the to _date-time_ direction are insignificant as long as the first and last are not whitespace. It's easy to show this by a test. First, do this, in the to _text_ direction:
 
@@ -398,7 +397,7 @@ The _"Too long"_ tests still fail. but the _"Too short"_ tests now succeed.
 
 {{< tip title="Avoid using 'years' substring values less than one to specify BC in 'to_date()' and 'to_timestamp()'." >}}
 
-The section "Usage notes for date/time formatting" on the page "9.8. Data Type Formatting Functions" just under [Table 9.25. Template Pattern Modifiers for Date/Time Formatting](https://www.postgresql.org/docs/11/functions-formatting.html#FUNCTIONS-FORMATTING-DATETIMEMOD-TABLE) says this:
+The section "Usage notes for date/time formatting" on the page "9.8. Data Type Formatting Functions" just under [Table 9.25. Template Pattern Modifiers for Date/Time Formatting](https://www.postgresql.org/docs/15/functions-formatting.html#FUNCTIONS-FORMATTING-DATETIMEMOD-TABLE) says this:
 
 > In to_timestamp and to_date, negative years are treated as signifying BC. If you write both a negative year and an explicit BC field, you get AD again. An input of year zero is treated as 1 BC.
 
@@ -496,7 +495,7 @@ This table lists about fifty distinct template patterns. They are ordered in rou
 | _TZH_                    | Time-zone hours.                                                                                  |
 | _TZM_                    | Time-zone minutes.                                                                                |
 | _OF_                     | Time-zone offset from UTC—supported only in _to_char()_.                                          |
-| _J_                      | Julian Date (integer days since November 24, 4714 BC at local midnight; see [B.7. Julian Dates](https://www.postgresql.org/docs/11/datetime-julian-dates.html) in Appendix B. Date/Time Support of the PostgreSQL documentation). |
+| _J_                      | Julian Date (integer days since November 24, 4714 BC at local midnight; see [B.7. Julian Dates](https://www.postgresql.org/docs/15/datetime-julian-dates.html) in Appendix B. Date/Time Support of the PostgreSQL documentation). |
 
 Create and execute the _template_pattern_results()_ table function to demonstrate the effect of almost all of the template patterns. When a few different template patterns simply produce different upper/lower case mixtures of their resulting text, only the one that produces the init-cap variant is used. The function uses three overloads of a formatting function _f()_. This is a simple technique to reduce repetition and clutter in the _template_pattern_results()_ function itself.
 

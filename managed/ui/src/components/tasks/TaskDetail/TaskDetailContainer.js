@@ -12,7 +12,9 @@ import {
   fetchTaskProgress,
   fetchTaskProgressResponse,
   retryTask,
-  retryTaskResponse
+  retryTaskResponse,
+  rollbackTask,
+  rollbackTaskResponse,
 } from '../../../actions/tasks';
 import {
   fetchUniverseList,
@@ -46,6 +48,11 @@ const mapDispatchToProps = (dispatch) => {
         return dispatch(retryTaskResponse(response.payload));
       });
     },
+    rollbackCurrentTask: (taskUUID) => {
+      return dispatch(rollbackTask(taskUUID)).then((response) => {
+        return dispatch(rollbackTaskResponse(response.payload));
+      });
+    },
     fetchUniverseList: () => {
       dispatch(fetchUniverseList()).then((response) => {
         dispatch(fetchUniverseListResponse(response.payload));
@@ -57,7 +64,7 @@ const mapDispatchToProps = (dispatch) => {
   };
 };
 
-function mapStateToProps(state, ownProps) {
+function mapStateToProps(state) {
   return {
     universe: state.universe,
     tasks: state.tasks

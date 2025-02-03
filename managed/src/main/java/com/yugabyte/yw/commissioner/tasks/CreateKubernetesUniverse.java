@@ -10,49 +10,112 @@
 
 package com.yugabyte.yw.commissioner.tasks;
 
+import com.google.common.cache.Cache;
+import com.google.common.cache.CacheBuilder;
 import com.yugabyte.yw.commissioner.BaseTaskDependencies;
 import com.yugabyte.yw.commissioner.Common.CloudType;
+import com.yugabyte.yw.commissioner.ITask.Abortable;
+import com.yugabyte.yw.commissioner.ITask.Retryable;
 import com.yugabyte.yw.commissioner.UserTaskDetails.SubTaskGroupType;
+import com.yugabyte.yw.commissioner.tasks.subtasks.InstallThirdPartySoftwareK8s;
 import com.yugabyte.yw.commissioner.tasks.subtasks.KubernetesCommandExecutor;
+import com.yugabyte.yw.common.KubernetesUtil;
 import com.yugabyte.yw.common.PlacementInfoUtil;
-import com.yugabyte.yw.common.Util;
+import com.yugabyte.yw.common.config.GlobalConfKeys;
+import com.yugabyte.yw.common.operator.OperatorStatusUpdater;
+import com.yugabyte.yw.common.operator.OperatorStatusUpdater.UniverseState;
+import com.yugabyte.yw.common.operator.OperatorStatusUpdaterFactory;
 import com.yugabyte.yw.forms.UniverseDefinitionTaskParams.Cluster;
 import com.yugabyte.yw.models.Provider;
 import com.yugabyte.yw.models.Universe;
 import com.yugabyte.yw.models.helpers.NodeDetails;
 import com.yugabyte.yw.models.helpers.PlacementInfo;
+import com.yugabyte.yw.models.helpers.TaskType;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 import javax.inject.Inject;
+import lombok.AllArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
 @Slf4j
+@Abortable
+@Retryable
 public class CreateKubernetesUniverse extends KubernetesTaskBase {
 
+  // In-memory password store for ysqlPassword and ycqlPassword.
+  private static final Cache<UUID, AuthPasswords> passwordStore =
+      CacheBuilder.newBuilder().expireAfterAccess(2, TimeUnit.DAYS).maximumSize(1000).build();
+
+  @AllArgsConstructor
+  private static class AuthPasswords {
+    public String ycqlPassword;
+    public String ysqlPassword;
+  }
+
+  private final OperatorStatusUpdater kubernetesStatus;
+
   @Inject
-  protected CreateKubernetesUniverse(BaseTaskDependencies baseTaskDependencies) {
+  protected CreateKubernetesUniverse(
+      BaseTaskDependencies baseTaskDependencies,
+      OperatorStatusUpdaterFactory operatorStatusUpdaterFactory) {
     super(baseTaskDependencies);
+    this.kubernetesStatus = operatorStatusUpdaterFactory.create();
   }
 
   @Override
   public void run() {
+    Throwable th = null;
     try {
-      // Verify the task params.
-      verifyParams(UniverseOpType.CREATE);
-
+      if (isFirstTry()) {
+        // Verify the task params.
+        verifyParams(UniverseOpType.CREATE);
+      }
       Cluster primaryCluster = taskParams().getPrimaryCluster();
-
-      if (primaryCluster.userIntent.enableYCQL && primaryCluster.userIntent.enableYCQLAuth) {
-        ycqlPassword = primaryCluster.userIntent.ycqlPassword;
-        primaryCluster.userIntent.ycqlPassword = Util.redactString(ycqlPassword);
+      boolean cacheYCQLAuthPass =
+          primaryCluster.userIntent.enableYCQL
+              && primaryCluster.userIntent.enableYCQLAuth
+              && !primaryCluster.userIntent.defaultYcqlPassword;
+      boolean cacheYSQLAuthPass =
+          primaryCluster.userIntent.enableYSQL
+              && primaryCluster.userIntent.enableYSQLAuth
+              && !primaryCluster.userIntent.defaultYsqlPassword;
+      if (cacheYCQLAuthPass || cacheYSQLAuthPass) {
+        if (isFirstTry()) {
+          if (cacheYSQLAuthPass) {
+            ysqlPassword = primaryCluster.userIntent.ysqlPassword;
+          }
+          if (cacheYCQLAuthPass) {
+            ycqlPassword = primaryCluster.userIntent.ycqlPassword;
+          }
+          passwordStore.put(
+              taskParams().getUniverseUUID(), new AuthPasswords(ycqlPassword, ysqlPassword));
+        } else {
+          log.debug("Reading password for {}", taskParams().getUniverseUUID());
+          // Read from the in-memory store on retry.
+          AuthPasswords passwords = passwordStore.getIfPresent(taskParams().getUniverseUUID());
+          if (passwords == null) {
+            throw new RuntimeException(
+                "Auth passwords are not found. Platform might have restarted"
+                    + " or task might have expired");
+          }
+          ycqlPassword = passwords.ycqlPassword;
+          ysqlPassword = passwords.ysqlPassword;
+        }
       }
-      if (primaryCluster.userIntent.enableYSQL && primaryCluster.userIntent.enableYSQLAuth) {
-        ysqlPassword = primaryCluster.userIntent.ysqlPassword;
-        primaryCluster.userIntent.ysqlPassword = Util.redactString(ysqlPassword);
-      }
 
-      Universe universe = lockUniverseForUpdate(taskParams().expectedUniverseVersion);
+      Universe universe =
+          lockAndFreezeUniverseForUpdate(
+              taskParams().expectedUniverseVersion,
+              u -> setCommunicationPortsForNodes(true) /* Txn callback */);
+      kubernetesStatus.startYBUniverseEventStatus(
+          universe,
+          taskParams().getKubernetesResourceDetails(),
+          TaskType.CreateKubernetesUniverse.name(),
+          getUserTaskUUID(),
+          UniverseState.CREATING);
 
       // Set all the in-memory node names first.
       setNodeNames(universe);
@@ -73,27 +136,38 @@ public class CreateKubernetesUniverse extends KubernetesTaskBase {
       boolean newNamingStyle = taskParams().useNewHelmNamingStyle;
 
       String masterAddresses =
-          PlacementInfoUtil.computeMasterAddresses(
+          KubernetesUtil.computeMasterAddresses(
               pi,
               placement.masters,
               taskParams().nodePrefix,
+              universe.getName(),
               provider,
               taskParams().communicationPorts.masterRpcPort,
-              newNamingStyle,
-              provider.getK8sPodAddrTemplate());
+              newNamingStyle);
 
       boolean isMultiAz = PlacementInfoUtil.isMultiAZ(provider);
 
-      createPodsTask(placement, masterAddresses, /*isReadOnlyCluster*/ false);
+      createPodsTask(
+          universe.getName(),
+          placement,
+          masterAddresses,
+          false, /*isReadOnlyCluster*/
+          taskParams().isEnableYbc());
 
       createSingleKubernetesExecutorTask(
-          KubernetesCommandExecutor.CommandType.POD_INFO, pi, /*isReadOnlyCluster*/ false);
+          universe.getName(),
+          KubernetesCommandExecutor.CommandType.POD_INFO,
+          pi,
+          false); /*isReadOnlyCluster*/
 
+      installThirdPartyPackagesTaskK8s(
+          universe, InstallThirdPartySoftwareK8s.SoftwareUpgradeType.JWT_JWKS);
       Set<NodeDetails> tserversAdded =
           getPodsToAdd(placement.tservers, null, ServerType.TSERVER, isMultiAz, false);
 
       // Check if we need to create read cluster pods also.
       List<Cluster> readClusters = taskParams().getReadOnlyClusters();
+      Set<NodeDetails> readOnlyTserversAdded = new HashSet<>();
       if (readClusters.size() > 1) {
         String msg = "Expected at most 1 read cluster but found " + readClusters.size();
         log.error(msg);
@@ -117,30 +191,95 @@ public class CreateKubernetesUniverse extends KubernetesTaskBase {
             new KubernetesPlacement(readClusterPI, /*isReadOnlyCluster*/ true);
         // Skip choosing masters from read cluster.
         boolean isReadClusterMultiAz = PlacementInfoUtil.isMultiAZ(readClusterProvider);
-        createPodsTask(readClusterPlacement, masterAddresses, true);
+        createPodsTask(
+            universe.getName(),
+            readClusterPlacement,
+            masterAddresses,
+            true,
+            taskParams().isEnableYbc());
         createSingleKubernetesExecutorTask(
-            KubernetesCommandExecutor.CommandType.POD_INFO, readClusterPI, true);
-        tserversAdded.addAll(
+            universe.getName(),
+            KubernetesCommandExecutor.CommandType.POD_INFO,
+            readClusterPI,
+            true);
+        readOnlyTserversAdded =
             getPodsToAdd(
                 readClusterPlacement.tservers,
                 null,
                 ServerType.TSERVER,
                 isReadClusterMultiAz,
-                true));
+                true);
       }
 
       // Wait for new tablet servers to be responsive.
-      createWaitForServersTasks(tserversAdded, ServerType.TSERVER)
+      Set<NodeDetails> allTserversAdded = new HashSet<>();
+      allTserversAdded.addAll(tserversAdded);
+      allTserversAdded.addAll(readOnlyTserversAdded);
+      createWaitForServersTasks(allTserversAdded, ServerType.TSERVER)
           .setSubTaskGroupType(SubTaskGroupType.ConfigureUniverse);
 
-      createConfigureUniverseTasks(primaryCluster);
+      // Install YBC on the pods
+      String stableYbcVersion = confGetter.getGlobalConf(GlobalConfKeys.ybcStableVersion);
+      if (taskParams().isEnableYbc()) {
+        installYbcOnThePods(
+            tserversAdded,
+            false,
+            stableYbcVersion,
+            taskParams().getPrimaryCluster().userIntent.ybcFlags);
+        if (readClusters.size() == 1) {
+          installYbcOnThePods(
+              readOnlyTserversAdded,
+              true,
+              stableYbcVersion,
+              taskParams().getReadOnlyClusters().get(0).userIntent.ybcFlags);
+        }
+        createWaitForYbcServerTask(allTserversAdded);
+        createUpdateYbcTask(stableYbcVersion)
+            .setSubTaskGroupType(SubTaskGroupType.ConfigureUniverse);
+      }
 
+      // Params for master_join_existing_universe gflag update
+      Runnable nonRestartMasterGflagUpgrade = null;
+      if (KubernetesUtil.isNonRestartGflagsUpgradeSupported(
+          primaryCluster.userIntent.ybSoftwareVersion)) {
+        KubernetesGflagsUpgradeCommonParams gflagsParams =
+            new KubernetesGflagsUpgradeCommonParams(universe, primaryCluster, confGetter);
+        nonRestartMasterGflagUpgrade =
+            () ->
+                upgradePodsNonRestart(
+                    universe.getName(),
+                    // Use generated placement since gflagsParams placement will not have masters
+                    // populated.
+                    placement,
+                    masterAddresses,
+                    ServerType.MASTER,
+                    gflagsParams.getYbSoftwareVersion(),
+                    gflagsParams.getUniverseOverrides(),
+                    gflagsParams.getAzOverrides(),
+                    gflagsParams.isNewNamingStyle(),
+                    false /* isReadOnlyCluster */,
+                    // Use taskParams here since updated universe details are not available
+                    // during subtasks creation.
+                    taskParams().isEnableYbc(),
+                    stableYbcVersion);
+      }
+
+      createConfigureUniverseTasks(
+          primaryCluster, null /* masterNodes */, nonRestartMasterGflagUpgrade);
       // Run all the tasks.
       getRunnableTask().runSubTasks();
     } catch (Throwable t) {
       log.error("Error executing task {}, error='{}'", getName(), t.getMessage(), t);
+      th = t;
       throw t;
     } finally {
+      kubernetesStatus.updateYBUniverseStatus(
+          getUniverse(),
+          taskParams().getKubernetesResourceDetails(),
+          TaskType.CreateKubernetesUniverse.name(),
+          getUserTaskUUID(),
+          (th != null) ? UniverseState.ERROR_CREATING : UniverseState.READY,
+          th);
       unlockUniverseForUpdate();
     }
     log.info("Finished {} task.", getName());

@@ -4,47 +4,38 @@ headerTitle: CREATE USER
 linkTitle: CREATE USER
 description: Use the CREATE USER statement to create a user. The CREATE USER statement is an alias for CREATE ROLE, but creates a role that has LOGIN privileges by default.
 menu:
-  preview:
+  preview_api:
     identifier: dcl_create_user
     parent: statements
-aliases:
-  - /preview/api/ysql/commands/dcl_create_user/
 type: docs
 ---
 
 ## Synopsis
 
-Use the `CREATE USER` statement to create a user. The `CREATE USER` statement is an alias for [`CREATE ROLE`](../dcl_create_role), but creates a role that has LOGIN privileges by default.
+Use the CREATE USER statement to create a user. The CREATE USER statement is an alias for [CREATE ROLE](../dcl_create_role), but creates a role that has LOGIN privileges by default.
 
 ## Syntax
 
-<ul class="nav nav-tabs nav-tabs-yb">
-  <li >
-    <a href="#grammar" class="nav-link active" id="grammar-tab" data-toggle="tab" role="tab" aria-controls="grammar" aria-selected="true">
-      <i class="fas fa-file-alt" aria-hidden="true"></i>
-      Grammar
-    </a>
-  </li>
-  <li>
-    <a href="#diagram" class="nav-link" id="diagram-tab" data-toggle="tab" role="tab" aria-controls="diagram" aria-selected="false">
-      <i class="fas fa-project-diagram" aria-hidden="true"></i>
-      Diagram
-    </a>
-  </li>
-</ul>
-
-<div class="tab-content">
-  <div id="grammar" class="tab-pane fade show active" role="tabpanel" aria-labelledby="grammar-tab">
-  {{% includeMarkdown "../../syntax_resources/the-sql-language/statements/create_user,role_option.grammar.md" %}}
-  </div>
-  <div id="diagram" class="tab-pane fade" role="tabpanel" aria-labelledby="diagram-tab">
-  {{% includeMarkdown "../../syntax_resources/the-sql-language/statements/create_user,role_option.diagram.md" %}}
-  </div>
-</div>
+{{%ebnf%}}
+  create_user,
+  role_option
+{{%/ebnf%}}
 
 ## Semantics
 
-See [`CREATE ROLE`](../dcl_create_role) for more details.
+See [CREATE ROLE](../dcl_create_role) for more details.
+
+## Public schema privileges
+
+In releases prior to {{<release "2.25">}}, which were PostgreSQL 11 compatible, new database users were automatically granted CREATE and USAGE privileges on the public schema. This allowed them to create objects, such as tables and views, in the shared schema by default.
+
+Starting with release {{<release "2.25">}} (PostgreSQL 15 compatible), this default privilege is no longer provided. New users can no longer create objects in the public schema unless explicitly authorized. Administrators must now manually grant CREATE or other required privileges on the public schema to specific roles or users as needed. This provides a more secure default configuration and protection against attacks described in {{<cve "CVE-2018-1058">}}.
+
+Administrators can grant access to the public schema to specific users as follows:
+
+```sql
+GRANT CREATE ON SCHEMA public TO <username>;
+```
 
 ## Examples
 
@@ -68,6 +59,6 @@ yugabyte=# REVOKE ALL ON DATABASE yugabyte FROM John;
 
 ## See also
 
-- [`CREATE ROLE`](../dcl_create_role)
-- [`GRANT`](../dcl_grant)
-- [`REVOKE`](../dcl_revoke)
+- [CREATE ROLE](../dcl_create_role)
+- [GRANT](../dcl_grant)
+- [REVOKE](../dcl_revoke)

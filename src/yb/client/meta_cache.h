@@ -30,8 +30,7 @@
 // under the License.
 //
 // This module is internal to the client and not a public API.
-#ifndef YB_CLIENT_META_CACHE_H
-#define YB_CLIENT_META_CACHE_H
+#pragma once
 
 #include <shared_mutex>
 #include <map>
@@ -46,9 +45,8 @@
 
 #include "yb/client/client_fwd.h"
 
-#include "yb/common/partition.h"
-#include "yb/common/placement_info.h"
-#include "yb/common/wire_protocol.h"
+#include "yb/dockv/partition.h"
+#include "yb/common/tablespace_parser.h"
 #include "yb/consensus/metadata.pb.h"
 
 #include "yb/gutil/macros.h"
@@ -58,6 +56,7 @@
 #include "yb/master/master_client.fwd.h"
 #include "yb/master/master_fwd.h"
 
+#include "yb/master/master_heartbeat.pb.h"
 #include "yb/rpc/rpc_fwd.h"
 #include "yb/rpc/rpc.h"
 
@@ -65,24 +64,25 @@
 
 #include "yb/tserver/tserver_fwd.h"
 
-#include "yb/util/capabilities.h"
 #include "yb/util/format.h"
 #include "yb/util/locks.h"
 #include "yb/util/lockfree.h"
 #include "yb/util/metrics.h"
 #include "yb/util/monotime.h"
 #include "yb/util/semaphore.h"
+#include "yb/util/status_callback.h"
 #include "yb/util/status_fwd.h"
 #include "yb/util/memory/arena.h"
 #include "yb/util/net/net_util.h"
 
 namespace yb {
 
-class Histogram;
+class EventStats;
 
 namespace client {
 
 class ClientTest_TestMasterLookupPermits_Test;
+class ClientTest_TestMetacacheRefreshWhenSentToWrongLeader_Test;
 class YBClient;
 class YBTable;
 
@@ -95,6 +95,9 @@ class LookupByIdRpc;
 using ProcessedTablesMap =
     std::unordered_map<TableId, std::unordered_map<PartitionKey, RemoteTabletPtr>>;
 
+using tserver::AllowSplitTablet;
+using tserver::TabletConsensusInfoPB;
+
 // The information cached about a given tablet server in the cluster.
 //
 // A RemoteTabletServer could be the local tablet server.
@@ -106,6 +109,8 @@ class RemoteTabletServer {
                      const std::shared_ptr<tserver::TabletServerServiceProxy>& proxy,
                      const tserver::LocalTabletServer* local_tserver = nullptr);
   explicit RemoteTabletServer(const master::TSInfoPB& pb);
+  explicit RemoteTabletServer(const master::TSInformationPB& pb);
+  explicit RemoteTabletServer(const consensus::RaftPeerPB& raft_peer);
   ~RemoteTabletServer();
 
   // Initialize the RPC proxy to this tablet server, if it is not already set up.
@@ -113,9 +118,17 @@ class RemoteTabletServer {
   // If there is an active proxy, does nothing.
   Status InitProxy(YBClient* client);
 
+  Result<std::shared_ptr<tserver::TabletServerServiceProxy>> ObtainProxy(YBClient& client);
+
   // Update information from the given pb.
   // Requires that 'pb''s UUID matches this server.
   void Update(const master::TSInfoPB& pb);
+
+  // Update connection information from the passed TSInformationPB.
+  void Update(const master::TSInformationPB& pb);
+
+  // Requires that the raft_peer's UUID matches this RemoteTabletServer
+  void UpdateFromRaftPeer(const consensus::RaftPeerPB& raft_peer);
 
   // Is this tablet server local?
   bool IsLocal() const;
@@ -136,13 +149,16 @@ class RemoteTabletServer {
   // Returns the remote server's uuid.
   const std::string& permanent_uuid() const;
 
-  bool HasCapability(CapabilityId capability) const;
-
   bool IsLocalRegion() const;
 
   LocalityLevel LocalityLevelWith(const CloudInfoPB& cloud_info) const;
 
   HostPortPB DesiredHostPort(const CloudInfoPB& cloud_info) const;
+
+  yb::CloudInfoPB cloud_info_pb() const {
+    SharedLock<rw_spinlock> lock(mutex_);
+    return cloud_info_pb_;
+  }
 
   std::string TEST_PlacementZone() const;
 
@@ -156,8 +172,7 @@ class RemoteTabletServer {
   std::shared_ptr<tserver::TabletServerServiceProxy> proxy_;
   ::yb::HostPort proxy_endpoint_;
   const tserver::LocalTabletServer* const local_tserver_ = nullptr;
-  scoped_refptr<Histogram> dns_resolve_histogram_;
-  std::vector<CapabilityId> capabilities_ GUARDED_BY(mutex_);
+  scoped_refptr<EventStats> dns_resolve_stats_;
 
   DISALLOW_COPY_AND_ASSIGN(RemoteTabletServer);
 };
@@ -231,11 +246,14 @@ struct ReplicasCount {
 // This class is thread-safe.
 class RemoteTablet : public RefCountedThreadSafe<RemoteTablet> {
  public:
+  static constexpr int64_t kUnknownOpIdIndex = -2;
+
   RemoteTablet(std::string tablet_id,
-               Partition partition,
+               dockv::Partition partition,
                boost::optional<PartitionListVersion> partition_list_version,
                uint64 split_depth,
-               const TabletId& split_parent_tablet_id);
+               const TabletId& split_parent_tablet_id,
+               int64_t raft_config_opid_index);
 
   ~RemoteTablet();
 
@@ -243,6 +261,13 @@ class RemoteTablet : public RefCountedThreadSafe<RemoteTablet> {
   void Refresh(
       const TabletServerMap& tservers,
       const google::protobuf::RepeatedPtrField<master::TabletLocationsPB_ReplicaPB>& replicas);
+
+  // Update this tablet's replica locations with raft_config from a Tablet Server.
+  Status RefreshFromRaftConfig(
+      const TabletServerMap& tservers,
+      const consensus::RaftConfigPB& raft_config,
+      const consensus::ConsensusStatePB& consensus_state
+  );
 
   // Mark this tablet as stale, indicating that the cached tablet metadata is
   // out of date. Staleness is checked by the MetaCache when
@@ -285,6 +310,8 @@ class RemoteTablet : public RefCountedThreadSafe<RemoteTablet> {
 
   void SetAliveReplicas(int alive_live_replicas, int alive_read_replicas);
 
+  void SetRaftConfigOpIdIndex(int64_t raft_config_opid_index);
+
   // Return the tablet server which is acting as the current LEADER for
   // this tablet, provided it hasn't failed.
   //
@@ -316,7 +343,7 @@ class RemoteTablet : public RefCountedThreadSafe<RemoteTablet> {
 
   const std::string& tablet_id() const { return tablet_id_; }
 
-  const Partition& partition() const {
+  const dockv::Partition& partition() const {
     return partition_;
   }
 
@@ -334,7 +361,7 @@ class RemoteTablet : public RefCountedThreadSafe<RemoteTablet> {
 
   const std::string& LogPrefix() const { return log_prefix_; }
 
-  MonoTime refresh_time() { return refresh_time_.load(std::memory_order_acquire); }
+  MonoTime full_refresh_time() { return full_refresh_time_.load(std::memory_order_acquire); }
 
   // See TabletLocationsPB::split_depth.
   uint64 split_depth() const { return split_depth_; }
@@ -343,18 +370,26 @@ class RemoteTablet : public RefCountedThreadSafe<RemoteTablet> {
 
   int64_t lookups_without_new_replicas() const { return lookups_without_new_replicas_; }
 
+  int64_t raft_config_opid_index() const { return raft_config_opid_index_; }
+
   // The last version of the table's partition list that we know the tablet was serving data with.
   PartitionListVersion GetLastKnownPartitionListVersion() const;
 
   void MakeLastKnownPartitionListVersionAtLeast(PartitionListVersion partition_list_version);
 
+  void AddReplicasAsJson(JsonWriter* writer) const;
+
+  std::string current_leader_uuid() const;
+
  private:
+  FRIEND_TEST(client::ClientTest, TestMetacacheRefreshWhenSentToWrongLeader);
+
   // Same as ReplicasAsString(), except that the caller must hold mutex_.
   std::string ReplicasAsStringUnlocked() const;
 
   const std::string tablet_id_;
   const std::string log_prefix_;
-  const Partition partition_;
+  const dockv::Partition partition_;
   const boost::optional<PartitionListVersion> partition_list_version_;
   const uint64 split_depth_;
   const TabletId split_parent_tablet_id_;
@@ -363,14 +398,26 @@ class RemoteTablet : public RefCountedThreadSafe<RemoteTablet> {
   mutable rw_spinlock mutex_;
   bool stale_;
   bool is_split_ = false;
-  std::vector<RemoteReplica> replicas_;
+
+  // The UUID of the current leader replica.
+  // Invariant: equal to the UUID of the replica in replicas_ with the role LEADER or "" if there is
+  // no such replica.
+  std::string current_leader_uuid_;
+
+  // The opid of the latest committed raft config that we fetched from a tablet
+  // server. Defaulted to kUnknownOpIdIndex so when it is first created, it will be
+  // refreshed when we next try a partial update because of stale leadership or raft config.
+  int64_t raft_config_opid_index_;
+  // Can be updated only when remote tablet is refreshed after a lookup to master or via a
+  // TabletConsensusInfo piggybacked from a response.
+  std::vector<std::shared_ptr<RemoteReplica>> replicas_;
   PartitionListVersion last_known_partition_list_version_ = 0;
 
   std::atomic<ReplicasCount> replicas_count_{{0, 0}};
 
-  // Last time this object was refreshed. Initialized to MonoTime::Min() so we don't have to be
-  // checking whether it has been initialized everytime we use this value.
-  std::atomic<MonoTime> refresh_time_{MonoTime::Min()};
+  // Last time this object was fully refreshed. Initialized to MonoTime::Min() so we don't have to
+  // be checking whether it has been initialized everytime we use this value.
+  std::atomic<MonoTime> full_refresh_time_{MonoTime::Min()};
 
   int64_t lookups_without_new_replicas_ = 0;
 
@@ -485,6 +532,8 @@ class LookupCallbackVisitor : public boost::static_visitor<> {
   const boost::optional<Status> error_status_;
 };
 
+YB_STRONGLY_TYPED_BOOL(FailOnPartitionListRefreshed);
+
 // Manager of RemoteTablets and RemoteTabletServers. The client consults
 // this class to look up a given tablet or server.
 //
@@ -503,7 +552,11 @@ class MetaCache : public RefCountedThreadSafe<MetaCache> {
 
   // Look up which tablet hosts the given partition key for a table. When it is
   // available, the tablet is stored in 'remote_tablet' (if not NULL) and the
-  // callback is fired. Only tablets with non-failed LEADERs are considered.
+  // lookup callback is fired. Only tablets with non-failed LEADERs are considered.
+  // Partition list can be refreshed if repartitioning is being detected in durint the method
+  // executing (by checking ArePartitionsStale()). If `fail_on_partition_list_refreshed` is true
+  // the callback is fired with ClientErrorCode::kTablePartitionListRefreshed status after
+  // the partitions are being refreshed, or lookup is transparently retried in the other case.
   //
   // NOTE: the callback may be called from an IO thread or inline with this
   // call if the cached data is already available.
@@ -513,7 +566,9 @@ class MetaCache : public RefCountedThreadSafe<MetaCache> {
   void LookupTabletByKey(const std::shared_ptr<YBTable>& table,
                          const PartitionKey& partition_key,
                          CoarseTimePoint deadline,
-                         LookupTabletCallback callback);
+                         LookupTabletCallback callback,
+                         FailOnPartitionListRefreshed fail_on_partition_list_refreshed =
+                             FailOnPartitionListRefreshed::kFalse);
 
   std::future<Result<internal::RemoteTabletPtr>> LookupTabletByKeyFuture(
       const std::shared_ptr<YBTable>& table,
@@ -529,7 +584,7 @@ class MetaCache : public RefCountedThreadSafe<MetaCache> {
   // partitions are stale and returns ClientErrorCode::kTablePartitionListIsStale in that case.
   void LookupTabletById(const TabletId& tablet_id,
                         const std::shared_ptr<const YBTable>& table,
-                        master::IncludeInactive include_inactive,
+                        master::IncludeHidden include_hidden,
                         master::IncludeDeleted include_deleted,
                         CoarseTimePoint deadline,
                         LookupTabletCallback callback,
@@ -563,11 +618,25 @@ class MetaCache : public RefCountedThreadSafe<MetaCache> {
   // just skip updating cache for these tablets until they become running.
   Status ProcessTabletLocations(
       const google::protobuf::RepeatedPtrField<master::TabletLocationsPB>& locations,
-      boost::optional<PartitionListVersion> table_partition_list_version, LookupRpc* lookup_rpc);
+      boost::optional<PartitionListVersion> table_partition_list_version, LookupRpc* lookup_rpc,
+      AllowSplitTablet allow_split_tablets);
 
   void InvalidateTableCache(const YBTable& table);
 
+  void AddAllTabletInfo(JsonWriter* writer) const;
+
   const std::string& LogPrefix() const { return log_prefix_; }
+
+  void ClearAll();
+
+  Status ClearCacheEntries(const std::string& namespace_id);
+
+  // TabletConsensusInfo is piggybacked from the response of a TServer.
+  // Returns Status::OK() if and only if the meta-cache was updated.
+  Status RefreshTabletInfoWithConsensusInfo(
+      const tserver::TabletConsensusInfoPB& tablet_consensus_info);
+
+  int64_t GetRaftConfigOpidIndex(const TabletId& tablet_id);
 
  private:
   friend class LookupRpc;
@@ -576,6 +645,7 @@ class MetaCache : public RefCountedThreadSafe<MetaCache> {
   friend class LookupFullTableRpc;
 
   FRIEND_TEST(client::ClientTest, TestMasterLookupPermits);
+  FRIEND_TEST(client::ClientTest, TestMetacacheRefreshWhenSentToWrongLeader);
 
   // Lookup the given tablet by partition_start_key, only consulting local information.
   // Returns true and sets *remote_tablet if successful.
@@ -592,6 +662,8 @@ class MetaCache : public RefCountedThreadSafe<MetaCache> {
   // the latest host/port info for a server.
   void UpdateTabletServerUnlocked(const master::TSInfoPB& pb) REQUIRES(mutex_);
 
+  Status UpdateTabletServerWithRaftPeerUnlocked(const consensus::RaftPeerPB& pb) REQUIRES(mutex_);
+
   // Notify appropriate callbacks that lookup of specified partition group of specified table
   // was failed because of specified status.
   void LookupByKeyFailed(
@@ -603,7 +675,7 @@ class MetaCache : public RefCountedThreadSafe<MetaCache> {
   void LookupByIdFailed(
       const TabletId& tablet_id,
       const std::shared_ptr<const YBTable>& table,
-      master::IncludeInactive include_inactive,
+      master::IncludeHidden include_hidden,
       master::IncludeDeleted include_deleted,
       const boost::optional<PartitionListVersion>& response_partition_list_version,
       int64_t request_no,
@@ -634,15 +706,6 @@ class MetaCache : public RefCountedThreadSafe<MetaCache> {
   boost::optional<std::vector<RemoteTabletPtr>> FastLookupAllTabletsUnlocked(
       const std::shared_ptr<const YBTable>& table) REQUIRES_SHARED(mutex_);
 
-  // If `tablet` is a result of splitting of pre-split tablet for which we already have
-  // TabletRequests structure inside YBClient - updates TabletRequests.request_id_seq for the
-  // `tablet` based on value for pre-split tablet.
-  // This is required for correct tracking of duplicate requests to post-split tablets, if we
-  // start from scratch - tserver will treat these requests as duplicates/incorrect, because
-  // on tserver side related structure for tracking duplicate requests is also copied from
-  // pre-split tablet to post-split tablets.
-  void MaybeUpdateClientRequests(const RemoteTablet& tablet);
-
   std::unordered_map<TableId, TableData>::iterator InitTableDataUnlocked(
       const TableId& table_id, const VersionedTablePartitionListPtr& partitions)
       REQUIRES_SHARED(mutex_);
@@ -657,7 +720,7 @@ class MetaCache : public RefCountedThreadSafe<MetaCache> {
   bool DoLookupTabletById(
       const TabletId& tablet_id,
       const std::shared_ptr<const YBTable>& table,
-      master::IncludeInactive include_inactive,
+      master::IncludeHidden include_hidden,
       master::IncludeDeleted include_deleted,
       CoarseTimePoint deadline,
       UseCache use_cache,
@@ -668,9 +731,7 @@ class MetaCache : public RefCountedThreadSafe<MetaCache> {
                           CoarseTimePoint deadline,
                           LookupTabletRangeCallback* callback);
 
-  template <class Func, class Callback>
-  void RefreshTablePartitions(
-      Func&& func, const std::shared_ptr<YBTable>& table, Callback&& callback);
+  void RefreshTablePartitions(const std::shared_ptr<YBTable>& table, StdStatusCallback callback);
 
   Result<RemoteTabletPtr> ProcessTabletLocation(
       const master::TabletLocationsPB& locations, ProcessedTablesMap* processed_tables,
@@ -679,7 +740,7 @@ class MetaCache : public RefCountedThreadSafe<MetaCache> {
 
   YBClient* const client_;
 
-  std::shared_timed_mutex mutex_;
+  mutable std::shared_timed_mutex mutex_;
 
   // Cache of Tablet Server locations: TS UUID -> RemoteTabletServer*.
   //
@@ -718,5 +779,3 @@ int64_t TEST_GetLookupSerial();
 } // namespace internal
 } // namespace client
 } // namespace yb
-
-#endif /* YB_CLIENT_META_CACHE_H */

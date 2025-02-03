@@ -23,35 +23,23 @@ import type { EntityMetadata } from './EntityMetadata';
  */
 export interface ClusterDataInfo  {
   /**
+   * The UUID of the universe
+   * @type {string}
+   * @memberof ClusterDataInfo
+   */
+  universe_uuid: string;
+  /**
    * The UUID of the cluster
    * @type {string}
    * @memberof ClusterDataInfo
    */
-  id: string;
+  cluster_uuid: string;
   /**
    * The current state of the cluster
    * @type {string}
    * @memberof ClusterDataInfo
    */
   state: string;
-  /**
-   * Endpoint to connect to the cluster
-   * @type {string}
-   * @memberof ClusterDataInfo
-   */
-  endpoint?: string;
-  /**
-   * Endpoints to connect to the cluster by region
-   * @type {{ [key: string]: string; }}
-   * @memberof ClusterDataInfo
-   */
-  endpoints?: { [key: string]: string; };
-  /**
-   * ID of the associated project
-   * @type {string}
-   * @memberof ClusterDataInfo
-   */
-  project_id: string;
   /**
    * The current version of YugabyteDB installed on the cluster
    * @type {string}

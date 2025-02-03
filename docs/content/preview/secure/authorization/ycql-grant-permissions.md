@@ -36,11 +36,11 @@ Here is what you want to achieve from a role-based access control (RBAC) perspec
 - QA should be able to alter the `integration_tests` table in the keyspace `dev_keyspace`.
 - DB admins should be able to perform all operations on any keyspace.
 
-The exercise assumes you have [enabled authentication for YCQL](../../enable-authentication/ycql/).
+The exercise assumes you have [enabled authentication for YCQL](../../enable-authentication/authentication-ycql/).
 
 ## 1. Create role hierarchy
 
-Connect to the cluster using a superuser role. Use the default `cassandra` user and connect to the cluster using `ycqlsh` as follows:
+Connect to the cluster using a superuser role. Use the default `cassandra` user and connect to the cluster using ycqlsh as follows:
 
 ```sh
 $ ./bin/ycqlsh -u cassandra -p cassandra
@@ -234,7 +234,7 @@ All Keyspaces (data) > keyspace (dev_keyspace) > table (integration_tests)
 
 DB admins should be able to perform all operations on any keyspace. There are two ways to achieve this:
 
-1. Grant DB admins the [superuser](../../enable-authentication/ycql/#create-a-superuser) permission. Doing this gives DB admins all permissions over all roles as well.
+1. Grant DB admins the [superuser](../../enable-authentication/authentication-ycql/#create-a-superuser) permission. Doing this gives DB admins all permissions over all roles as well.
 
 2. Grant ALL permissions to the "db_admin" role. Do the following:
 

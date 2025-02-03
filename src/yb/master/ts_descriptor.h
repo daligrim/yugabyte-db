@@ -29,8 +29,7 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_MASTER_TS_DESCRIPTOR_H
-#define YB_MASTER_TS_DESCRIPTOR_H
+#pragma once
 
 #include <shared_mutex>
 
@@ -44,12 +43,15 @@
 #include "yb/common/common_net.pb.h"
 #include "yb/common/hybrid_time.h"
 
-#include "yb/master/master_heartbeat.fwd.h"
+#include "yb/gutil/thread_annotations.h"
+
+#include "yb/master/catalog_entity_base.h"
+#include "yb/master/catalog_entity_info.pb.h"
 #include "yb/master/master_fwd.h"
+#include "yb/master/master_heartbeat.fwd.h"
 
 #include "yb/rpc/rpc_fwd.h"
 
-#include "yb/util/capabilities.h"
 #include "yb/util/locks.h"
 #include "yb/util/monotime.h"
 #include "yb/util/net/net_util.h"
@@ -70,51 +72,98 @@ class ConsensusServiceProxy;
 namespace tserver {
 class TabletServerAdminServiceProxy;
 class TabletServerServiceProxy;
+class TabletServerBackupServiceProxy;
+}
+
+namespace cdc {
+class CDCServiceProxy;
 }
 
 namespace master {
 
 class TSRegistrationPB;
 class TSInformationPB;
-class ReplicationInfoPB;
 class TServerMetricsPB;
 
-typedef util::SharedPtrTuple<tserver::TabletServerAdminServiceProxy,
-                             tserver::TabletServerServiceProxy,
-                             consensus::ConsensusServiceProxy> ProxyTuple;
+struct ClientOperationLeaseUpdate {
+  ClientOperationLeaseUpdate() :
+    lease_deadline(HybridTime()),
+    new_lease(false),
+    lease_epoch(0) {}
+
+  HybridTime lease_deadline;
+  bool new_lease;
+  uint64_t lease_epoch;
+
+  ClientOperationLeaseUpdatePB ToPB();
+};
+
+using ProxyTuple = util::SharedPtrTuple<
+  tserver::TabletServerAdminServiceProxy,
+  tserver::TabletServerServiceProxy,
+  tserver::TabletServerBackupServiceProxy,
+  cdc::CDCServiceProxy,
+  consensus::ConsensusServiceProxy>;
+
+struct PersistentTServerInfo : public Persistent<SysTabletServerEntryPB> {
+  bool IsLive() const;
+};
 
 // Master-side view of a single tablet server.
 //
 // Tracks the last heartbeat, status, instance identifier, etc.
 // This class is thread-safe.
-class TSDescriptor {
+class TSDescriptor : public MetadataCowWrapper<PersistentTServerInfo> {
  public:
-  static Result<TSDescriptorPtr> RegisterNew(
+  explicit TSDescriptor(
+      const std::string& permanent_uuid, RegisteredThroughHeartbeat registered_through_heartbeat,
+      CloudInfoPB&& cloud_info, rpc::ProxyCache* proxy_cache);
+
+  static Result<std::pair<TSDescriptorPtr, TSDescriptor::WriteLock>> CreateNew(
       const NodeInstancePB& instance,
       const TSRegistrationPB& registration,
-      CloudInfoPB local_cloud_info,
+      CloudInfoPB&& local_cloud_info,
       rpc::ProxyCache* proxy_cache,
+      // What the source of this registration request is. TServers can be registered by heartbeating
+      // to the master.
+      //
+      // Alternatively, if a tserver appears in the raft config for a tablet reported by another
+      // TServer, the master will attempt to register the tserver even if it hasn't received a
+      // heartbeat from it.
       RegisteredThroughHeartbeat registered_through_heartbeat = RegisteredThroughHeartbeat::kTrue);
+
+  static TSDescriptorPtr LoadFromEntry(
+      const std::string& permanent_uuid, const SysTabletServerEntryPB& metadata,
+      CloudInfoPB&& cloud_info, rpc::ProxyCache* proxy_cache, HybridTime now);
 
   static std::string generate_placement_id(const CloudInfoPB& ci);
 
   virtual ~TSDescriptor() = default;
 
-  // Set the last-heartbeat time to now.
-  void UpdateHeartbeat(const TSHeartbeatRequestPB* req);
+  // Updates TS metadata -
+  //     hybrid time on the TS
+  //     tablet leaders on the TS
+  //     heartbeat rtt
+  //     etc
+  // from the heartbeat request. This method also validates that this is the latest heartbeat
+  // request received from the tserver. If not, this method does no mutations and returns an error
+  // status.
+  Result<std::optional<ClientOperationLeaseUpdate>> UpdateFromHeartbeat(
+      const TSHeartbeatRequestPB& req, const TSDescriptor::WriteLock& lock, HybridTime hybrid_time);
 
   // Return the amount of time since the last heartbeat received from this TS.
   MonoDelta TimeSinceHeartbeat() const;
   MonoTime LastHeartbeatTime() const;
 
-  // Register this tablet server.
-  Status Register(const NodeInstancePB& instance,
-                          const TSRegistrationPB& registration,
-                          CloudInfoPB local_cloud_info,
-                          rpc::ProxyCache* proxy_cache);
+  Result<TSDescriptor::WriteLock> UpdateRegistration(
+      const NodeInstancePB& instance, const TSRegistrationPB& registration,
+      RegisteredThroughHeartbeat registered_through_heartbeat);
 
-  const std::string &permanent_uuid() const { return permanent_uuid_; }
+  const std::string& permanent_uuid() const { return permanent_uuid_; }
+  const std::string& id() const override { return permanent_uuid(); }
+
   int64_t latest_seqno() const;
+  int32_t latest_report_seqno() const;
 
   bool has_tablet_report() const;
   void set_has_tablet_report(bool has_report);
@@ -123,16 +172,18 @@ class TSDescriptor {
 
   bool registered_through_heartbeat() const;
 
-  // Returns TSRegistrationPB for this TSDescriptor.
-  TSRegistrationPB GetRegistration() const;
+  ServerRegistrationPB GetRegistration() const;
+  ResourcesPB GetResources() const;
 
   // Returns TSInformationPB for this TSDescriptor.
-  const std::shared_ptr<TSInformationPB> GetTSInformationPB() const;
+  // todo(zdrudi): See if we can remove at least some of these functions.
+  TSInformationPB GetTSInformationPB() const;
+  TSRegistrationPB GetTSRegistrationPB() const;
+  NodeInstancePB GetNodeInstancePB() const;
 
-  // Helper function to tell if this TS matches the cloud information provided. For now, we have
-  // no wildcard functionality, so it will have to explicitly match each individual component.
-  // Later, this might be extended to say if this TS is part of some wildcard expression for cloud
-  // information (eg: aws.us-west.* will match any TS in aws.us-west.1a or aws.us-west.1b, etc.).
+  // Helper function to tell if this TS matches the cloud information provided.
+  // The cloud info might be a wildcard expression (e.g. aws.us-west.*, which will match any TS in
+  // aws.us-west.1a or aws.us-west.1b, etc.).
   bool MatchesCloudInfo(const CloudInfoPB& cloud_info) const;
 
   CloudInfoPB GetCloudInfo() const;
@@ -146,7 +197,7 @@ class TSDescriptor {
   bool IsBlacklisted(const BlacklistSet& blacklist) const;
 
   // Should this ts have any leader load on it.
-  virtual bool IsAcceptingLeaderLoad(const ReplicationInfoPB& replication_info) const;
+  bool IsAcceptingLeaderLoad(const ReplicationInfoPB& replication_info) const;
 
   // Return an RPC proxy to a service.
   template <class TProxy>
@@ -167,79 +218,79 @@ class TSDescriptor {
   // Set the number of live replicas (i.e. running or bootstrapping).
   void set_num_live_replicas(int num_live_replicas) {
     DCHECK_GE(num_live_replicas, 0);
-    std::lock_guard<decltype(lock_)> l(lock_);
+    std::lock_guard l(mutex_);
     num_live_replicas_ = num_live_replicas;
   }
 
   // Return the number of live replicas (i.e running or bootstrapping).
   int num_live_replicas() const {
-    SharedLock<decltype(lock_)> l(lock_);
+    SharedLock<decltype(mutex_)> l(mutex_);
     return num_live_replicas_;
   }
 
   void set_leader_count(int leader_count) {
     DCHECK_GE(leader_count, 0);
-    std::lock_guard<decltype(lock_)> l(lock_);
+    std::lock_guard l(mutex_);
     leader_count_ = leader_count;
   }
 
   int leader_count() const {
-    SharedLock<decltype(lock_)> l(lock_);
+    SharedLock<decltype(mutex_)> l(mutex_);
     return leader_count_;
   }
 
   MicrosTime physical_time() const {
-    SharedLock<decltype(lock_)> l(lock_);
+    SharedLock<decltype(mutex_)> l(mutex_);
     return physical_time_;
   }
 
   void set_hybrid_time(HybridTime hybrid_time) {
-    std::lock_guard<decltype(lock_)> l(lock_);
+    std::lock_guard l(mutex_);
     hybrid_time_ = hybrid_time;
   }
 
   HybridTime hybrid_time() const {
-    SharedLock<decltype(lock_)> l(lock_);
+    SharedLock<decltype(mutex_)> l(mutex_);
     return hybrid_time_;
   }
 
   MonoDelta heartbeat_rtt() const {
-    SharedLock<decltype(lock_)> l(lock_);
+    SharedLock<decltype(mutex_)> l(mutex_);
     return heartbeat_rtt_;
   }
 
   uint64_t total_memory_usage() {
-    SharedLock<decltype(lock_)> l(lock_);
+    SharedLock<decltype(mutex_)> l(mutex_);
     return ts_metrics_.total_memory_usage;
   }
 
   uint64_t total_sst_file_size() {
-    SharedLock<decltype(lock_)> l(lock_);
+    SharedLock<decltype(mutex_)> l(mutex_);
     return ts_metrics_.total_sst_file_size;
   }
 
   uint64_t uncompressed_sst_file_size() {
-    SharedLock<decltype(lock_)> l(lock_);
+    SharedLock<decltype(mutex_)> l(mutex_);
     return ts_metrics_.uncompressed_sst_file_size;
   }
 
   uint64_t num_sst_files() {
-    SharedLock<decltype(lock_)> l(lock_);
+    SharedLock<decltype(mutex_)> l(mutex_);
     return ts_metrics_.num_sst_files;
   }
 
   double read_ops_per_sec() {
-    SharedLock<decltype(lock_)> l(lock_);
+    SharedLock<decltype(mutex_)> l(mutex_);
     return ts_metrics_.read_ops_per_sec;
   }
 
   double write_ops_per_sec() {
-    SharedLock<decltype(lock_)> l(lock_);
+    SharedLock<decltype(mutex_)> l(mutex_);
     return ts_metrics_.write_ops_per_sec;
   }
 
   uint64_t uptime_seconds() {
-    SharedLock<decltype(lock_)> l(lock_);
+    SharedLock<decltype(mutex_)> l(mutex_);
     return ts_metrics_.uptime_seconds;
   }
 
@@ -249,12 +300,12 @@ class TSDescriptor {
   };
 
   std::unordered_map<std::string, TSPathMetrics> path_metrics() {
-    SharedLock<decltype(lock_)> l(lock_);
+    SharedLock<decltype(mutex_)> l(mutex_);
     return ts_metrics_.path_metrics;
   }
 
   bool get_disable_tablet_split_if_default_ttl() {
-    SharedLock<decltype(lock_)> l(lock_);
+    SharedLock<decltype(mutex_)> l(mutex_);
     return ts_metrics_.disable_tablet_split_if_default_ttl;
   }
 
@@ -263,62 +314,63 @@ class TSDescriptor {
   void GetMetrics(TServerMetricsPB* metrics);
 
   void ClearMetrics() {
-    std::lock_guard<decltype(lock_)> l(lock_);
+    std::lock_guard l(mutex_);
     ts_metrics_.ClearMetrics();
   }
 
-  // Set of methods to keep track of pending tablet deletes for a tablet server. We use them to
-  // avoid assigning more tablets to a tserver that might be potentially unresponsive.
-  bool HasTabletDeletePending() const;
-  bool IsTabletDeletePending(const std::string& tablet_id) const;
-  void AddPendingTabletDelete(const std::string& tablet_id);
-  void ClearPendingTabletDelete(const std::string& tablet_id);
-  std::string PendingTabletDeleteToString() const;
+  Status IsReportCurrent(const NodeInstancePB& ts_instance, const TabletReportPB& report);
 
-  std::string ToString() const;
+  // Set of methods to keep track of pending tablet deletes for a tablet server.
+  bool HasTabletDeletePending() const;
+  void AddPendingTabletDelete(const std::string& tablet_id);
+  size_t ClearPendingTabletDelete(const std::string& tablet_id);
+  std::string PendingTabletDeleteToString() const;
+  std::set<std::string> TabletsPendingDeletion() const;
+
+  std::string ToString() const override;
 
   // Indicates that this descriptor was removed from the cluster and shouldn't be surfaced.
-  bool IsRemoved() const {
-    return removed_.load(std::memory_order_acquire);
+  bool IsReplaced() const {
+    return LockForRead()->pb.state() == SysTabletServerEntryPB::REPLACED;
   }
-
-  void SetRemoved(bool removed = true) {
-    removed_.store(removed, std::memory_order_release);
-  }
-
-  explicit TSDescriptor(
-      std::string perm_id,
-      RegisteredThroughHeartbeat registered_through_heartbeat = RegisteredThroughHeartbeat::kTrue);
 
   std::size_t NumTasks() const;
 
   bool IsLive() const;
 
-  bool HasCapability(CapabilityId capability) const {
-    return capabilities_.find(capability) != capabilities_.end();
-  }
-
   virtual bool IsLiveAndHasReported() const;
 
- protected:
-  virtual Status RegisterUnlocked(const NodeInstancePB& instance,
-                                          const TSRegistrationPB& registration,
-                                          CloudInfoPB local_cloud_info,
-                                          rpc::ProxyCache* proxy_cache);
+  bool HasYsqlCatalogLease() const;
 
-  mutable rw_spinlock lock_;
+  // Is the ts in a read-only placement.
+  bool IsReadOnlyTS(const ReplicationInfoPB& replication_info) const;
+
+  Result<HostPort> GetHostPort() const EXCLUDES(mutex_);
+
+  std::optional<std::pair<TSDescriptor::WriteLock, std::optional<uint64_t>>> MaybeUpdateLiveness(
+      MonoTime mono_time, HybridTime hybrid_time) EXCLUDES(mutex_);
+
+  bool HasLiveClientOperationLease() const;
+
  private:
+  mutable rw_spinlock mutex_;
   template <class TProxy>
   Status GetOrCreateProxy(std::shared_ptr<TProxy>* result,
-                                  std::shared_ptr<TProxy>* result_cache);
+                          std::shared_ptr<TProxy>* result_cache);
 
   FRIEND_TEST(TestTSDescriptor, TestReplicaCreationsDecay);
-  template<class ClusterLoadBalancerClass> friend class TestLoadBalancerBase;
+  friend class LoadBalancerMockedBase;
 
   // Uses DNS to resolve registered hosts to a single endpoint.
-  Result<HostPort> GetHostPortUnlocked() const;
+  Result<HostPort> GetHostPortUnlocked() const REQUIRES_SHARED(mutex_);
 
-  void DecayRecentReplicaCreationsUnlocked();
+  void DecayRecentReplicaCreationsUnlocked() REQUIRES(mutex_);
+
+  template <typename LockType>
+  Status IsReportCurrentUnlocked(
+      const NodeInstancePB& ts_instance,
+      std::optional<std::reference_wrapper<const TabletReportPB>> report, const LockType& lock)
+      REQUIRES_SHARED(mutex_);
 
   struct TSMetrics {
 
@@ -353,63 +405,60 @@ class TSDescriptor {
     }
   };
 
-  struct TSMetrics ts_metrics_;
-
   const std::string permanent_uuid_;
-  CloudInfoPB local_cloud_info_;
-  rpc::ProxyCache* proxy_cache_;
-  int64_t latest_seqno_;
+
+  struct TSMetrics ts_metrics_ GUARDED_BY(mutex_);
+
+  // The cloud info of the master.
+  CloudInfoPB local_cloud_info_ GUARDED_BY(mutex_);
+  rpc::ProxyCache* proxy_cache_ GUARDED_BY(mutex_);
+  int64_t latest_seqno_ GUARDED_BY(mutex_);
 
   // The last time a heartbeat was received for this node.
-  MonoTime last_heartbeat_;
+  MonoTime last_heartbeat_ GUARDED_BY(mutex_);
+  const bool registered_through_heartbeat_;
 
-  // The physical and hybrid times on this node at the time of heartbeat
-  MicrosTime physical_time_;
-  HybridTime hybrid_time_;
+  HybridTime client_operation_lease_deadline_ GUARDED_BY(mutex_);
+
+  // The physical and hybrid times on the tserver represented by this object at the time it sent the
+  // last heartbeat received by this master.
+  MicrosTime physical_time_ GUARDED_BY(mutex_);
+  HybridTime hybrid_time_ GUARDED_BY(mutex_);
 
   // Roundtrip time of previous heartbeat.
-  MonoDelta heartbeat_rtt_;
+  MonoDelta heartbeat_rtt_ GUARDED_BY(mutex_);
+
+  // The sequence number of the latest tablet report from this tserver.
+  // Initialized to the smallest possible value and reset to the smallest possible value on TS
+  // registration. Before beginning processing of a new tablet report, set to the sequence number of
+  // the tablet report from the tserver. While processing a batch of tablets in a tablet report, if
+  // the sequence number in the report no longer matches this saved value then report processing
+  // stops.
+  int32_t latest_report_seqno_ GUARDED_BY(mutex_);
 
   // Set to true once this instance has reported all of its tablets.
-  bool has_tablet_report_;
+  bool has_tablet_report_ GUARDED_BY(mutex_);
 
   // Tablet server has at least one faulty drive.
-  bool has_faulty_drive_;
+  bool has_faulty_drive_ GUARDED_BY(mutex_);
 
   // The number of times this tablet server has recently been selected to create a
   // tablet replica. This value decays back to 0 over time.
-  double recent_replica_creations_;
-  MonoTime last_replica_creations_decay_;
+  double recent_replica_creations_ GUARDED_BY(mutex_);
+  MonoTime last_replica_creations_decay_ GUARDED_BY(mutex_);
 
   // The number of live replicas on this host, from the last heartbeat.
-  int num_live_replicas_;
+  int num_live_replicas_ GUARDED_BY(mutex_);
 
   // The number of tablets for which this ts is a leader.
-  int leader_count_;
+  int leader_count_ GUARDED_BY(mutex_);
 
-  std::shared_ptr<TSInformationPB> ts_information_;
-  std::string placement_id_;
+  std::string placement_id_ GUARDED_BY(mutex_);
 
-  // The (read replica) cluster uuid to which this tserver belongs.
-  std::string placement_uuid_;
-
-  enterprise::ProxyTuple proxies_;
+  ProxyTuple proxies_;
 
   // Set of tablet uuids for which a delete is pending on this tablet server.
-  std::set<std::string> tablets_pending_delete_;
-
-  // Capabilities of this tablet server.
-  std::set<CapabilityId> capabilities_;
-
-  // We don't remove TSDescriptor's from the master's in memory map since several classes hold
-  // references to this object and those would be invalidated if we remove the descriptor from
-  // the master's map. As a result, we just store a boolean indicating this entry is removed and
-  // shouldn't be surfaced.
-  std::atomic<bool> removed_{false};
-
-  // Did this tserver register by heartbeating through master. If false, we registered through
-  // peer's Raft config.
-  const RegisteredThroughHeartbeat registered_through_heartbeat_;
+  std::set<std::string> tablets_pending_delete_ GUARDED_BY(mutex_);
 
   DISALLOW_COPY_AND_ASSIGN(TSDescriptor);
 };
@@ -418,7 +467,7 @@ template <class TProxy>
 Status TSDescriptor::GetOrCreateProxy(std::shared_ptr<TProxy>* result,
                                       std::shared_ptr<TProxy>* result_cache) {
   {
-    std::lock_guard<decltype(lock_)> l(lock_);
+    std::lock_guard l(mutex_);
     if (*result_cache) {
       *result = *result_cache;
       return Status::OK();
@@ -446,5 +495,3 @@ struct cloud_hash {
 };
 } // namespace master
 } // namespace yb
-
-#endif // YB_MASTER_TS_DESCRIPTOR_H

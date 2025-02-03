@@ -29,8 +29,7 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_SERVER_RPC_SERVER_H
-#define YB_SERVER_RPC_SERVER_H
+#pragma once
 
 #include <memory>
 #include <string>
@@ -44,6 +43,7 @@
 #include "yb/util/status_fwd.h"
 #include "yb/util/enums.h"
 #include "yb/util/net/net_fwd.h"
+#include "yb/util/tostring.h"
 
 namespace yb {
 namespace server {
@@ -54,6 +54,10 @@ struct RpcServerOptions {
   std::string rpc_bind_addresses;
   uint16_t default_port = 0;
   int32_t connection_keepalive_time_ms;
+
+  std::string ToString() const {
+    return YB_STRUCT_TO_STRING(rpc_bind_addresses, default_port, connection_keepalive_time_ms);
+  }
 };
 
 class RpcServer {
@@ -118,5 +122,3 @@ class RpcServer {
 
 } // namespace server
 } // namespace yb
-
-#endif // YB_SERVER_RPC_SERVER_H

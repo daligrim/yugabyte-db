@@ -34,7 +34,6 @@
 #include <string>
 #include <vector>
 
-#include <glog/logging.h>
 #include <gtest/gtest.h>
 
 #include "yb/client/client-internal.h"
@@ -159,7 +158,7 @@ class MasterFailoverTest : public YBTest {
     return table_creator->table_name(table_name)
         .table_type(YBTableType::YQL_TABLE_TYPE)
         .schema(&client_schema)
-        .hash_schema(YBHashSchema::kMultiColumnHash)
+        .hash_schema(dockv::YBHashSchema::kMultiColumnHash)
         .timeout(MonoDelta::FromSeconds(90))
         .wait(mode == kWaitForCreate)
         .Create();
@@ -181,7 +180,7 @@ class MasterFailoverTest : public YBTest {
         .table_type(YBTableType::YQL_TABLE_TYPE)
         .indexed_table_id(table->id())
         .schema(&client_schema)
-        .hash_schema(YBHashSchema::kMultiColumnHash)
+        .hash_schema(dockv::YBHashSchema::kMultiColumnHash)
         .timeout(MonoDelta::FromSeconds(90))
         .wait(mode == kWaitForCreate)
         // In the new style create index request, the CQL proxy populates the
@@ -305,14 +304,43 @@ TEST_F(MasterFailoverTest, DISABLED_TestPauseAfterCreateTableIssued) {
   ASSERT_OK(OpenTableAndScanner(table_name));
 }
 
+// Test that we can create a namespace, trigger a leader master failover, then verify that the
+// new namespace is usable.
+TEST_F(MasterFailoverTest, TestFailoverAfterNamespaceCreated) {
+  if (!AllowSlowTests()) {
+    LOG(INFO) << "This test can only be run in slow mode.";
+    return;
+  }
+
+  // Create namespace.
+  constexpr auto kNamespaceFailoverName = "testNamespaceFailover";
+  LOG(INFO) << "Issuing CreateNamespace for " << kNamespaceFailoverName;
+  ASSERT_OK(client_->CreateNamespace(kNamespaceFailoverName, YQLDatabase::YQL_DATABASE_PGSQL));
+
+  auto deadline = CoarseMonoClock::Now() + 90s;
+  ASSERT_OK(client_->data_->WaitForCreateNamespaceToFinish(
+      client_.get(), kNamespaceFailoverName, YQLDatabase::YQL_DATABASE_PGSQL, "" /* namespace_id */,
+      deadline));
+
+  // Failover the leader.
+  LOG(INFO) << "Failing over master leader.";
+  ASSERT_OK(cluster_->StepDownMasterLeaderAndWaitForNewLeader());
+
+  // Create a table in new namespace to make sure it is usable.
+  YBTableName table_name(
+      YQL_DATABASE_PGSQL, kNamespaceFailoverName, "testNamespaceFailover" /* table_name */);
+  LOG(INFO) << "Issuing CreateTable for " << table_name.ToString();
+  ASSERT_OK(CreateTable(table_name, kWaitForCreate));
+}
+
 // Orchestrate a master failover at various points of a backfill,
 // ensure that the backfill eventually completes.
 TEST_P(MasterFailoverTestIndexCreation, TestPauseAfterCreateIndexIssued) {
   const int kPauseAfterStage = GetParam();
   YBTableName table_name(YQL_DATABASE_CQL, "test", "testPauseAfterCreateTableIssued");
   LOG(INFO) << "Issuing CreateTable for " << table_name.ToString();
-  FLAGS_ycql_num_tablets = 5;
-  FLAGS_ysql_num_tablets = 5;
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_ycql_num_tablets) = 5;
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_ysql_num_tablets) = 5;
   ASSERT_OK(CreateTable(table_name, kWaitForCreate));
   LOG(INFO) << "CreateTable done for " << table_name.ToString();
 
@@ -456,17 +484,28 @@ TEST_F(MasterFailoverTest, TestFailoverAfterTsFailure) {
   ASSERT_OK(cluster_->ChangeConfig(cluster_->GetLeaderMaster(), consensus::REMOVE_SERVER));
 
   // Count all servers equal to 3.
+  auto leader_master = cluster_->GetLeaderMaster();
+  auto original_flag_value =
+      ASSERT_RESULT(leader_master->GetFlag("tserver_unresponsive_timeout_ms"));
+  ASSERT_OK(cluster_->SetFlag(leader_master, "tserver_unresponsive_timeout_ms", "3000"));
+
   ASSERT_OK(WaitFor([&]() -> Result<bool> {
     int tserver_count;
     RETURN_NOT_OK(client_->TabletServerCount(&tserver_count, false /* primary_only */));
     return tserver_count == 3;
   }, MonoDelta::FromSeconds(30), "Wait for tablet server count"));
 
-  ASSERT_OK(WaitFor([&]() -> Result<bool> {
-    int tserver_count;
-    RETURN_NOT_OK(client_->TabletServerCount(&tserver_count, true /* primary_only */));
-    return tserver_count == 2;
-  }, MonoDelta::FromSeconds(30), "Wait for tablet server count"));
+  // Count live tservers.
+  ASSERT_OK(WaitFor(
+      [&]() -> Result<bool> {
+        int tserver_count;
+        RETURN_NOT_OK(client_->TabletServerCount(&tserver_count, true /* primary_only */));
+        return tserver_count == 2;
+      },
+      MonoDelta::FromSeconds(30), "Wait for tablet server count"));
+
+  ASSERT_OK(
+      cluster_->SetFlag(leader_master, "tserver_unresponsive_timeout_ms", original_flag_value));
 
   google::protobuf::RepeatedPtrField<master::TabletLocationsPB> tablets;
   ASSERT_OK(client_->GetTablets(table_name, 0, &tablets, /* partition_list_version =*/ nullptr));
@@ -583,7 +622,7 @@ class MasterFailoverTestWithPlacement : public MasterFailoverTest {
     opts_.extra_tserver_flags.push_back("--placement_uuid=" + kLivePlacementUuid);
     opts_.extra_master_flags.push_back("--enable_register_ts_from_raft=true");
     MasterFailoverTest::SetUp();
-    yb_admin_client_ = std::make_unique<tools::enterprise::ClusterAdminClient>(
+    yb_admin_client_ = std::make_unique<tools::ClusterAdminClient>(
         cluster_->GetMasterAddresses(), MonoDelta::FromSeconds(30));
     ASSERT_OK(yb_admin_client_->Init());
     ASSERT_OK(yb_admin_client_->ModifyPlacementInfo("c.r.z0,c.r.z1,c.r.z2", 3, kLivePlacementUuid));
@@ -607,7 +646,7 @@ class MasterFailoverTestWithPlacement : public MasterFailoverTest {
  protected:
   const string kReadReplicaPlacementUuid = "read_replica";
   const string kLivePlacementUuid = "live";
-  std::unique_ptr<tools::enterprise::ClusterAdminClient> yb_admin_client_;
+  std::unique_ptr<tools::ClusterAdminClient> yb_admin_client_;
 };
 
 TEST_F_EX(MasterFailoverTest, TestFailoverWithReadReplicas, MasterFailoverTestWithPlacement) {
@@ -709,12 +748,12 @@ TEST_F_EX(MasterFailoverTest, DereferenceTasks, MasterFailoverMiniClusterTest) {
   const YBTableName table_name(YQL_DATABASE_CQL, kKeyspaceName, "dereference_tasks_table");
   YBSchema schema;
   YBSchemaBuilder b;
-  b.AddColumn("key")->Type(INT32)->NotNull()->PrimaryKey();
+  b.AddColumn("key")->Type(DataType::INT32)->NotNull()->PrimaryKey();
   ASSERT_OK(b.Build(&schema));
   auto table_creator = client->NewTableCreator();
   ASSERT_OK(table_creator->table_name(table_name)
                          .schema(&schema)
-                         .hash_schema(YBHashSchema::kMultiColumnHash)
+                         .hash_schema(dockv::YBHashSchema::kMultiColumnHash)
                          .num_tablets(1)
                          .Create());
 

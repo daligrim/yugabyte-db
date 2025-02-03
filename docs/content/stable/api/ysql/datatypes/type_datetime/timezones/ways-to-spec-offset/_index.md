@@ -5,11 +5,12 @@ linkTitle: Four ways to specify offset
 description: Explains the four ways to specify the UTC offset. [YSQL]
 image: /images/section_icons/api/subsection.png
 menu:
-  stable:
+  stable_api:
     identifier: ways-to-spec-offset
     parent: timezones
     weight: 40
 type: indexpage
+showRightNav: true
 ---
 
 The  _UTC offset_ is, ultimately, expressed as an [_interval_](../../date-time-data-types-semantics/type-interval/) value. It can be specified in various different ways as this page explains.

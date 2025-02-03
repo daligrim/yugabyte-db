@@ -27,13 +27,17 @@
 
 #include "yb/util/atomic.h"
 #include "yb/util/countdown_latch.h"
-#include "yb/util/flag_tags.h"
+#include "yb/util/flags.h"
 #include "yb/util/logging.h"
 #include "yb/util/result.h"
 #include "yb/util/status_format.h"
+#include "yb/util/sync_point.h"
 
 DEFINE_test_flag(int32, inject_status_resolver_delay_ms, 0,
                  "Inject delay before launching transaction status resolver RPC.");
+
+DEFINE_test_flag(int32, inject_status_resolver_unregister_rpc_delay_ms, 0,
+                 "Inject delay before unregistering rpc call after receiving the response.");
 
 DEFINE_test_flag(int32, inject_status_resolver_complete_delay_ms, 0,
                  "Inject delay before counting down latch in transaction status resolver "
@@ -114,14 +118,19 @@ class TransactionStatusResolver::Impl {
     // transaction statuses, which is NOT concurrent.
     // So we could avoid doing synchronization here.
     auto& tablet_id_and_queue = *queues_.begin();
-    auto client = participant_context_.client_future().get();
+    auto client_result = participant_context_.client();
+    if (!client_result.ok()) {
+      Complete(client_result.status());
+      return;
+    }
+    auto client = client_result.get();
     if (!client) {
       Complete(STATUS(Aborted, "Aborted because cannot start RPC"));
     }
     client->LookupTabletById(
         tablet_id_and_queue.first,
         nullptr /* table */,
-        master::IncludeInactive::kFalse,
+        master::IncludeHidden::kFalse,
         master::IncludeDeleted::kTrue,
         std::min(deadline_, TransactionRpcDeadline()),
         std::bind(&Impl::LookupTabletDone, this, _1),
@@ -163,7 +172,12 @@ class TransactionStatusResolver::Impl {
 
     AtomicFlagSleepMs(&FLAGS_TEST_inject_status_resolver_delay_ms);
 
-    auto client = participant_context_.client_future().get();
+    auto client_result = participant_context_.client();
+    if (!client_result.ok()) {
+      Complete(client_result.status());
+      return;
+    }
+    auto client = client_result.get();
     if (!client || !rpcs_.RegisterAndStart(
         client::GetTransactionStatus(
             std::min(deadline_, TransactionRpcDeadline()),
@@ -187,6 +201,7 @@ class TransactionStatusResolver::Impl {
     status_infos_.resize(request_size);
     for (size_t i = 0; i != request_size; ++i) {
       auto& status_info = status_infos_[i];
+      status_info.status_tablet = it->first;
       status_info.transaction_id = queue.front();
       status_info.status = TransactionStatus::ABORTED;
       status_info.status_ht = HybridTime::kMax;
@@ -209,7 +224,8 @@ class TransactionStatusResolver::Impl {
                       const tserver::GetTransactionStatusResponsePB& response,
                       int request_size) {
     VLOG_WITH_PREFIX(2) << "Received statuses: " << status << ", " << response.ShortDebugString();
-
+    DEBUG_ONLY_TEST_SYNC_POINT("TransactionStatusResolver::Impl::StatusReceived");
+    AtomicFlagSleepMs(&FLAGS_TEST_inject_status_resolver_unregister_rpc_delay_ms);
     rpcs_.Unregister(&handle_);
 
     if (status.ok() && response.has_error()) {
@@ -218,7 +234,7 @@ class TransactionStatusResolver::Impl {
 
     if (!status.ok()) {
       LOG_WITH_PREFIX(WARNING) << "Failed to request transaction statuses: " << status;
-      if (status.IsAborted()) {
+      if (status.IsAborted() || status.IsShutdownInProgress()) {
         Complete(status);
       } else {
         Execute();
@@ -247,8 +263,18 @@ class TransactionStatusResolver::Impl {
     status_infos_.resize(response.status().size());
     for (int i = 0; i != response.status().size(); ++i) {
       auto& status_info = status_infos_[i];
+      status_info.status_tablet = it->first;
       status_info.transaction_id = queue.front();
       status_info.status = response.status(i);
+      if (response.deadlock_reason().size() > i &&
+          response.deadlock_reason(i).code() != AppStatusPB::OK) {
+        // response contains a deadlock specific error.
+        status_info.expected_deadlock_status = StatusFromPB(response.deadlock_reason(i));
+      }
+      if (response.pg_session_req_version().size() > i &&
+          !response.pg_session_req_version(i)) {
+        status_info.pg_session_req_version = response.pg_session_req_version(i);
+      }
 
       if (PREDICT_FALSE(response.aborted_subtxn_set().empty())) {
         YB_LOG_EVERY_N(WARNING, 1)
@@ -256,11 +282,11 @@ class TransactionStatusResolver::Impl {
             << "This should only happen when nodes are on different versions, e.g. during "
             << "upgrade.";
       } else {
-        auto aborted_subtxn_set_or_status = AbortedSubTransactionSet::FromPB(
+        auto aborted_subtxn_set_or_status = SubtxnSet::FromPB(
           response.aborted_subtxn_set(i).set());
         if (!aborted_subtxn_set_or_status.ok()) {
           Complete(STATUS_FORMAT(
-              IllegalState, "Cannot deserialize AbortedSubTransactionSet: $0",
+              IllegalState, "Cannot deserialize SubtxnSet: $0",
               response.aborted_subtxn_set(i).DebugString()));
           return;
         }

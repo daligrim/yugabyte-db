@@ -36,13 +36,16 @@
 #include "yb/util/enums.h"
 #include "yb/util/metrics.h"
 #include "yb/util/random_util.h"
+#include "yb/util/flags.h"
+
+using std::shared_ptr;
 
 // 0 value means that there exist no single_touch cache and
 // 1 means that the entire cache is treated as a multi-touch cache.
-DEFINE_double(cache_single_touch_ratio, 0.2,
+DEFINE_UNKNOWN_double(cache_single_touch_ratio, 0.2,
               "Fraction of the cache dedicated to single-touch items");
 
-DEFINE_bool(cache_overflow_single_touch, true,
+DEFINE_UNKNOWN_bool(cache_overflow_single_touch, true,
             "Whether to enable overflow of single touch cache into the multi touch cache "
             "allocation");
 
@@ -236,7 +239,7 @@ class HandleTable {
     }
     LRUHandle** new_list = new LRUHandle*[new_length];
     memset(new_list, 0, sizeof(new_list[0]) * new_length);
-    uint32_t count = 0;
+    uint32_t count __attribute__((unused)) = 0;
     LRUHandle* h;
     LRUHandle* next;
     LRUHandle** ptr;
@@ -602,29 +605,27 @@ Cache::Handle* LRUCache::Lookup(const Slice& key, uint32_t hash, const QueryId q
         e->query_id = kInMultiTouchId;
         single_touch_sub_cache_.DecrementUsage(e->charge);
         multi_touch_sub_cache_.IncrementUsage(e->charge);
-       if (metrics_) {
-         metrics_->multi_touch_cache_usage->IncrementBy(e->charge);
-         metrics_->single_touch_cache_usage->DecrementBy(e->charge);
-       }
+        if (metrics_) {
+          metrics_->multi_touch_cache_usage->IncrementBy(e->charge);
+          metrics_->single_touch_cache_usage->DecrementBy(e->charge);
+        }
       }
     }
     if (statistics != nullptr) {
       // overall cache hit
-      RecordTick(statistics, BLOCK_CACHE_HIT);
+      statistics->recordTick(BLOCK_CACHE_HIT);
       // total bytes read from cache
-      RecordTick(statistics, BLOCK_CACHE_BYTES_READ, e->charge);
+      statistics->recordTick(BLOCK_CACHE_BYTES_READ, e->charge);
       if (e->GetSubCacheType() == SubCacheType::SINGLE_TOUCH) {
-        RecordTick(statistics, BLOCK_CACHE_SINGLE_TOUCH_HIT);
-        RecordTick(statistics, BLOCK_CACHE_SINGLE_TOUCH_BYTES_READ, e->charge);
+        statistics->recordTick(BLOCK_CACHE_SINGLE_TOUCH_HIT);
+        statistics->recordTick(BLOCK_CACHE_SINGLE_TOUCH_BYTES_READ, e->charge);
       } else if (e->GetSubCacheType() == SubCacheType::MULTI_TOUCH) {
-        RecordTick(statistics, BLOCK_CACHE_MULTI_TOUCH_HIT);
-        RecordTick(statistics, BLOCK_CACHE_MULTI_TOUCH_BYTES_READ, e->charge);
+        statistics->recordTick(BLOCK_CACHE_MULTI_TOUCH_HIT);
+        statistics->recordTick(BLOCK_CACHE_MULTI_TOUCH_BYTES_READ, e->charge);
       }
     }
   } else {
-    if (statistics != nullptr) {
-      RecordTick(statistics, BLOCK_CACHE_MISS);
-    }
+    RecordTick(statistics, BLOCK_CACHE_MISS);
   }
 
   if (metrics_ != nullptr) {
@@ -705,7 +706,7 @@ Status LRUCache::Insert(const Slice& key, uint32_t hash, const QueryId query_id,
                         Cache::Handle** handle, Statistics* statistics) {
   // Don't use the cache if disabled by the caller using the special query id.
   if (query_id == kNoCacheQueryId) {
-    return Status::OK();
+    return STATUS(InvalidArgument, "Inserting to cache when cache is disabled");
   }
   // Allocate the memory here outside of the mutex
   // If the cache is full, we'll have to release it
@@ -838,8 +839,6 @@ void LRUCache::Erase(const Slice& key, uint32_t hash) {
   }
 }
 
-static int kNumShardBits = 4;          // default values, can be overridden
-
 class ShardedLRUCache : public Cache {
  private:
   LRUCache* shards_;
@@ -940,7 +939,7 @@ class ShardedLRUCache : public Cache {
   }
 
   void* Value(Handle* handle) override {
-    return reinterpret_cast<LRUHandle*>(handle)->value;
+    return reinterpret_cast<LRUHandle*>(DCHECK_NOTNULL(handle))->value;
   }
 
   uint64_t NewId() override {
@@ -1017,7 +1016,7 @@ class ShardedLRUCache : public Cache {
 }  // end anonymous namespace
 
 shared_ptr<Cache> NewLRUCache(size_t capacity) {
-  return NewLRUCache(capacity, kNumShardBits, false);
+  return NewLRUCache(capacity, kSharedLRUCacheDefaultNumShardBits, false);
 }
 
 shared_ptr<Cache> NewLRUCache(size_t capacity, int num_shard_bits) {
@@ -1026,7 +1025,7 @@ shared_ptr<Cache> NewLRUCache(size_t capacity, int num_shard_bits) {
 
 shared_ptr<Cache> NewLRUCache(size_t capacity, int num_shard_bits,
                               bool strict_capacity_limit) {
-  if (num_shard_bits >= 20) {
+  if (num_shard_bits > kSharedLRUCacheMaxNumShardBits) {
     return nullptr;  // the cache cannot be sharded into too many fine pieces
   }
   return std::make_shared<ShardedLRUCache>(capacity, num_shard_bits,

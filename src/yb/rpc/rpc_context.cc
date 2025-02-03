@@ -58,6 +58,7 @@ namespace yb {
 namespace rpc {
 
 using std::shared_ptr;
+using std::string;
 
 namespace {
 
@@ -91,14 +92,14 @@ scoped_refptr<debug::ConvertableToTraceFormat> TracePb(const Message& msg) {
 
 }  // anonymous namespace
 
-Result<size_t> RpcCallPBParams::ParseRequest(Slice param) {
+Status RpcCallPBParams::ParseRequest(Slice param, const RefCntBuffer& buffer) {
   google::protobuf::io::CodedInputStream in(param.data(), narrow_cast<int>(param.size()));
   SetupLimit(&in);
   auto& message = request();
   if (PREDICT_FALSE(!message.ParseFromCodedStream(&in))) {
     return STATUS(InvalidArgument, message.InitializationErrorString());
   }
-  return message.SpaceUsedLong();
+  return Status::OK();
 }
 
 AnyMessageConstPtr RpcCallPBParams::SerializableResponse() {
@@ -113,9 +114,9 @@ const google::protobuf::Message* RpcCallPBParams::CastMessage(const AnyMessageCo
   return msg.protobuf();
 }
 
-Result<size_t> RpcCallLWParams::ParseRequest(Slice param) {
-  RETURN_NOT_OK(request().ParseFromSlice(param));
-  return 0;
+Status RpcCallLWParams::ParseRequest(Slice param, const RefCntBuffer& buffer) {
+  buffer_ = buffer;
+  return request().ParseFromSlice(param);
 }
 
 AnyMessageConstPtr RpcCallLWParams::SerializableResponse() {
@@ -190,16 +191,12 @@ void RpcContext::RespondApplicationError(int error_ext_id, const std::string& me
   responded_ = true;
 }
 
-size_t RpcContext::AddRpcSidecar(const Slice& car) {
-  return call_->AddRpcSidecar(car);
+Sidecars& RpcContext::sidecars() {
+  return call_->sidecars();
 }
 
-void RpcContext::ResetRpcSidecars() {
-  call_->ResetRpcSidecars();
-}
-
-void RpcContext::ReserveSidecarSpace(size_t space) {
-  call_->ReserveSidecarSpace(space);
+Result<RefCntSlice> RpcContext::ExtractSidecar(size_t idx) const {
+  return call_->ExtractSidecar(idx);
 }
 
 const Endpoint& RpcContext::remote_address() const {
@@ -250,13 +247,25 @@ void RpcContext::Panic(const char* filepath, int line_number, const string& mess
 
 void RpcContext::CloseConnection() {
   auto connection = call_->connection();
-  connection->reactor()->ScheduleReactorFunctor([connection](Reactor*) {
-    connection->Close();
-  }, SOURCE_LOCATION());
+  auto closing_status =
+      connection->reactor()->ScheduleReactorFunctor([connection](Reactor*) {
+        connection->Close();
+      }, SOURCE_LOCATION());
+  LOG_IF(DFATAL, !closing_status.ok())
+      << "Could not schedule a reactor task to close a connection: " << closing_status;
+}
+
+void RpcContext::ListenConnectionShutdown(const std::function<void()>& listener) {
+  call_->connection()->ListenShutdown(listener);
 }
 
 std::string RpcContext::ToString() const {
   return call_->ToString();
+}
+
+const ash::WaitStateInfoPtr& RpcContext::wait_state() const {
+  static const ash::WaitStateInfoPtr kNullPtr;
+  return call_ ? call_->wait_state() : kNullPtr;
 }
 
 void PanicRpc(RpcContext* context, const char* file, int line_number, const std::string& message) {

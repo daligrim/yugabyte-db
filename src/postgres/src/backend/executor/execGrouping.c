@@ -3,11 +3,7 @@
  * execGrouping.c
  *	  executor utility routines for grouping, hashing, and aggregation
  *
- * Note: we currently assume that equality and hashing functions are not
- * collation-sensitive, so the code in this file has no support for passing
- * collation settings through from callers.  That may have to change someday.
- *
- * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -18,16 +14,27 @@
  */
 #include "postgres.h"
 
-#include "access/hash.h"
 #include "access/parallel.h"
+#include "catalog/pg_type.h"
+#include "common/hashfn.h"
+#include "nodes/nodeFuncs.h"
+#include "optimizer/clauses.h"
 #include "executor/executor.h"
 #include "miscadmin.h"
 #include "utils/lsyscache.h"
-#include "utils/hashutils.h"
 #include "utils/memutils.h"
 
-static uint32 TupleHashTableHash(struct tuplehash_hash *tb, const MinimalTuple tuple);
+/* Yugabyte includes */
+#include "catalog/pg_collation.h"
+#include "nodes/makefuncs.h"
+#include "pg_yb_utils.h"
+
 static int	TupleHashTableMatch(struct tuplehash_hash *tb, const MinimalTuple tuple1, const MinimalTuple tuple2);
+static inline uint32 TupleHashTableHash_internal(struct tuplehash_hash *tb,
+												 const MinimalTuple tuple);
+static inline TupleHashEntry LookupTupleHashEntry_internal(TupleHashTable hashtable,
+														   TupleTableSlot *slot,
+														   bool *isnew, uint32 hash);
 
 /*
  * Define parameters for tuple hash table code generation. The interface is
@@ -38,7 +45,7 @@ static int	TupleHashTableMatch(struct tuplehash_hash *tb, const MinimalTuple tup
 #define SH_ELEMENT_TYPE TupleHashEntryData
 #define SH_KEY_TYPE MinimalTuple
 #define SH_KEY firstTuple
-#define SH_HASH_KEY(tb, key) TupleHashTableHash(tb, key)
+#define SH_HASH_KEY(tb, key) TupleHashTableHash_internal(tb, key)
 #define SH_EQUAL(tb, a, b) TupleHashTableMatch(tb, a, b) == 0
 #define SH_SCOPE extern
 #define SH_STORE_HASH
@@ -59,8 +66,9 @@ static int	TupleHashTableMatch(struct tuplehash_hash *tb, const MinimalTuple tup
 ExprState *
 execTuplesMatchPrepare(TupleDesc desc,
 					   int numCols,
-					   AttrNumber *keyColIdx,
-					   Oid *eqOperators,
+					   const AttrNumber *keyColIdx,
+					   const Oid *eqOperators,
+					   const Oid *collations,
 					   PlanState *parent)
 {
 	Oid		   *eqFunctions = (Oid *) palloc(numCols * sizeof(Oid));
@@ -75,7 +83,8 @@ execTuplesMatchPrepare(TupleDesc desc,
 		eqFunctions[i] = get_opcode(eqOperators[i]);
 
 	/* build actual expression */
-	expr = ExecBuildGroupingEqual(desc, desc, numCols, keyColIdx, eqFunctions,
+	expr = ExecBuildGroupingEqual(desc, desc, NULL, NULL,
+								  numCols, keyColIdx, eqFunctions, collations,
 								  parent);
 
 	return expr;
@@ -92,14 +101,17 @@ execTuplesMatchPrepare(TupleDesc desc,
  */
 void
 execTuplesHashPrepare(int numCols,
-					  Oid *eqOperators,
+					  const Oid *eqOperators,
 					  Oid **eqFuncOids,
-					  FmgrInfo **hashFunctions)
+					  FmgrInfo **leftHashFunctions,
+					  FmgrInfo **rightHashFunctions)
 {
 	int			i;
 
 	*eqFuncOids = (Oid *) palloc(numCols * sizeof(Oid));
-	*hashFunctions = (FmgrInfo *) palloc(numCols * sizeof(FmgrInfo));
+	*leftHashFunctions = (FmgrInfo *) palloc(numCols * sizeof(FmgrInfo));
+	if (rightHashFunctions)
+		*rightHashFunctions = (FmgrInfo *) palloc(numCols * sizeof(FmgrInfo));
 
 	for (i = 0; i < numCols; i++)
 	{
@@ -114,10 +126,46 @@ execTuplesHashPrepare(int numCols,
 			elog(ERROR, "could not find hash function for hash operator %u",
 				 eq_opr);
 		/* We're not supporting cross-type cases here */
-		Assert(left_hash_function == right_hash_function);
+		/* YB: We do support cross-type cases if rightHashFunctions is valid. */
+		Assert(rightHashFunctions != NULL ||
+			   left_hash_function == right_hash_function);
 		(*eqFuncOids)[i] = eq_function;
-		fmgr_info(right_hash_function, &(*hashFunctions)[i]);
+		if (rightHashFunctions != NULL)
+			fmgr_info(right_hash_function, &(*rightHashFunctions)[i]);
+		fmgr_info(left_hash_function, &(*leftHashFunctions)[i]);
 	}
+}
+
+ExprState *
+ybPrepareOuterExprsEqualFn(List *outer_exprs, Oid *eqOps, PlanState *parent)
+{
+	List	   *quals = NULL;
+	ListCell   *lc;
+	int			i = 0;
+
+	foreach(lc, outer_exprs)
+	{
+		Expr	   *rhs = lfirst(lc);
+		Expr	   *lhs = yb_copy_replace_varnos(rhs, OUTER_VAR, INNER_VAR);
+
+		int			collid = exprCollation((Node *) rhs);
+		Oid			eqop;
+
+		/*
+		 * We can't directly use eqOps[i] as that might be a cross-type
+		 * comparison between the outer and inner sides. We attempt to get
+		 * a hashable op from the same opfamily that equates the type of lhs
+		 * with itself.
+		 */
+		(void) get_compatible_hash_operators(eqOps[i], NULL, &eqop);
+		Expr	   *qual = make_opclause(eqop, BOOLOID, false, lhs, rhs,
+										 collid, collid);
+
+		set_opfuncid((OpExpr *) qual);
+		quals = lappend(quals, qual);
+		i++;
+	}
+	return ExecInitQual(quals, parent);
 }
 
 
@@ -128,6 +176,87 @@ execTuplesHashPrepare(int numCols,
  * hash aggregation).  There is one entry for each not-distinct set of tuples
  * presented.
  *****************************************************************************/
+
+TupleHashTable
+YbBuildTupleHashTableExt(PlanState *parent,
+						 TupleDesc inputDesc,
+						 int numCols, ExprState **keyColExprs,
+						 ExprState *eqExpr,
+						 Oid *eqfuncoids,
+						 FmgrInfo *hashfunctions,
+						 long nbuckets, Size additionalsize,
+						 MemoryContext metacxt,
+						 MemoryContext tablecxt,
+						 MemoryContext tempcxt,
+						 ExprContext *expr_cxt,
+						 bool use_variable_hash_iv)
+{
+	TupleHashTable hashtable;
+	Size		entrysize = sizeof(TupleHashEntryData) + additionalsize;
+	MemoryContext oldcontext;
+
+	Assert(nbuckets > 0);
+
+	/* Limit initial table size request to not more than work_mem */
+	nbuckets = Min(nbuckets, (long) ((work_mem * 1024L) / entrysize));
+
+	oldcontext = MemoryContextSwitchTo(metacxt);
+
+	hashtable = (TupleHashTable) palloc(sizeof(TupleHashTableData));
+
+	hashtable->numCols = numCols;
+	hashtable->yb_keyColExprs = keyColExprs;
+	hashtable->keyColIdx = NULL;
+	hashtable->tab_hash_funcs = hashfunctions;
+	hashtable->tab_collations = NULL;
+	hashtable->tablecxt = tablecxt;
+	hashtable->tempcxt = tempcxt;
+	hashtable->entrysize = entrysize;
+	hashtable->tableslot = NULL;	/* will be made on first lookup */
+	hashtable->inputslot = NULL;
+	hashtable->in_hash_funcs = NULL;
+	hashtable->in_keyColIdx = NULL;
+	hashtable->yb_in_keycolExprs = NULL;
+	hashtable->cur_eq_func = NULL;
+
+	/*
+	 * If parallelism is in use, even if the master backend is performing the
+	 * scan itself, we don't want to create the hashtable exactly the same way
+	 * in all workers. As hashtables are iterated over in keyspace-order,
+	 * doing so in all processes in the same way is likely to lead to
+	 * "unbalanced" hashtables when the table size initially is
+	 * underestimated.
+	 */
+	if (use_variable_hash_iv)
+		hashtable->hash_iv = murmurhash32(ParallelWorkerNumber);
+	else
+		hashtable->hash_iv = 0;
+
+	hashtable->hashtab = tuplehash_create(metacxt, nbuckets, hashtable);
+
+	/*
+	 * We copy the input tuple descriptor just for safety --- we assume all
+	 * input tuples will have equivalent descriptors.
+	 */
+	hashtable->tableslot = MakeSingleTupleTableSlot(CreateTupleDescCopy(inputDesc),
+													&TTSOpsMinimalTuple);
+
+	/* build comparator for all columns */
+	hashtable->tab_eq_func = eqExpr;
+
+	/*
+	 * While not pretty, it's ok to not shut down this context, but instead
+	 * rely on the containing memory context being reset, as
+	 * ExecBuildGroupingEqual() only builds a very simple expression calling
+	 * functions (i.e. nothing that'd employ RegisterExprContextCallback()).
+	 */
+	hashtable->exprcontext =
+		expr_cxt ? expr_cxt : CreateStandaloneExprContext();
+
+	MemoryContextSwitchTo(oldcontext);
+
+	return hashtable;
+}
 
 /*
  * Construct an empty TupleHashTable
@@ -152,8 +281,9 @@ TupleHashTable
 BuildTupleHashTableExt(PlanState *parent,
 					   TupleDesc inputDesc,
 					   int numCols, AttrNumber *keyColIdx,
-					   Oid *eqfuncoids,
+					   const Oid *eqfuncoids,
 					   FmgrInfo *hashfunctions,
+					   Oid *collations,
 					   long nbuckets, Size additionalsize,
 					   MemoryContext metacxt,
 					   MemoryContext tablecxt,
@@ -162,12 +292,16 @@ BuildTupleHashTableExt(PlanState *parent,
 {
 	TupleHashTable hashtable;
 	Size		entrysize = sizeof(TupleHashEntryData) + additionalsize;
+	Size		hash_mem_limit;
 	MemoryContext oldcontext;
+	bool		allow_jit;
 
 	Assert(nbuckets > 0);
 
-	/* Limit initial table size request to not more than work_mem */
-	nbuckets = Min(nbuckets, (long) ((work_mem * 1024L) / entrysize));
+	/* Limit initial table size request to not more than hash_mem */
+	hash_mem_limit = get_hash_memory_limit() / entrysize;
+	if (nbuckets > hash_mem_limit)
+		nbuckets = hash_mem_limit;
 
 	oldcontext = MemoryContextSwitchTo(metacxt);
 
@@ -176,6 +310,8 @@ BuildTupleHashTableExt(PlanState *parent,
 	hashtable->numCols = numCols;
 	hashtable->keyColIdx = keyColIdx;
 	hashtable->tab_hash_funcs = hashfunctions;
+	hashtable->tab_collations = collations;
+	hashtable->yb_keyColExprs = NULL;
 	hashtable->tablecxt = tablecxt;
 	hashtable->tempcxt = tempcxt;
 	hashtable->entrysize = entrysize;
@@ -183,10 +319,11 @@ BuildTupleHashTableExt(PlanState *parent,
 	hashtable->inputslot = NULL;
 	hashtable->in_hash_funcs = NULL;
 	hashtable->in_keyColIdx = NULL;
+	hashtable->yb_in_keycolExprs = NULL;
 	hashtable->cur_eq_func = NULL;
 
 	/*
-	 * If parallelism is in use, even if the master backend is performing the
+	 * If parallelism is in use, even if the leader backend is performing the
 	 * scan itself, we don't want to create the hashtable exactly the same way
 	 * in all workers. As hashtables are iterated over in keyspace-order,
 	 * doing so in all processes in the same way is likely to lead to
@@ -204,13 +341,26 @@ BuildTupleHashTableExt(PlanState *parent,
 	 * We copy the input tuple descriptor just for safety --- we assume all
 	 * input tuples will have equivalent descriptors.
 	 */
-	hashtable->tableslot = MakeSingleTupleTableSlot(CreateTupleDescCopy(inputDesc));
+	hashtable->tableslot = MakeSingleTupleTableSlot(CreateTupleDescCopy(inputDesc),
+													&TTSOpsMinimalTuple);
+
+	/*
+	 * If the old reset interface is used (i.e. BuildTupleHashTable, rather
+	 * than BuildTupleHashTableExt), allowing JIT would lead to the generated
+	 * functions to a) live longer than the query b) be re-generated each time
+	 * the table is being reset. Therefore prevent JIT from being used in that
+	 * case, by not providing a parent node (which prevents accessing the
+	 * JitContext in the EState).
+	 */
+	allow_jit = metacxt != tablecxt;
 
 	/* build comparator for all columns */
+	/* XXX: should we support non-minimal tuples for the inputslot? */
 	hashtable->tab_eq_func = ExecBuildGroupingEqual(inputDesc, inputDesc,
+													&TTSOpsMinimalTuple, &TTSOpsMinimalTuple,
 													numCols,
-													keyColIdx, eqfuncoids,
-													NULL);
+													keyColIdx, eqfuncoids, collations,
+													allow_jit ? parent : NULL);
 
 	/*
 	 * While not pretty, it's ok to not shut down this context, but instead
@@ -226,7 +376,7 @@ BuildTupleHashTableExt(PlanState *parent,
 }
 
 /*
- * BuildTupleHashTable is a backwards-compatibilty wrapper for
+ * BuildTupleHashTable is a backwards-compatibility wrapper for
  * BuildTupleHashTableExt(), that allocates the hashtable's metadata in
  * tablecxt. Note that hashtables created this way cannot be reset leak-free
  * with ResetTupleHashTable().
@@ -235,8 +385,9 @@ TupleHashTable
 BuildTupleHashTable(PlanState *parent,
 					TupleDesc inputDesc,
 					int numCols, AttrNumber *keyColIdx,
-					Oid *eqfuncoids,
+					const Oid *eqfuncoids,
 					FmgrInfo *hashfunctions,
+					Oid *collations,
 					long nbuckets, Size additionalsize,
 					MemoryContext tablecxt,
 					MemoryContext tempcxt,
@@ -247,6 +398,7 @@ BuildTupleHashTable(PlanState *parent,
 								  numCols, keyColIdx,
 								  eqfuncoids,
 								  hashfunctions,
+								  collations,
 								  nbuckets, additionalsize,
 								  tablecxt,
 								  tablecxt,
@@ -272,6 +424,9 @@ ResetTupleHashTable(TupleHashTable hashtable)
  * If isnew is NULL, we do not create new entries; we return NULL if no
  * match is found.
  *
+ * If hash is not NULL, we set it to the calculated hash value. This allows
+ * callers access to the hash value even if no entry is returned.
+ *
  * If isnew isn't NULL, then a new entry is created if no existing entry
  * matches.  On return, *isnew is true if the entry is newly created,
  * false if it existed already.  ->additional_data in the new entry has
@@ -279,12 +434,11 @@ ResetTupleHashTable(TupleHashTable hashtable)
  */
 TupleHashEntry
 LookupTupleHashEntry(TupleHashTable hashtable, TupleTableSlot *slot,
-					 bool *isnew)
+					 bool *isnew, uint32 *hash)
 {
-	TupleHashEntryData *entry;
+	TupleHashEntry entry;
 	MemoryContext oldContext;
-	bool		found;
-	MinimalTuple key;
+	uint32		local_hash;
 
 	/* Need to run the hash functions in short-lived context */
 	oldContext = MemoryContextSwitchTo(hashtable->tempcxt);
@@ -293,34 +447,65 @@ LookupTupleHashEntry(TupleHashTable hashtable, TupleTableSlot *slot,
 	hashtable->inputslot = slot;
 	hashtable->in_hash_funcs = hashtable->tab_hash_funcs;
 	hashtable->in_keyColIdx = hashtable->keyColIdx;
+	hashtable->yb_in_keycolExprs = hashtable->yb_keyColExprs;
 	hashtable->cur_eq_func = hashtable->tab_eq_func;
 
-	key = NULL;					/* flag to reference inputslot */
+	local_hash = TupleHashTableHash_internal(hashtable->hashtab, NULL);
+	entry = LookupTupleHashEntry_internal(hashtable, slot, isnew, local_hash);
 
-	if (isnew)
-	{
-		entry = tuplehash_insert(hashtable->hashtab, key, &found);
+	if (hash != NULL)
+		*hash = local_hash;
 
-		if (found)
-		{
-			/* found pre-existing entry */
-			*isnew = false;
-		}
-		else
-		{
-			/* created new entry */
-			*isnew = true;
-			/* zero caller data */
-			entry->additional = NULL;
-			MemoryContextSwitchTo(hashtable->tablecxt);
-			/* Copy the first tuple into the table context */
-			entry->firstTuple = ExecCopySlotMinimalTuple(slot);
-		}
-	}
-	else
-	{
-		entry = tuplehash_lookup(hashtable->hashtab, key);
-	}
+	Assert(entry == NULL || entry->hash == local_hash);
+
+	MemoryContextSwitchTo(oldContext);
+
+	return entry;
+}
+
+/*
+ * Compute the hash value for a tuple
+ */
+uint32
+TupleHashTableHash(TupleHashTable hashtable, TupleTableSlot *slot)
+{
+	MemoryContext oldContext;
+	uint32		hash;
+
+	hashtable->inputslot = slot;
+	hashtable->in_hash_funcs = hashtable->tab_hash_funcs;
+
+	/* Need to run the hash functions in short-lived context */
+	oldContext = MemoryContextSwitchTo(hashtable->tempcxt);
+
+	hash = TupleHashTableHash_internal(hashtable->hashtab, NULL);
+
+	MemoryContextSwitchTo(oldContext);
+
+	return hash;
+}
+
+/*
+ * A variant of LookupTupleHashEntry for callers that have already computed
+ * the hash value.
+ */
+TupleHashEntry
+LookupTupleHashEntryHash(TupleHashTable hashtable, TupleTableSlot *slot,
+						 bool *isnew, uint32 hash)
+{
+	TupleHashEntry entry;
+	MemoryContext oldContext;
+
+	/* Need to run the hash functions in short-lived context */
+	oldContext = MemoryContextSwitchTo(hashtable->tempcxt);
+
+	/* set up data needed by hash and match functions */
+	hashtable->inputslot = slot;
+	hashtable->in_hash_funcs = hashtable->tab_hash_funcs;
+	hashtable->cur_eq_func = hashtable->tab_eq_func;
+
+	entry = LookupTupleHashEntry_internal(hashtable, slot, isnew, hash);
+	Assert(entry == NULL || entry->hash == hash);
 
 	MemoryContextSwitchTo(oldContext);
 
@@ -354,6 +539,7 @@ FindTupleHashEntry(TupleHashTable hashtable, TupleTableSlot *slot,
 	hashtable->inputslot = slot;
 	hashtable->in_hash_funcs = hashfunctions;
 	hashtable->in_keyColIdx = keyColIdx;
+	hashtable->yb_in_keycolExprs = NULL;
 	hashtable->cur_eq_func = eqcomp;
 
 	/* Search the hash table */
@@ -365,20 +551,16 @@ FindTupleHashEntry(TupleHashTable hashtable, TupleTableSlot *slot,
 }
 
 /*
- * Compute the hash value for a tuple
- *
- * The passed-in key is a pointer to TupleHashEntryData.  In an actual hash
- * table entry, the firstTuple field points to a tuple (in MinimalTuple
- * format).  LookupTupleHashEntry sets up a dummy TupleHashEntryData with a
- * NULL firstTuple field --- that cues us to look at the inputslot instead.
- * This convention avoids the need to materialize virtual input tuples unless
- * they actually need to get copied into the table.
+ * If tuple is NULL, use the input slot instead. This convention avoids the
+ * need to materialize virtual input tuples unless they actually need to get
+ * copied into the table.
  *
  * Also, the caller must select an appropriate memory context for running
  * the hash functions. (dynahash.c doesn't change GetCurrentMemoryContext().)
  */
 static uint32
-TupleHashTableHash(struct tuplehash_hash *tb, const MinimalTuple tuple)
+TupleHashTableHash_internal(struct tuplehash_hash *tb,
+							const MinimalTuple tuple)
 {
 	TupleHashTable hashtable = (TupleHashTable) tb->private_data;
 	int			numCols = hashtable->numCols;
@@ -387,6 +569,7 @@ TupleHashTableHash(struct tuplehash_hash *tb, const MinimalTuple tuple)
 	TupleTableSlot *slot;
 	FmgrInfo   *hashfunctions;
 	int			i;
+	ExprState **eval_exprs = NULL;
 
 	if (tuple == NULL)
 	{
@@ -394,6 +577,7 @@ TupleHashTableHash(struct tuplehash_hash *tb, const MinimalTuple tuple)
 		slot = hashtable->inputslot;
 		hashfunctions = hashtable->in_hash_funcs;
 		keyColIdx = hashtable->in_keyColIdx;
+		eval_exprs = hashtable->yb_in_keycolExprs;
 	}
 	else
 	{
@@ -410,21 +594,38 @@ TupleHashTableHash(struct tuplehash_hash *tb, const MinimalTuple tuple)
 
 	for (i = 0; i < numCols; i++)
 	{
-		AttrNumber	att = keyColIdx[i];
+		AttrNumber	att;
 		Datum		attr;
 		bool		isNull;
 
-		/* rotate hashkey left 1 bit at each step */
-		hashkey = (hashkey << 1) | ((hashkey & 0x80000000) ? 1 : 0);
+		/* combine successive hashkeys by rotating */
+		hashkey = pg_rotate_left32(hashkey, 1);
 
-		attr = slot_getattr(slot, att, &isNull);
+		if (eval_exprs != NULL && eval_exprs[i] != NULL)
+		{
+			hashtable->exprcontext->ecxt_outertuple = slot;
+			attr = ExecEvalExprSwitchContext(eval_exprs[i],
+											 hashtable->exprcontext,
+											 &isNull);
+		}
+		else
+		{
+			att = keyColIdx[i];
+			attr = slot_getattr(slot, att, &isNull);
+		}
 
 		if (!isNull)			/* treat nulls as having hash key 0 */
 		{
 			uint32		hkey;
 
-			hkey = DatumGetUInt32(FunctionCall1(&hashfunctions[i],
-												attr));
+			/* YB doesn't support collations with hash functions. */
+			Oid			yb_collation = (IsYugaByteEnabled() ?
+										DEFAULT_COLLATION_OID :
+										hashtable->tab_collations[i]);
+
+			hkey = DatumGetUInt32(FunctionCall1Coll(&hashfunctions[i],
+													yb_collation,
+													attr));
 			hashkey ^= hkey;
 		}
 	}
@@ -439,9 +640,53 @@ TupleHashTableHash(struct tuplehash_hash *tb, const MinimalTuple tuple)
 }
 
 /*
- * See whether two tuples (presumably of the same hash value) match
+ * Does the work of LookupTupleHashEntry and LookupTupleHashEntryHash. Useful
+ * so that we can avoid switching the memory context multiple times for
+ * LookupTupleHashEntry.
  *
- * As above, the passed pointers are pointers to TupleHashEntryData.
+ * NB: This function may or may not change the memory context. Caller is
+ * expected to change it back.
+ */
+static inline TupleHashEntry
+LookupTupleHashEntry_internal(TupleHashTable hashtable, TupleTableSlot *slot,
+							  bool *isnew, uint32 hash)
+{
+	TupleHashEntryData *entry;
+	bool		found;
+	MinimalTuple key;
+
+	key = NULL;					/* flag to reference inputslot */
+
+	if (isnew)
+	{
+		entry = tuplehash_insert_hash(hashtable->hashtab, key, hash, &found);
+
+		if (found)
+		{
+			/* found pre-existing entry */
+			*isnew = false;
+		}
+		else
+		{
+			/* created new entry */
+			*isnew = true;
+			/* zero caller data */
+			entry->additional = NULL;
+			MemoryContextSwitchTo(hashtable->tablecxt);
+			/* Copy the first tuple into the table context */
+			entry->firstTuple = ExecCopySlotMinimalTuple(slot);
+		}
+	}
+	else
+	{
+		entry = tuplehash_lookup_hash(hashtable->hashtab, key, hash);
+	}
+
+	return entry;
+}
+
+/*
+ * See whether two tuples (presumably of the same hash value) match
  */
 static int
 TupleHashTableMatch(struct tuplehash_hash *tb, const MinimalTuple tuple1, const MinimalTuple tuple2)

@@ -2,20 +2,17 @@ package com.yugabyte.yw.controllers;
 
 import static junit.framework.TestCase.fail;
 
-import java.io.File;
-import java.io.IOException;
-import java.io.InputStream;
-
 import com.fasterxml.jackson.core.util.DefaultPrettyPrinter;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.ObjectWriter;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.yugabyte.yw.common.FakeDBApplication;
 import com.yugabyte.yw.metrics.MetricGrafanaGen;
-
-import org.junit.Test;
-
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
 import lombok.extern.slf4j.Slf4j;
+import org.junit.Test;
 import play.Environment;
 import play.Mode;
 import play.libs.Json;
@@ -96,7 +93,7 @@ public class GrafanaGenTest extends FakeDBApplication {
     GrafanaGenTest metricGenTest = new GrafanaGenTest();
     String dashboardGenPath = args[0];
     try {
-      metricGenTest.startPlay();
+      metricGenTest.startServer();
       ObjectNode expectedDashboard = metricGenTest.getExpectedDashboard();
       ObjectNode currentDashboard = metricGenTest.getCurrentDashboard();
       boolean match = expectedDashboard.equals(currentDashboard);
@@ -108,7 +105,7 @@ public class GrafanaGenTest extends FakeDBApplication {
         MetricGrafanaGen.writeJSON(expectedDashboard, dashboardGenPath);
       }
     } finally {
-      metricGenTest.stopPlay();
+      metricGenTest.stopServer();
     }
   }
 }

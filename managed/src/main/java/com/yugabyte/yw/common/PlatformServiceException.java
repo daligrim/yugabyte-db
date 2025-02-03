@@ -16,54 +16,64 @@ import com.yugabyte.yw.forms.PlatformResults.YBPError;
 import com.yugabyte.yw.forms.PlatformResults.YBPStructuredError;
 import lombok.Getter;
 import play.libs.Json;
-import play.mvc.Http.Context;
+import play.mvc.Http.RequestHeader;
 import play.mvc.Result;
 import play.mvc.Results;
 
 public class PlatformServiceException extends RuntimeException {
   @Getter private final int httpStatus;
-  private final String userVisibleMessage;
+  @Getter private final String userVisibleMessage;
   private final JsonNode errJson;
+  private final JsonNode requestJson;
   private String method;
   private String uri;
 
   // TODO: also accept throwable and expose stack trace in when in dev server mode
-  PlatformServiceException(int httpStatus, String userVisibleMessage, JsonNode errJson) {
+  PlatformServiceException(
+      int httpStatus, String userVisibleMessage, JsonNode errJson, JsonNode requestJson) {
     super(userVisibleMessage);
-    Context c = Context.current.get();
-    if (c == null) {
-      // no request context. This can only happen in a unittest
-      method = "TEST";
-      uri = "/test";
-    } else {
-      method = c.request().method();
-      uri = c.request().uri();
-    }
     this.httpStatus = httpStatus;
     this.userVisibleMessage = userVisibleMessage;
     this.errJson = errJson;
+    this.requestJson = requestJson;
+  }
+
+  public PlatformServiceException(int httpStatus, String userVisibleMessage, JsonNode errJson) {
+    this(httpStatus, userVisibleMessage, errJson, null);
   }
 
   public PlatformServiceException(int httpStatus, String userVisibleMessage) {
-    this(httpStatus, userVisibleMessage, null);
+    this(httpStatus, userVisibleMessage, null, null);
   }
 
   public PlatformServiceException(int httpStatus, JsonNode errJson) {
-    this(httpStatus, "errorJson: " + errJson.toString(), errJson);
+    this(httpStatus, "errorJson: " + errJson.toString(), errJson, null);
   }
 
-  public Result buildResult() {
-    return buildResult(this.method, this.uri);
+  public PlatformServiceException(int httpStatus, JsonNode errJson, JsonNode requestJson) {
+    this(httpStatus, "errorJson: " + errJson.toString(), errJson, requestJson);
+  }
+
+  public Result buildResult(RequestHeader request) {
+    return buildResult(request.method(), request.uri());
+  }
+
+  public JsonNode getContentJson() {
+    return getContentJson(method, uri);
+  }
+
+  private JsonNode getContentJson(String method, String uri) {
+    Object ybpError;
+    if (errJson == null) {
+      ybpError = new YBPError(method, uri, userVisibleMessage, null, null);
+    } else {
+      ybpError = new YBPStructuredError(errJson, requestJson);
+    }
+    return Json.toJson(ybpError);
   }
 
   @VisibleForTesting() // for routeWithYWErrHandler
   Result buildResult(String method, String uri) {
-    if (errJson == null) {
-      YBPError ybpError = new YBPError(method, uri, userVisibleMessage, null);
-      return Results.status(httpStatus, Json.toJson(ybpError));
-    } else {
-      YBPStructuredError ybpError = new YBPStructuredError(errJson);
-      return Results.status(httpStatus, Json.toJson(ybpError));
-    }
+    return Results.status(httpStatus, getContentJson(method, uri));
   }
 }

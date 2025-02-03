@@ -37,7 +37,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include <glog/logging.h>
+#include "yb/util/logging.h"
 
 #include "yb/util/metrics.h"
 #include "yb/util/net/net_fwd.h"
@@ -46,10 +46,22 @@
 #include "yb/util/net/sockaddr.h"
 #include "yb/util/result.h"
 #include "yb/util/status_format.h"
+#include "yb/util/flags.h"
+#include "yb/util/shared_lock.h"
 
 using namespace std::literals;
 
-DEFINE_int64(dns_cache_expiration_ms, 60000, "Time to store DNS resolution results in cache.");
+DEFINE_RUNTIME_int64(dns_cache_expiration_ms, 60000,
+    "Time to store DNS resolution results in cache.");
+
+DEFINE_RUNTIME_int64(dns_cache_failure_expiration_ms, 2000,
+    "Time before DNS resolution retry in case of failure.");
+
+METRIC_DEFINE_event_stats(
+  server, dns_resolve_latency,
+  "DNS Resolve latency",
+  yb::MetricUnit::kMicroseconds,
+  "Microseconds spent resolving DNS requests");
 
 namespace yb {
 
@@ -89,14 +101,20 @@ Result<IpAddress> PickResolvedAddress(
 
 class DnsResolver::Impl {
  public:
-  explicit Impl(IoService* io_service) : io_service_(*io_service), resolver_(*io_service) {}
+  Impl(IoService* io_service, const scoped_refptr<MetricEntity>& metric_entity)
+      : io_service_(*io_service), resolver_(*io_service) {
+    if (metric_entity) {
+      metric_ = METRIC_dns_resolve_latency.Instantiate(metric_entity);
+    }
+  }
 
   std::shared_future<Result<IpAddress>> ResolveFuture(const std::string& host) {
-    return ObtainEntry(host)->DoResolve(host, /* callback= */ nullptr, &io_service_, &resolver_);
+    return ObtainEntry(host)->DoResolve(
+        host, /* callback= */ nullptr, &io_service_, &resolver_, metric_);
   }
 
   void AsyncResolve(const std::string& host, const AsyncResolveCallback& callback) {
-    ObtainEntry(host)->DoResolve(host, &callback, &io_service_, &resolver_);
+    ObtainEntry(host)->DoResolve(host, &callback, &io_service_, &resolver_, metric_);
   }
 
  private:
@@ -107,6 +125,7 @@ class DnsResolver::Impl {
     CoarseTimePoint expiration GUARDED_BY(mutex) = CoarseTimePoint::min();
     std::shared_future<Result<IpAddress>> future GUARDED_BY(mutex);
     std::vector<AsyncResolveCallback> waiters GUARDED_BY(mutex);
+    bool has_resolved_address GUARDED_BY(mutex) = false;
 
     void SetResult(
         const Result<IpAddress>& result,
@@ -119,8 +138,21 @@ class DnsResolver::Impl {
 
       decltype(waiters) to_notify;
       {
-        std::lock_guard<std::mutex> lock(mutex);
-        expiration = CoarseMonoClock::now() + FLAGS_dns_cache_expiration_ms * 1ms;
+        std::lock_guard lock(mutex);
+        uint64_t expiration_ms;
+        if (result.ok()) {
+          // If address was already resolved we did not fetch future from promise on resolution
+          // start so do it now to update existing resolved address.
+          if (has_resolved_address) {
+            future = promise->get_future().share();
+          } else {
+            has_resolved_address = true;
+          }
+          expiration_ms = FLAGS_dns_cache_expiration_ms;
+        } else {
+          expiration_ms = FLAGS_dns_cache_failure_expiration_ms;
+        }
+        expiration = CoarseMonoClock::now() + expiration_ms * 1ms;
         waiters.swap(to_notify);
       }
       for (const auto& waiter : to_notify) {
@@ -130,14 +162,14 @@ class DnsResolver::Impl {
 
     std::shared_future<Result<IpAddress>> DoResolve(
         const std::string& host, const AsyncResolveCallback* callback, IoService* io_service,
-        Resolver* resolver) {
+        Resolver* resolver, const scoped_refptr<EventStats>& metric) {
       std::shared_ptr<std::promise<Result<IpAddress>>> promise;
       std::shared_future<Result<IpAddress>> result;
       {
-        std::lock_guard<std::mutex> lock(mutex);
+        std::lock_guard lock(mutex);
         promise = StartResolve(host);
         result = future;
-        if (callback && expiration == CoarseTimePoint::max()) {
+        if (callback && expiration == CoarseTimePoint::max() && !has_resolved_address) {
           // Resolve is in progress by a different caller.
           waiters.push_back(*callback);
           callback = nullptr;
@@ -152,11 +184,20 @@ class DnsResolver::Impl {
         static const std::string kService = "";
         resolver->async_resolve(
             Resolver::query(host, kService),
-            [this, host, promise](
+            [this, host, promise, metric, start_time = CoarseMonoClock::Now()](
                 const boost::system::error_code& error,
                 const Resolver::results_type& entries) mutable {
           // Unfortunately there is no safe way to set promise value from 2 different threads, w/o
           // catching exception in case of concurrency.
+          const auto now = CoarseMonoClock::Now();
+          if (metric) {
+            metric->Increment(ToMicroseconds(now - start_time));
+          }
+          if (start_time + 250ms < now) {
+            YB_LOG_EVERY_N_SECS(WARNING, 5)
+                << "Long time to resolse DNS for " << host << ": " << MonoDelta(now - start_time)
+                << THROTTLE_MSG;
+          }
           SetResult(PickResolvedAddress(host, error, entries), promise.get());
         });
 
@@ -175,7 +216,9 @@ class DnsResolver::Impl {
       }
 
       auto promise = std::make_shared<std::promise<Result<IpAddress>>>();
-      future = promise->get_future().share();
+      if (!has_resolved_address) {
+        future = promise->get_future().share();
+      }
 
       auto address = TryFastResolve(host);
       if (address) {
@@ -192,24 +235,26 @@ class DnsResolver::Impl {
 
   CacheEntry* ObtainEntry(const std::string& host) {
     {
-      std::shared_lock<decltype(mutex_)> lock(mutex_);
+      SharedLock lock(mutex_);
       auto it = cache_.find(host);
       if (it != cache_.end()) {
         return &it->second;
       }
     }
 
-    std::lock_guard<decltype(mutex_)> lock(mutex_);
+    std::lock_guard lock(mutex_);
     return &cache_[host];
   }
 
   IoService& io_service_;
   Resolver resolver_;
+  scoped_refptr<EventStats> metric_;
   std::shared_timed_mutex mutex_;
   std::unordered_map<std::string, CacheEntry> cache_;
 };
 
-DnsResolver::DnsResolver(IoService* io_service) : impl_(new Impl(io_service)) {
+DnsResolver::DnsResolver(IoService* io_service, const scoped_refptr<MetricEntity>& metric_entity)
+    : impl_(new Impl(io_service, metric_entity)) {
 }
 
 DnsResolver::~DnsResolver() {
@@ -217,11 +262,11 @@ DnsResolver::~DnsResolver() {
 
 namespace {
 
-thread_local Histogram* active_metric_ = nullptr;
+thread_local EventStats* active_metric_ = nullptr;
 
 } // anonymous namespace
 
-ScopedDnsTracker::ScopedDnsTracker(const scoped_refptr<Histogram>& metric)
+ScopedDnsTracker::ScopedDnsTracker(const scoped_refptr<EventStats>& metric)
     : old_metric_(active_metric()), metric_(metric) {
   active_metric_ = metric.get();
 }
@@ -231,7 +276,7 @@ ScopedDnsTracker::~ScopedDnsTracker() {
   active_metric_ = old_metric_;
 }
 
-Histogram* ScopedDnsTracker::active_metric() {
+EventStats* ScopedDnsTracker::active_metric() {
   return active_metric_;
 }
 

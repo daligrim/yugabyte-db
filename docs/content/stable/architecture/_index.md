@@ -3,8 +3,7 @@ title: Architecture
 headerTitle: Architecture
 linkTitle: Architecture
 description: Learn about the YugabyteDB architecture, including query, transactions, sharding, replication, and storage layers.
-image: /images/section_icons/index/architecture.png
-headcontent: YugabyteDB architecture including the query, transactions, sharding, replication, and storage layers.
+headcontent: Internals of query, transactions, sharding, replication, and storage layers
 menu:
   stable:
     identifier: architecture
@@ -13,120 +12,72 @@ menu:
 type: indexpage
 ---
 
-<div class="row">
-  <div class="col-12 col-md-6 col-lg-12 col-xl-6">
-    <a class="section-link icon-offset" href="design-goals/">
-      <div class="head">
-        <img class="icon" src="/images/section_icons/introduction/core_features.png" aria-hidden="true" />
-        <div class="title">Design Goals</div>
-      </div>git
-      <div class="body">
-          The design goals around which YugabyteDB is built.
-      </div>
-    </a>
-  </div>
+YugabyteDB is a distributed database that seamlessly combines the principles of distributed systems, where multiple machines collaborate, with the familiar concepts of traditional databases, where data is organized in tables with standard interfaces for reading and writing data.
 
-  <div class="col-12 col-md-6 col-lg-12 col-xl-6">
-    <a class="section-link icon-offset" href="concepts/">
-      <div class="head">
-        <img class="icon" src="/images/section_icons/architecture/concepts.png" aria-hidden="true" />
-        <div class="articles">3 articles</div>
-        <div class="title">Key concepts</div>
-      </div>
-      <div class="body">
-        Key concepts you need to know to understand the YugabyteDB architecture and the components and processes that make up a YugabyteDB cluster.
-      </div>
-    </a>
-  </div>
+Unlike traditional centralized databases, YugabyteDB is designed to manage and process data across multiple nodes or servers, ensuring resiliency, consistency, high availability, scalability, fault tolerance, and other [design goals](design-goals/).
 
-  <div class="col-12 col-md-6 col-lg-12 col-xl-6">
-    <a class="section-link icon-offset" href="core-functions/">
-      <div class="head">
-        <img class="icon" src="/images/section_icons/architecture/core_functions.png" aria-hidden="true" />
-        <div class="articles">5 articles</div>
-        <div class="title">Core functions</div>
-      </div>
-      <div class="body">
-        Understand universe creation, table creation, write IO path, read IO path, and high availability.
-      </div>
-    </a>
-  </div>
+{{<lead link="./concepts">}}
+Check out YugabyteDB [key concepts](./key-concepts) for your quick reference.
+{{</lead>}}
 
-  <div class="col-12 col-md-6 col-lg-12 col-xl-6">
-    <a class="section-link icon-offset" href="layered-architecture/">
-      <div class="head">
-        <img class="icon" src="/images/section_icons/architecture/concepts.png" aria-hidden="true" />
-        <div class="title">Layered architecture</div>
-      </div>
-      <div class="body">
-          A high level overview of the YugabyteDB architecture.
-      </div>
-    </a>
-  </div>
+## Layered architecture
 
-  <div class="col-12 col-md-6 col-lg-12 col-xl-6">
-    <a class="section-link icon-offset" href="query-layer/">
-      <div class="head">
-        <img class="icon" src="/images/section_icons/index/api.png" aria-hidden="true" />
-        <div class="articles">1 article</div>
-        <div class="title">Query layer</div>
-      </div>
-      <div class="body">
-          Learn about the Yugabyte Query Layer (YQL).
-      </div>
-    </a>
-  </div>
+In general, operations in YugabyteDB are split logically into 2 layers, the query layer and the storage layer. The query layer is responsible for handling user requests and sending the requests to the right data. The storage layer is responsible for optimally storing the data on disk and managing replication and consistency.
 
-  <div class="col-12 col-md-6 col-lg-12 col-xl-6">
-    <a class="section-link icon-offset" href="transactions/">
-      <div class="head">
-        <img class="icon" src="/images/section_icons/architecture/distributed_acid.png" aria-hidden="true" />
-        <div class="articles">6 articles</div>
-        <div class="title">DocDB transactions layer</div>
-      </div>
-      <div class="body">
-        Review transaction model and how transactional consistency is ensured at various isolation levels.
-      </div>
-    </a>
-  </div>
+![YugabyteDB Layered Architecture](/images/architecture/layered-architecture.png)
 
-  <div class="col-12 col-md-6 col-lg-12 col-xl-6">
-    <a class="section-link icon-offset" href="docdb-sharding/">
-      <div class="head">
-        <img class="icon" src="/images/section_icons/architecture/distributed_acid.png" aria-hidden="true" />
-        <div class="articles">3 articles</div>
-        <div class="title">DocDB sharding layer</div>
-      </div>
-      <div class="body">
-        How sharding works in DocDB.
-      </div>
-    </a>
-  </div>
+## Query layer
 
-  <div class="col-12 col-md-6 col-lg-12 col-xl-6">
-    <a class="section-link icon-offset" href="docdb-replication/">
-      <div class="head">
-        <img class="icon" src="/images/section_icons/architecture/distributed_acid.png" aria-hidden="true" />
-        <div class="articles">3 articles</div>
-        <div class="title">DocDB replication layer</div>
-      </div>
-      <div class="body">
-        How replication works in DocDB.
-      </div>
-    </a>
-  </div>
+For operating (CRUD) on the data that is split and stored across multiple machines, YugabyteDB provides two APIs, YSQL and YCQL. The query layer takes the user query submitted via the API and sends or fetches data to and from the right set of tablets.
 
-  <div class="col-12 col-md-6 col-lg-12 col-xl-6">
-    <a class="section-link icon-offset" href="docdb/">
-      <div class="head">
-        <img class="icon" src="/images/section_icons/architecture/distributed_acid.png" aria-hidden="true" />
-        <div class="articles">3 articles</div>
-        <div class="title">DocDB storage layer</div>
-      </div>
-      <div class="body">
-          How persistence storage works in DocDB.
-      </div>
-    </a>
-  </div>
+{{<lead link="query-layer/">}}
+To understand how the query layer is designed, see [Query layer](query-layer/).
+{{</lead>}}
 
-</div>
+## Storage layer
+
+The tablet data is optimally stored and managed by DocDB, a document store that has been built on top of RocksDB for higher performance and persistence.
+
+{{<lead link="docdb/">}}
+To understand how data storage works in YugabyteDB, see [DocDB](docdb/).
+{{</lead>}}
+
+## Sharding
+
+YugabyteDB splits table data into smaller pieces called tablets so that the data can be stored in parts across multiple machines. The mapping of a row to a tablet is deterministic and this process is known as sharding.
+
+{{<lead link="docdb-sharding/">}}
+To learn more about the various sharding schemes, see [Sharding](docdb-sharding/).
+{{</lead>}}
+
+## Replication
+
+Tablets are replicated for resiliency, high availability, and fault tolerance. Each tablet has a leader that is responsible for consistent reads and writes to the data of the tablet and a few followers. The replication is done using the Raft protocol to ensure consistency of data across the leader and followers.
+
+{{<lead link="docdb-replication/">}}
+To understand how replication works, see [Replication](docdb-replication/).
+{{</lead>}}
+
+## Transactions
+
+Transactions are a set of operations (CRUD) that are executed atomically with the option to roll back all actions if any operation fails.
+
+{{<lead link="transactions/">}}
+To understand how transactions work in YugabyteDB, see [Transactions](transactions/).
+{{</lead>}}
+
+## Master server
+
+The master service acts a catalog manager and cluster orchestrator, and manages many background tasks.
+
+{{<lead link="./yb-master">}}
+For more details, see [YB-Master](./yb-master).
+{{</lead>}}
+
+## TServer
+
+YugabyteDB splits table data into tablets. These tablets are maintained and managed on each node by the TServer.
+
+{{<lead link="./yb-tserver">}}
+For more details, see [YB-TServer](./yb-tserver).
+{{</lead>}}

@@ -25,6 +25,8 @@
 #include "yb/util/status_format.h"
 #include "yb/util/status_log.h"
 
+using std::string;
+
 namespace yb {
 
 Env::~Env() {
@@ -322,6 +324,10 @@ Status EnvWrapper::LinkFile(const std::string& s, const std::string& t) {
   return target_->LinkFile(s, t);
 }
 
+Status EnvWrapper::SymlinkPath(const std::string& pointed_to, const std::string& new_symlink) {
+  return target_->SymlinkPath(pointed_to, new_symlink);
+}
+
 Result<std::string> EnvWrapper::ReadLink(const std::string& s) {
   return target_->ReadLink(s);
 }
@@ -348,6 +354,10 @@ Status EnvWrapper::GetExecutablePath(std::string* path) {
 
 Status EnvWrapper::IsDirectory(const std::string& path, bool* is_dir) {
   return target_->IsDirectory(path, is_dir);
+}
+
+Result<bool> EnvWrapper::IsSymlink(const std::string& path) {
+  return target_->IsSymlink(path);
 }
 
 Result<bool> EnvWrapper::IsExecutableFile(const std::string& path) {

@@ -9,6 +9,8 @@ SUBDIRS = \
 		amcheck		\
 		auth_delay	\
 		auto_explain	\
+		basic_archive	\
+		basebackup_to_shell	\
 		bloom		\
 		btree_gin	\
 		btree_gist	\
@@ -27,21 +29,19 @@ SUBDIRS = \
 		lo		\
 		ltree		\
 		oid2name	\
+		old_snapshot	\
 		pageinspect	\
 		passwordcheck	\
 		pg_buffercache	\
-		pg_cron  \
 		pg_freespacemap \
 		pg_prewarm	\
-		pg_standby	\
-		pg_stat_statements	\
-		pgaudit 	\
-		pg_stat_monitor  \
+		pg_stat_statements \
+		pg_surgery	\
 		pg_trgm		\
-		pgcrypto	\
 		pgrowlocks	\
 		pgstattuple	\
 		pg_visibility	\
+		pg_walinspect	\
 		postgres_fdw	\
 		seg		\
 		spi		\
@@ -51,14 +51,12 @@ SUBDIRS = \
 		tsm_system_rows \
 		tsm_system_time \
 		unaccent	\
-		vacuumlo    \
-		yb_pg_metrics \
-		yb_test_extension
+		vacuumlo
 
-ifeq ($(with_openssl),yes)
-SUBDIRS += sslinfo
+ifeq ($(with_ssl),openssl)
+SUBDIRS += pgcrypto sslinfo
 else
-ALWAYS_SUBDIRS += sslinfo
+ALWAYS_SUBDIRS += pgcrypto sslinfo
 endif
 
 ifneq ($(with_uuid),no)
@@ -80,9 +78,9 @@ ALWAYS_SUBDIRS += sepgsql
 endif
 
 ifeq ($(with_perl),yes)
-SUBDIRS += hstore_plperl jsonb_plperl
+SUBDIRS += bool_plperl hstore_plperl jsonb_plperl
 else
-ALWAYS_SUBDIRS += hstore_plperl jsonb_plperl
+ALWAYS_SUBDIRS += bool_plperl hstore_plperl jsonb_plperl
 endif
 
 ifeq ($(with_python),yes)

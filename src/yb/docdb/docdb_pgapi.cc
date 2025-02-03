@@ -14,43 +14,37 @@
 
 #include "yb/docdb/docdb_pgapi.h"
 
-#include "yb/common/ql_expr.h"
+#include "yb/common/pg_types.h"
 #include "yb/common/schema.h"
 
+#include "yb/dockv/pg_row.h"
+#include "yb/dockv/reader_projection.h"
+
 #include "yb/gutil/singleton.h"
-#include "yb/yql/pggate/ybc_pg_typedefs.h"
-#include "yb/yql/pggate/pg_value.h"
+
+#include "yb/qlexpr/ql_expr.h"
+
+#include "yb/util/logging.h"
+#include "yb/util/result.h"
+
 #include "yb/yql/pggate/pg_expr.h"
+#include "yb/yql/pggate/pg_value.h"
+#include "yb/yql/pggate/pg_type.h"
+#include "yb/yql/pggate/ybc_pg_typedefs.h"
 #include "yb/yql/pggate/ybc_pggate.h"
 
+#include "ybgate/ybgate_cpp_util.h"
+#include "ybgate/ybgate_status.h"
 
-#include "yb/util/result.h"
-#include "yb/util/logging.h"
+#include "catalog/pg_type_d.h"
 
-// This file comes from this directory:
-// postgres_build/src/include/catalog
-// added as a special include path to CMakeLists.txt
-#include "pg_type_d.h" // NOLINT
+using std::string;
 
-using yb::pggate::PgValueFromPB;
-using yb::pggate::PgValueToPB;
+DECLARE_bool(cdc_disable_sending_composite_values);
 
-namespace yb {
-namespace docdb {
+namespace yb::docdb {
 
-#define PG_RETURN_NOT_OK(status) \
-  do { \
-    if (status.err_code != 0) { \
-      std::string msg; \
-      if (status.err_msg != nullptr) { \
-        msg = std::string(status.err_msg); \
-      } else { \
-        msg = std::string("Unexpected error while evaluating expression"); \
-      } \
-      YbgResetMemoryContext(); \
-      return STATUS(QLError, msg); \
-    } \
-  } while(0);
+using pggate::PgValueToDatum;
 
 #define SET_ELEM_LEN_BYVAL_ALIGN(elemlen, elembyval, elemalign) \
   do { \
@@ -78,36 +72,35 @@ namespace docdb {
     range_elmalign = range_elemalign; \
   } while (0);
 
+Status DocPgInit() {
+  PG_RETURN_NOT_OK(YbgInit());
+  return Status::OK();
+}
+
 //-----------------------------------------------------------------------------
 // Types
+//
+// YBTODO(skumar@yugabyte.com) This work on TYPE need works.
+// - Postgres has added some new type macros and removed others. I removed the
+//   obsolete types, but new ones need to be introduced here.
+// - Access to Postgres macros such as TEXTOID should be coded in src/postgres
+//   layer. Docdb would then make callback to Postgres. That's how we've done
+//   in our code. Why does this module work directly with Postgres macros?
+// I noted that nobody in SQL frontend team reviewed this work in the past.
+// In the future, please discuss with them when calling or using Posgres API.
 //-----------------------------------------------------------------------------
 
-class DocPgTypeAnalyzer {
- public:
-  const YBCPgTypeEntity* GetTypeEntity(int32_t type_oid) {
-    const auto iter = type_map_.find(type_oid);
-    if (iter != type_map_.end()) {
-      return iter->second;
-    }
-    LOG(INFO) << "Could not find type entity for oid " << type_oid;
-    return nullptr;
-  }
+pggate::PgTypeInfo MakePgTypeInfo() {
+    YbcPgTypeEntities table_types = {};
+    YbgGetTypeTable(&table_types);
+    return pggate::PgTypeInfo{table_types};
+}
+
+struct DocPgTypeAnalyzer {
+  const pggate::PgTypeInfo pg_types = MakePgTypeInfo();
 
  private:
-  DocPgTypeAnalyzer() {
-    // Setup type mapping.
-    const YBCPgTypeEntity *type_table;
-    int count;
-
-    YbgGetTypeTable(&type_table, &count);
-    for (int idx = 0; idx < count; idx++) {
-        const YBCPgTypeEntity *type_entity = &type_table[idx];
-        type_map_[type_entity->type_oid] = type_entity;
-    }
-  }
-
-  // Mapping table of YugaByte and PostgreSQL datatypes.
-  std::unordered_map<int, const YBCPgTypeEntity *> type_map_;
+  DocPgTypeAnalyzer() = default;
 
   friend class Singleton<DocPgTypeAnalyzer>;
   DISALLOW_COPY_AND_ASSIGN(DocPgTypeAnalyzer);
@@ -117,11 +110,13 @@ class DocPgTypeAnalyzer {
 // Expressions/Values
 //-----------------------------------------------------------------------------
 
-const YBCPgTypeEntity* DocPgGetTypeEntity(YbgTypeDesc pg_type) {
-    return Singleton<DocPgTypeAnalyzer>::get()->GetTypeEntity(pg_type.type_id);
+const YbcPgTypeEntity* DocPgGetTypeEntity(YbgTypeDesc pg_type) {
+  const auto* type = Singleton<DocPgTypeAnalyzer>::get()->pg_types.Find(pg_type.type_id);
+  LOG_IF(INFO, !type) << "Could not find type entity for oid " << pg_type.type_id;
+  return type;
 }
 
-Status DocPgAddVarRef(const ColumnId& column_id,
+Status DocPgAddVarRef(size_t column_idx,
                       int32_t attno,
                       int32_t typid,
                       int32_t typmod,
@@ -131,10 +126,13 @@ Status DocPgAddVarRef(const ColumnId& column_id,
     VLOG(1) << "Attribute " << attno << " is already processed";
     return Status::OK();
   }
-  const YBCPgTypeEntity *arg_type = DocPgGetTypeEntity({typid, typmod});
   var_map->emplace(std::piecewise_construct,
-                   std::forward_as_tuple(attno),
-                   std::forward_as_tuple(column_id.rep(), arg_type, typmod));
+                   std::tuple(attno),
+                   std::tuple(DocPgVarRef {
+                     .var_col_idx = column_idx,
+                     .var_type = DocPgGetTypeEntity({typid, typmod}),
+                     .var_type_attrs = {typmod},
+                   }));
   VLOG(1) << "Attribute " << attno << " has been processed";
   return Status::OK();
 }
@@ -150,9 +148,11 @@ Status DocPgPrepareExpr(const std::string& expr_str,
     int32_t typmod;
     PG_RETURN_NOT_OK(YbgExprType(*expr, &typid));
     PG_RETURN_NOT_OK(YbgExprTypmod(*expr, &typmod));
-    YbgTypeDesc pg_arg_type = {typid, typmod};
-    const YBCPgTypeEntity *arg_type = DocPgGetTypeEntity(pg_arg_type);
-    *ret_type = DocPgVarRef(0, arg_type, typmod);
+    *ret_type = DocPgVarRef {
+      .var_col_idx = dockv::ReaderProjection::kNotFoundIndex,
+      .var_type = DocPgGetTypeEntity({typid, typmod}),
+      .var_type_attrs = {typmod},
+    };
     VLOG(1) << "Processed expression return type";
   }
   return Status::OK();
@@ -172,43 +172,67 @@ Status DocPgCreateExprCtx(const std::map<int, const DocPgVarRef>& var_map,
   return Status::OK();
 }
 
-Status DocPgPrepareExprCtx(const QLTableRow& table_row,
+// Wrapper for PgValueToDatum to safely call from the YbGate.
+// The PgValueToDatum function was initially designed to be used in the PgGate where it converts
+// values coming from DocDB into Postgres format. The PgGate runs within Postgres where exception
+// handling is available. YbGate runs within DocDB, so it requires PG_SETUP_ERROR_REPORTING macro.
+// The PG_SETUP_ERROR_REPORTING requires the surrounding function to return YbgStatus,
+// hence the wrapper.
+YbgStatus PgValueToDatumHelper(const YbcPgTypeEntity *type_entity,
+                               YbcPgTypeAttrs type_attrs,
+                               const dockv::PgValue& value,
+                               uint64_t* datum) {
+  PG_SETUP_ERROR_REPORTING();
+  Status s = PgValueToDatum(type_entity, type_attrs, value, datum);
+  if (!s.ok()) {
+    return YbgStatusCreateError(s.message().cdata(), __FILE__, __LINE__);
+  }
+  PG_STATUS_OK();
+}
+
+Status DocPgPrepareExprCtx(const dockv::PgTableRow& table_row,
                            const std::map<int, const DocPgVarRef>& var_map,
                            YbgExprContext expr_ctx) {
   PG_RETURN_NOT_OK(YbgExprContextReset(expr_ctx));
   // Set the column values (used to resolve scan variables in the expression).
-  for (auto it = var_map.begin(); it != var_map.end(); it++) {
-    const int& attno = it->first;
-    const DocPgVarRef& arg_ref = it->second;
-    const QLValuePB* val = table_row.GetColumn(arg_ref.var_colid);
-    bool is_null = false;
+  for (const auto& [attno, arg_ref] : var_map) {
+    auto val = table_row.GetValueByIndex(arg_ref.var_col_idx);
     uint64_t datum = 0;
-    RETURN_NOT_OK(PgValueFromPB(arg_ref.var_type, arg_ref.var_type_attrs, *val, &datum, &is_null));
+    const bool is_null = !val;
+    if (!is_null) {
+      PG_RETURN_NOT_OK(PgValueToDatumHelper(
+          arg_ref.var_type, arg_ref.var_type_attrs, *val, &datum));
+    }
     VLOG(1) << "Adding value for attno " << attno;
     PG_RETURN_NOT_OK(YbgExprContextAddColValue(expr_ctx, attno, datum, is_null));
   }
   return Status::OK();
 }
 
-Status DocPgEvalExpr(YbgPreparedExpr expr,
-                     YbgExprContext expr_ctx,
-                     uint64_t *datum,
-                     bool *is_null) {
-  // Evaluate the expression and get the result.
-  PG_RETURN_NOT_OK(YbgEvalExpr(expr, expr_ctx, datum, is_null));
-  return Status::OK();
+Result<std::pair<uint64_t, bool>> DocPgEvalExpr(YbgPreparedExpr expr, YbgExprContext expr_ctx) {
+  uint64_t datum = {};
+  bool is_null = false;
+  PG_RETURN_NOT_OK(YbgEvalExpr(expr, expr_ctx, &datum, &is_null));
+  return std::make_pair(datum, is_null);
 }
 
 Status SetValueFromQLBinary(
     const QLValuePB ql_value, const int pg_data_type,
     const std::unordered_map<uint32_t, string> &enum_oid_label_map,
+    const std::unordered_map<uint32_t, std::vector<master::PgAttributePB>> &composite_atts_map,
     DatumMessagePB *cdc_datum_message) {
   PG_RETURN_NOT_OK(YbgPrepareMemoryContext());
 
-  RETURN_NOT_OK(
-      SetValueFromQLBinaryHelper(ql_value, pg_data_type, enum_oid_label_map, cdc_datum_message));
+  RETURN_NOT_OK(SetValueFromQLBinaryHelper(
+      ql_value, pg_data_type, enum_oid_label_map, composite_atts_map, cdc_datum_message));
   PG_RETURN_NOT_OK(YbgResetMemoryContext());
   return Status::OK();
+}
+
+void DeleteMemoryContextIfSet() {
+  if (YBCPgGetThreadLocalCurrentMemoryContext() != nullptr) {
+    YbgDeleteMemoryContext();
+  }
 }
 
 namespace {
@@ -224,17 +248,17 @@ Result<std::vector<std::string>> ExtractVectorFromQLBinaryValueHelper(
   char *val = const_cast<char *>(ql_value.binary_value().c_str());
 
   YbgTypeDesc pg_arg_type {array_type, -1 /* typmod */};
-  const YBCPgTypeEntity *arg_type = DocPgGetTypeEntity(pg_arg_type);
-  YBCPgTypeAttrs type_attrs {-1 /* typmod */};
+  const YbcPgTypeEntity *arg_type = DocPgGetTypeEntity(pg_arg_type);
+  YbcPgTypeAttrs type_attrs {-1 /* typmod */};
   uint64_t datum = arg_type->yb_to_datum(reinterpret_cast<uint8_t *>(val), size, &type_attrs);
 
   uint64_t *datum_elements;
   int num_elems = 0;
   PG_RETURN_NOT_OK(YbgSplitArrayDatum(datum, elem_type, &datum_elements, &num_elems));
   YbgTypeDesc elem_pg_arg_type {elem_type, -1 /* typmod */};
-  const YBCPgTypeEntity *elem_arg_type = DocPgGetTypeEntity(elem_pg_arg_type);
+  const YbcPgTypeEntity *elem_arg_type = DocPgGetTypeEntity(elem_pg_arg_type);
   VLOG(4) << "Number of parsed elements: " << num_elems;
-  Arena arena;
+  ThreadSafeArena arena;
   std::vector<std::string> result;
   for (int i = 0; i < num_elems; ++i) {
     pggate::PgConstant value(&arena,
@@ -249,7 +273,9 @@ Result<std::vector<std::string>> ExtractVectorFromQLBinaryValueHelper(
   return result;
 }
 
-} // namespace
+const char *tz = "GMT";
+
+}  // namespace
 
 Result<std::vector<std::string>> ExtractTextArrayFromQLBinaryValue(const QLValuePB& ql_value) {
   PG_RETURN_NOT_OK(YbgPrepareMemoryContext());
@@ -259,11 +285,11 @@ Result<std::vector<std::string>> ExtractTextArrayFromQLBinaryValue(const QLValue
   return result;
 }
 
-void set_decoded_string_value(
+void set_string_value(
     uint64_t datum,
-    const char* func_name,
-    DatumMessagePB* cdc_datum_message = nullptr,
-    const char* timezone = nullptr) {
+    const char *func_name,
+    DatumMessagePB *cdc_datum_message,
+    const char *timezone = nullptr) {
   char *decoded_str = nullptr;
 
   if (func_name == nullptr) {
@@ -278,21 +304,10 @@ void set_decoded_string_value(
   cdc_datum_message->set_datum_string(decoded_str, strlen(decoded_str));
 }
 
-void set_decoded_string_range(
-    const QLValuePB ql_value,
-    const YBCPgTypeEntity* arg_type,
-    const int elem_type,
-    const char* func_name,
-    DatumMessagePB* cdc_datum_message = nullptr,
-    const char* timezone = nullptr) {
-  YBCPgTypeAttrs type_attrs{-1 /* typmod */};
-
-  char* decoded_str = nullptr;
-  string range_val = ql_value.binary_value();
-  uint64_t size = range_val.size();
-  char* val = const_cast<char *>(range_val.c_str());
-  uint64_t datum = arg_type->yb_to_datum(reinterpret_cast<uint8 *>(val), size, &type_attrs);
-
+char *get_range_string_value(
+    uint64_t datum, const int elem_type, const char *func_name, const char *timezone,
+    const int type) {
+  char *decoded_str = nullptr;
   int16 elmlen;
   bool elmbyval;
   char elmalign;
@@ -328,27 +343,15 @@ void set_decoded_string_range(
 
   if (func_name != nullptr) {
     decoded_str = DecodeRangeDatum(
-        "range_out", (uintptr_t)datum, elmlen, elmbyval, elmalign, option, from_YB, func_name,
-        arg_type->type_oid, timezone);
-
-    cdc_datum_message->set_datum_string(decoded_str, strlen(decoded_str));
+        "range_out", (uintptr_t)datum, elmlen, elmbyval, elmalign, option, from_YB, func_name, type,
+        timezone);
   }
+  return decoded_str;
 }
 
-void set_decoded_string_array(const QLValuePB ql_value,
-                              const YBCPgTypeEntity* arg_type,
-                              const int elem_type,
-                              const char* func_name,
-                              DatumMessagePB* cdc_datum_message = nullptr,
-                              const char* timezone = nullptr) {
-  YBCPgTypeAttrs type_attrs{-1 /* typmod */};
-
-  char* decoded_str = nullptr;
-  string vector_val = ql_value.binary_value();
-  uint64_t size = vector_val.size();
-  char* val = const_cast<char *>(vector_val.c_str());
-  uint64_t datum = arg_type->yb_to_datum(reinterpret_cast<uint8 *>(val), size, &type_attrs);
-
+char *get_array_string_value(
+    uint64_t datum, const int elem_type, const char *func_name, const char *timezone) {
+  char *decoded_str = nullptr;
   int16 elmlen;
   bool elmbyval;
   char elmalign;
@@ -369,8 +372,6 @@ void set_decoded_string_array(const QLValuePB ql_value,
     case BPCHAROID:
     case VARCHAROID:
     case PATHOID:
-    case RELTIMEOID:
-    case TINTERVALOID:
     case ACLITEMOID:
     case INETOID:
     case NUMERICOID:
@@ -421,7 +422,6 @@ void set_decoded_string_array(const QLValuePB ql_value,
       break;
 
     case INT4OID:
-    case ABSTIMEOID:
     case DATEOID:
     case ANYOID:
       SET_ELEM_LEN_BYVAL_ALIGN(sizeof(int32), true, 'i');
@@ -501,25 +501,13 @@ void set_decoded_string_array(const QLValuePB ql_value,
     decoded_str = DecodeArrayDatum(
         "array_out", (uintptr_t)datum, elmlen, elmbyval, elmalign, elmdelim, from_YB, func_name,
         timezone, option);
-
-    cdc_datum_message->set_datum_string(decoded_str, strlen(decoded_str));
   }
+  return decoded_str;
 }
 
-void set_decoded_string_range_array(
-    const QLValuePB ql_value,
-    const YBCPgTypeEntity *arg_type,
-    const int elem_type,
-    const char *func_name,
-    DatumMessagePB *cdc_datum_message = nullptr,
-    const char *timezone = nullptr) {
-  YBCPgTypeAttrs type_attrs{-1 /* typmod */};
-
-  char* decoded_str = nullptr;
-  string arr_val = ql_value.binary_value();
-  uint64_t size = arr_val.size();
-  char* val = const_cast<char *>(arr_val.c_str());
-  uint64_t datum = arg_type->yb_to_datum(reinterpret_cast<uint8 *>(val), size, &type_attrs);
+char *get_range_array_string_value(
+    uint64_t datum, const int elem_type, const char *func_name, const char *timezone) {
+  char *decoded_str = nullptr;
 
   int16 elmlen, range_elmlen;
   bool elmbyval, range_elmbyval;
@@ -559,40 +547,332 @@ void set_decoded_string_range_array(
         "array_out", (uintptr_t)datum, elmlen, range_elmlen, elmbyval, range_elmbyval, elmalign,
         range_elmalign, elmdelim, option, range_option, from_YB, "range_out", func_name, elem_type,
         timezone);
-
-    cdc_datum_message->set_datum_string(decoded_str, strlen(decoded_str));
   }
-}
-
-void set_string_value(uint64_t datum, char const *func_name, DatumMessagePB *cdc_datum_message) {
-  set_decoded_string_value(datum, func_name, cdc_datum_message);
+  return decoded_str;
 }
 
 void set_range_string_value(
     const QLValuePB ql_value,
-    const YBCPgTypeEntity* arg_type,
+    const YbcPgTypeEntity *arg_type,
     const int type_oid,
-    char const* func_name,
-    DatumMessagePB* cdc_datum_message) {
-  set_decoded_string_range(ql_value, arg_type, type_oid, func_name, cdc_datum_message);
+    char const *func_name,
+    DatumMessagePB *cdc_datum_message,
+    const char *timezone = nullptr) {
+  YbcPgTypeAttrs type_attrs{-1 /* typmod */};
+  string range_val = ql_value.binary_value();
+  uint64_t size = range_val.size();
+  char *val = const_cast<char *>(range_val.c_str());
+  uint64_t datum = arg_type->yb_to_datum(reinterpret_cast<uint8 *>(val), size, &type_attrs);
+
+  char *decoded_str =
+      get_range_string_value(datum, type_oid, func_name, timezone, arg_type->type_oid);
+  cdc_datum_message->set_datum_string(decoded_str, strlen(decoded_str));
 }
 
 void set_array_string_value(
     const QLValuePB ql_value,
-    const YBCPgTypeEntity* arg_type,
+    const YbcPgTypeEntity *arg_type,
     const int type_oid,
-    char const* func_name,
-    DatumMessagePB* cdc_datum_message) {
-  set_decoded_string_array(ql_value, arg_type, type_oid, func_name, cdc_datum_message);
+    char const *func_name,
+    DatumMessagePB *cdc_datum_message,
+    const char *timezone = nullptr) {
+  YbcPgTypeAttrs type_attrs{-1 /* typmod */};
+  string vector_val = ql_value.binary_value();
+  uint64_t size = vector_val.size();
+  char *val = const_cast<char *>(vector_val.c_str());
+  uint64_t datum = arg_type->yb_to_datum(reinterpret_cast<uint8 *>(val), size, &type_attrs);
+  char *decoded_str = get_array_string_value(datum, type_oid, func_name, timezone);
+  cdc_datum_message->set_datum_string(decoded_str, strlen(decoded_str));
 }
 
 void set_range_array_string_value(
     const QLValuePB ql_value,
-    const YBCPgTypeEntity* arg_type,
+    const YbcPgTypeEntity *arg_type,
     const int type_oid,
-    char const* func_name,
-    DatumMessagePB* cdc_datum_message) {
-  set_decoded_string_range_array(ql_value, arg_type, type_oid, func_name, cdc_datum_message);
+    char const *func_name,
+    DatumMessagePB *cdc_datum_message,
+    const char *timezone = nullptr) {
+  YbcPgTypeAttrs type_attrs{-1 /* typmod */};
+  string arr_val = ql_value.binary_value();
+  uint64_t size = arr_val.size();
+  char *val = const_cast<char *>(arr_val.c_str());
+  uint64_t datum = arg_type->yb_to_datum(reinterpret_cast<uint8 *>(val), size, &type_attrs);
+  char *decoded_str = get_range_array_string_value(datum, type_oid, func_name, timezone);
+  cdc_datum_message->set_datum_string(decoded_str, strlen(decoded_str));
+}
+
+uint32_t get_array_element_type(uint32_t pg_data_type) {
+  switch (pg_data_type) {
+    case RECORDARRAYOID:
+      return RECORDOID;
+    case ANYARRAYOID:
+      return ANYOID;
+    case BOOLARRAYOID:
+      return BOOLOID;
+    case BYTEAARRAYOID:
+      return BYTEAOID;
+    case CHARARRAYOID:
+      return CHAROID;
+    case NAMEARRAYOID:
+      return NAMEOID;
+    case INT8ARRAYOID:
+      return INT8OID;
+    case INT2ARRAYOID:
+      return INT2OID;
+    case INT2VECTORARRAYOID:
+      return INT2VECTOROID;
+    case INT4ARRAYOID:
+      return INT4OID;
+    case REGPROCARRAYOID:
+      return REGPROCOID;
+    case TEXTARRAYOID:
+      return TEXTOID;
+    case OIDARRAYOID:
+      return TEXTOID;
+    case TIDARRAYOID:
+      return TIDOID;
+    case XIDARRAYOID:
+      return XIDOID;
+    case CIDARRAYOID:
+      return CIDOID;
+    case OIDVECTORARRAYOID:
+      return OIDVECTOROID;
+    case JSONARRAYOID:
+      return JSONOID;
+    case XMLARRAYOID:
+      return XMLOID;
+    case POINTARRAYOID:
+      return POINTOID;
+    case LSEGARRAYOID:
+      return LSEGOID;
+    case PATHARRAYOID:
+      return PATHOID;
+    case BOXARRAYOID:
+      return BOXOID;
+    case POLYGONARRAYOID:
+      return POLYGONOID;
+    case LINEARRAYOID:
+      return LINEOID;
+    case FLOAT4ARRAYOID:
+      return FLOAT4OID;
+    case FLOAT8ARRAYOID:
+      return FLOAT8OID;
+    case CIRCLEARRAYOID:
+      return CIRCLEOID;
+    case MACADDRARRAYOID:
+      return MACADDROID;
+    case INETARRAYOID:
+      return INETOID;
+    case CIDRARRAYOID:
+      return CIDROID;
+    case MACADDR8ARRAYOID:
+      return MACADDR8OID;
+    case ACLITEMARRAYOID:
+      return ACLITEMOID;
+    case BPCHARARRAYOID:
+      return BPCHAROID;
+    case VARCHARARRAYOID:
+      return VARCHAROID;
+    case DATEARRAYOID:
+      return DATEOID;
+    case TIMEARRAYOID:
+      return TIMEOID;
+    case TIMESTAMPARRAYOID:
+      return TIMESTAMPOID;
+    case TIMESTAMPTZARRAYOID:
+      return TIMESTAMPTZOID;
+    case INTERVALARRAYOID:
+      return INTERVALOID;
+    case TIMETZARRAYOID:
+      return TIMETZOID;
+    case BITARRAYOID:
+      return BITOID;
+    case VARBITARRAYOID:
+      return VARBITOID;
+    case NUMERICARRAYOID:
+      return NUMERICOID;
+    case REFCURSORARRAYOID:
+      return REFCURSOROID;
+    case REGPROCEDUREARRAYOID:
+      return REGPROCEDUREOID;
+    case REGOPERARRAYOID:
+      return REGOPEROID;
+    case REGOPERATORARRAYOID:
+      return REGOPERATOROID;
+    case REGCLASSARRAYOID:
+      return REGCLASSOID;
+    case REGTYPEARRAYOID:
+      return REGTYPEOID;
+    case REGROLEARRAYOID:
+      return REGROLEOID;
+    case REGNAMESPACEARRAYOID:
+      return REGNAMESPACEOID;
+    case UUIDARRAYOID:
+      return UUIDOID;
+    case TSVECTORARRAYOID:
+      return TSVECTOROID;
+    case GTSVECTORARRAYOID:
+      return GTSVECTOROID;
+    case TSQUERYARRAYOID:
+      return TSQUERYOID;
+    case REGCONFIGARRAYOID:
+      return REGCONFIGOID;
+    case REGDICTIONARYARRAYOID:
+      return REGDICTIONARYOID;
+    case JSONBARRAYOID:
+      return JSONBOID;
+    case JSONPATHARRAYOID:
+      return JSONPATHOID;
+    case TXID_SNAPSHOTARRAYOID:
+      return TXID_SNAPSHOTOID;
+    case INT4RANGEARRAYOID:
+      return INT4RANGEOID;
+    case NUMRANGEARRAYOID:
+      return NUMRANGEOID;
+    case TSRANGEARRAYOID:
+      return TSRANGEOID;
+    case TSTZRANGEARRAYOID:
+      return TSTZRANGEOID;
+    case DATERANGEARRAYOID:
+      return TSTZRANGEOID;
+    case INT8RANGEARRAYOID:
+      return INT8RANGEOID;
+    case CSTRINGARRAYOID:
+      return CSTRINGOID;
+    default:
+      return kPgInvalidOid;
+  }
+}
+
+uint32_t get_range_element_type(uint32_t pg_data_type) {
+  switch (pg_data_type) {
+    case INT4RANGEOID:
+      return INT4OID;
+    case NUMRANGEOID:
+      return NUMERICOID;
+    case TSRANGEOID:
+      return TIMESTAMPOID;
+    case TSTZRANGEOID:
+      return TIMESTAMPTZOID;
+    case DATERANGEOID:
+      return DATEOID;
+    case INT8RANGEOID:
+      return INT8OID;
+    default:
+      return kPgInvalidOid;
+  }
+}
+
+uint32_t get_range_array_element_type(uint32_t pg_data_type) {
+  switch (pg_data_type) {
+    case INT4RANGEARRAYOID:
+      return INT4RANGEOID;
+    case NUMRANGEARRAYOID:
+      return NUMRANGEOID;
+    case TSRANGEARRAYOID:
+      return TSRANGEOID;
+    case TSTZRANGEARRAYOID:
+      return TSTZRANGEOID;
+    case DATERANGEARRAYOID:
+      return TSTZRANGEOID;
+    case INT8RANGEARRAYOID:
+      return INT8RANGEOID;
+    default:
+      return kPgInvalidOid;
+  }
+}
+
+char *get_record_string_value(
+    const std::unordered_map<uint32_t, std::vector<master::PgAttributePB>> &composite_atts_map,
+    uint32_t type_id, uintptr_t datum) {
+  const auto &att_pbs = composite_atts_map.at(type_id);
+  size_t natts = att_pbs.size();
+  YbPgAttributeRow *attrs[natts];
+  for (size_t i = 0; i < natts; i++) {
+    const auto &att_pb = att_pbs[i];
+    YbPgAttributeRow *pg_att =
+        reinterpret_cast<YbPgAttributeRow *>(malloc(sizeof(struct YbPgAttributeRow)));
+    *pg_att = {att_pb.attrelid(),           "",
+               att_pb.atttypid(),           att_pb.attstattarget(),
+               (int16_t)att_pb.attlen(),    (int16_t)att_pb.attnum(),
+               att_pb.attndims(),           att_pb.attcacheoff(),
+               att_pb.atttypmod(),          att_pb.attbyval(),
+               (int8_t)att_pb.attstorage(), (int8_t)att_pb.attalign(),
+               att_pb.attnotnull(),         att_pb.atthasdef(),
+               att_pb.atthasmissing(),      (int8_t)att_pb.attidentity(),
+               att_pb.attisdropped(),       att_pb.attislocal(),
+               att_pb.attinhcount(),        att_pb.attcollation()};
+    strncpy(pg_att->attname, att_pb.attname().c_str(), sizeof(pg_att->attname));
+    pg_att->attname[sizeof(pg_att->attname) - 1] = 0;
+    attrs[i] = pg_att;
+  }
+  uintptr_t *values;
+  bool *nulls;
+  values = reinterpret_cast<uintptr_t *>(malloc(natts * sizeof(uintptr_t)));
+  nulls = reinterpret_cast<bool *>(malloc(natts * sizeof(bool)));
+
+  HeapDeformTuple(datum, attrs, natts, values, nulls);
+
+  bool curr_att_modified = false;
+  bool atts_modified = false;
+  for (size_t i = 0; i < natts; i++) {
+    curr_att_modified = false;
+    const auto &att = attrs[i];
+    if (composite_atts_map.find(att->atttypid) != composite_atts_map.end()) {
+      values[i] = (uintptr_t)get_record_string_value(composite_atts_map, att->atttypid, values[i]);
+      curr_att_modified = true;
+    } else if (get_range_array_element_type(att->atttypid) != kPgInvalidOid) {
+      auto elem_type = get_range_array_element_type(att->atttypid);
+      if (elem_type == TSTZRANGEOID) {
+        values[i] = (uintptr_t)get_range_array_string_value(
+            values[i], elem_type, GetOutFuncName(att->atttypid), tz);
+      } else {
+        values[i] = (uintptr_t)get_range_array_string_value(
+            values[i], elem_type, GetOutFuncName(att->atttypid), nullptr);
+      }
+      curr_att_modified = true;
+    } else if (get_array_element_type(att->atttypid) != kPgInvalidOid) {
+      auto elem_type = get_array_element_type(att->atttypid);
+      if (elem_type == TIMESTAMPTZOID) {
+        values[i] = (uintptr_t)get_array_string_value(
+            values[i], elem_type, GetOutFuncName(att->atttypid), tz);
+      } else {
+        values[i] = (uintptr_t)get_array_string_value(
+            values[i], elem_type, GetOutFuncName(att->atttypid), nullptr);
+      }
+      curr_att_modified = true;
+    } else if (get_range_element_type(att->atttypid) != kPgInvalidOid) {
+      auto elem_type = get_range_element_type(att->atttypid);
+      if (elem_type == TIMESTAMPTZOID) {
+        values[i] = (uintptr_t)get_range_string_value(
+            values[i], elem_type, GetOutFuncName(att->atttypid), tz, att->atttypid);
+      } else {
+        values[i] = (uintptr_t)get_range_string_value(
+            values[i], elem_type, GetOutFuncName(att->atttypid), nullptr, att->atttypid);
+      }
+      curr_att_modified = true;
+    }
+
+    if (curr_att_modified) {
+      att->atttypid = CSTRINGOID;
+      att->attalign = 'c';
+      att->attstorage = 'p';
+      att->attcollation = 0;
+      att->attlen = -2;
+      atts_modified = true;
+    }
+  }
+  if (atts_modified) {
+    datum = HeapFormTuple(attrs, natts, values, nulls);
+  }
+
+  auto decoded_string = DecodeRecordDatum(datum, attrs, natts);
+  free(values);
+  free(nulls);
+  for (size_t i = 0; i < natts; i++) {
+    free(attrs[i]);
+  }
+  return decoded_string;
 }
 
 // This function expects that YbgPrepareMemoryContext was called
@@ -600,16 +880,16 @@ void set_range_array_string_value(
 Status SetValueFromQLBinaryHelper(
     const QLValuePB ql_value, const int pg_data_type,
     const std::unordered_map<uint32_t, string> &enum_oid_label_map,
+    const std::unordered_map<uint32_t, std::vector<master::PgAttributePB>> &composite_atts_map,
     DatumMessagePB *cdc_datum_message) {
   uint64_t size;
-  char* val;
-  const char* timezone = "GMT";
+  char *val;
   char const* func_name = nullptr;
 
   YbgTypeDesc pg_arg_type{pg_data_type, -1 /* typmod */};
-  const YBCPgTypeEntity* arg_type = DocPgGetTypeEntity(pg_arg_type);
+  const YbcPgTypeEntity* arg_type = DocPgGetTypeEntity(pg_arg_type);
 
-  YBCPgTypeAttrs type_attrs{-1 /* typmod */};
+  YbcPgTypeAttrs type_attrs{-1 /* typmod */};
 
   cdc_datum_message->set_column_type(pg_data_type);
   switch (pg_data_type) {
@@ -730,51 +1010,6 @@ Status SetValueFromQLBinaryHelper(
       size = xml_val.size();
       val = const_cast<char *>(xml_val.c_str());
       uint64_t datum = arg_type->yb_to_datum(reinterpret_cast<uint8 *>(val), size, &type_attrs);
-      set_string_value(datum, func_name, cdc_datum_message);
-      break;
-    }
-    case PGNODETREEOID: {
-      func_name = "pg_node_tree_out";
-      string pg_node_tree_val = ql_value.binary_value();
-      size = pg_node_tree_val.size();
-      val = const_cast<char *>(pg_node_tree_val.c_str());
-      uint64_t datum = arg_type->yb_to_datum(reinterpret_cast<void *>(val), size, &type_attrs);
-      set_string_value(datum, func_name, cdc_datum_message);
-      break;
-    }
-    case PGNDISTINCTOID: {
-      func_name = "pg_ndistinct_out";
-      string pg_ndistinct_val = ql_value.binary_value();
-      size = pg_ndistinct_val.size();
-      val = const_cast<char *>(pg_ndistinct_val.c_str());
-      uint64_t datum = arg_type->yb_to_datum(reinterpret_cast<void *>(val), size, &type_attrs);
-      set_string_value(datum, func_name, cdc_datum_message);
-      break;
-    }
-    case PGDEPENDENCIESOID: {
-      func_name = "pg_dependencies_out";
-      string pg_dependencies_val = ql_value.binary_value();
-      size = pg_dependencies_val.size();
-      val = const_cast<char *>(pg_dependencies_val.c_str());
-      uint64_t datum = arg_type->yb_to_datum(reinterpret_cast<void *>(val), size, &type_attrs);
-      set_string_value(datum, func_name, cdc_datum_message);
-      break;
-    }
-    case PGDDLCOMMANDOID: {
-      func_name = "pg_ddl_command_out";
-      int64_t pg_ddl_command_val = ql_value.int64_value();
-      size = arg_type->datum_fixed_size;
-      uint64_t datum =
-          arg_type->yb_to_datum(reinterpret_cast<int64 *>(&pg_ddl_command_val), size, &type_attrs);
-      set_string_value(datum, func_name, cdc_datum_message);
-      break;
-    }
-    case SMGROID: {
-      func_name = "smgrout";
-      int smgr_val = ql_value.int16_value();
-      size = arg_type->datum_fixed_size;
-      uint64_t datum =
-          arg_type->yb_to_datum(reinterpret_cast<int16 *>(&smgr_val), size, &type_attrs);
       set_string_value(datum, func_name, cdc_datum_message);
       break;
     }
@@ -951,7 +1186,7 @@ Status SetValueFromQLBinaryHelper(
       uint64_t datum =
           arg_type->yb_to_datum(reinterpret_cast<int64 *>(&timestamptz_val), size, &type_attrs);
 
-      set_decoded_string_value(datum, func_name, cdc_datum_message, timezone);
+      set_string_value(datum, func_name, cdc_datum_message, tz);
       break;
     }
     case INTERVALOID: {
@@ -993,13 +1228,15 @@ Status SetValueFromQLBinaryHelper(
     case NUMERICOID: {
       func_name = "numeric_out";
       util::Decimal decimal;
+      string string_val;
 
-      Status s = decimal.DecodeFromComparable(ql_value.decimal_value());
-      if (!s.ok())
-        return STATUS_SUBSTITUTE(
-            InternalError, "Failed to deserialize DECIMAL from $1", ql_value.decimal_value());
-      string numeric_val = decimal.ToString();
-      cdc_datum_message->set_datum_double(std::stod(numeric_val));
+      RETURN_NOT_OK(decimal.DecodeFromComparable(ql_value.decimal_value()));
+      RETURN_NOT_OK(decimal.ToPointString(&string_val, std::numeric_limits<int32_t>::max()));
+
+      size = string_val.size();
+      val = const_cast<char *>(string_val.c_str());
+      uint64_t datum = arg_type->yb_to_datum(reinterpret_cast<uint8_t *>(val), size, &type_attrs);
+      set_string_value(datum, func_name, cdc_datum_message);
       break;
     }
     case REGPROCEDUREOID: {
@@ -1121,7 +1358,7 @@ Status SetValueFromQLBinaryHelper(
       break;
     }
     case TXID_SNAPSHOTOID: {
-      func_name = "txid_snapshot_out";
+      func_name = "pg_snapshot_out";
       string txid_val = ql_value.binary_value();
       size = txid_val.size();
       val = const_cast<char *>(txid_val.c_str());
@@ -1130,21 +1367,27 @@ Status SetValueFromQLBinaryHelper(
       break;
     }
     case RECORDOID: {
-      /*func_name = "record_out";
+      if (FLAGS_cdc_disable_sending_composite_values) {
+        // TODO(#25221): We break early for the composite types since the decoding logic is broken.
+        // This will result in sending null values for composite columns. Set
+        // FLAGS_cdc_disable_sending_composite_values to false once the decoding logic is fixed.
+        VLOG(3) << "The flag cdc_disable_sending_composite_values is set to true, will send null "
+                   "value for composite column";
+        break;
+      }
       string record_val = ql_value.binary_value();
       size = record_val.size();
       val = const_cast<char *>(record_val.c_str());
       uint64_t datum = arg_type->yb_to_datum(reinterpret_cast<uint8 *>(val), size, &type_attrs);
+      uint32_t type_id = GetRecordTypeId((uintptr_t)datum);
 
-      if (!is_proto_record) {
-        set_decoded_string_value(datum, func_name, is_proto_record);
+      if (composite_atts_map.find(type_id) != composite_atts_map.end()) {
+        char *decoded_str = get_record_string_value(composite_atts_map, type_id, (uintptr_t)datum);
+        cdc_datum_message->set_datum_string(decoded_str, strlen(decoded_str));
       } else {
-
-          set_decoded_string_value(datum, func_name,
-                                   cdc_datum_message);
-      }*/
-
-      cdc_datum_message->set_datum_string("");
+        LOG(INFO) << "For record of type : " << type_id << " no attributes found in the cache";
+        return STATUS_SUBSTITUTE(CacheMissError, "composite");  // Do not change the message.
+      }
       break;
     }
     case CSTRINGOID: {
@@ -1183,15 +1426,6 @@ Status SetValueFromQLBinaryHelper(
       set_string_value(datum, func_name, cdc_datum_message);
       break;
     }
-    case EVTTRIGGEROID: {
-      func_name = "event_trigger_out";
-      uint32 event_trigger_val = ql_value.uint32_value();
-      size = arg_type->datum_fixed_size;
-      uint64_t datum =
-          arg_type->yb_to_datum(reinterpret_cast<uint32 *>(&event_trigger_val), size, &type_attrs);
-      set_string_value(datum, func_name, cdc_datum_message);
-      break;
-    }
     case LANGUAGE_HANDLEROID: {
       func_name = "language_handler_out";
       uint32 language_handler_val = ql_value.uint32_value();
@@ -1207,15 +1441,6 @@ Status SetValueFromQLBinaryHelper(
       size = arg_type->datum_fixed_size;
       uint64_t datum =
           arg_type->yb_to_datum(reinterpret_cast<int64 *>(&internal_val), size, &type_attrs);
-      set_string_value(datum, func_name, cdc_datum_message);
-      break;
-    }
-    case OPAQUEOID: {
-      func_name = "opaque_out";
-      int opaque_val = ql_value.int32_value();
-      size = arg_type->datum_fixed_size;
-      uint64_t datum =
-          arg_type->yb_to_datum(reinterpret_cast<int32 *>(&opaque_val), size, &type_attrs);
       set_string_value(datum, func_name, cdc_datum_message);
       break;
     }
@@ -1247,8 +1472,8 @@ Status SetValueFromQLBinaryHelper(
         label = enum_oid_label_map.at((uint32_t)enum_oid);
         VLOG(1) << "For enum oid: " << enum_oid << " found label" << label;
       } else {
-        return STATUS_SUBSTITUTE(
-            CacheMissError, "For enum oid: $0 no label found in cache", enum_oid);
+        LOG(INFO) << "For enum oid: " << enum_oid << " no label found in cache";
+        return STATUS_SUBSTITUTE(CacheMissError, "enum");  // Do not change the message.
       }
       cdc_datum_message->set_datum_string(label.c_str(), strlen(label.c_str()));
       break;
@@ -1361,8 +1586,7 @@ Status SetValueFromQLBinaryHelper(
 
     case TSTZRANGEOID: {
       func_name = "timestamptz_out";
-      set_decoded_string_range(
-          ql_value, arg_type, TIMESTAMPTZOID, func_name, cdc_datum_message, timezone);
+      set_range_string_value(ql_value, arg_type, TIMESTAMPTZOID, func_name, cdc_datum_message, tz);
       break;
     }
 
@@ -1547,24 +1771,6 @@ Status SetValueFromQLBinaryHelper(
       break;
     }
 
-    case ABSTIMEARRAYOID: {
-      func_name = "abstimeout";
-      set_array_string_value(ql_value, arg_type, ABSTIMEOID, func_name, cdc_datum_message);
-      break;
-    }
-
-    case RELTIMEARRAYOID: {
-      func_name = "reltimeout";
-      set_array_string_value(ql_value, arg_type, RELTIMEOID, func_name, cdc_datum_message);
-      break;
-    }
-
-    case TINTERVALARRAYOID: {
-      func_name = "tintervalout";
-      set_array_string_value(ql_value, arg_type, TINTERVALOID, func_name, cdc_datum_message);
-      break;
-    }
-
     case ACLITEMARRAYOID: {
       func_name = "aclitemout";
       set_array_string_value(ql_value, arg_type, ACLITEMOID, func_name, cdc_datum_message);
@@ -1615,8 +1821,7 @@ Status SetValueFromQLBinaryHelper(
 
     case TIMESTAMPTZARRAYOID: {
       func_name = "timestamptz_out";
-      set_decoded_string_array(
-          ql_value, arg_type, TIMESTAMPTZOID, func_name, cdc_datum_message, timezone);
+      set_array_string_value(ql_value, arg_type, TIMESTAMPTZOID, func_name, cdc_datum_message, tz);
       break;
     }
 
@@ -1747,7 +1952,7 @@ Status SetValueFromQLBinaryHelper(
     }
 
     case TXID_SNAPSHOTARRAYOID: {
-      func_name = "txid_snapshot_out";
+      func_name = "pg_snapshot_out";
       set_array_string_value(ql_value, arg_type, TXID_SNAPSHOTOID, func_name, cdc_datum_message);
       break;
     }
@@ -1789,8 +1994,8 @@ Status SetValueFromQLBinaryHelper(
 
     case TSTZRANGEARRAYOID: {
       func_name = "timestamptz_out";
-      set_decoded_string_range_array(
-          ql_value, arg_type, TSTZRANGEOID, func_name, cdc_datum_message, timezone);
+      set_range_array_string_value(
+          ql_value, arg_type, TSTZRANGEOID, func_name, cdc_datum_message, tz);
       break;
     }
 
@@ -1816,7 +2021,6 @@ Status SetValueFromQLBinaryHelper(
       break;
   }
   return Status::OK();
-}
+} // NOLINT(readability/fn_size)
 
-}  // namespace docdb
-}  // namespace yb
+}  // namespace yb::docdb

@@ -30,20 +30,24 @@
 // under the License.
 //
 // Base test class, with various utility functions.
-#ifndef YB_UTIL_TEST_UTIL_H
-#define YB_UTIL_TEST_UTIL_H
+#pragma once
 
 #include <dirent.h>
 
 #include <atomic>
+#include <functional>
+#include <future>
 #include <string>
+#include <type_traits>
+#include <utility>
 
-#include <glog/logging.h>
 #include <gtest/gtest.h>
 
+#include "yb/util/enums.h"
 #include "yb/util/env.h"
 #include "yb/util/monotime.h"
 #include "yb/util/port_picker.h"
+#include "yb/util/logging.h"
 #include "yb/util/test_macros.h" // For convenience
 
 #define ASSERT_EVENTUALLY(expr) do { \
@@ -52,6 +56,9 @@
 } while (0)
 
 namespace yb {
+
+class CurlGlobalInitializer;
+
 namespace rpc {
 
 class Messenger;
@@ -87,6 +94,7 @@ class YBTest : public ::testing::Test {
 
  private:
   std::string test_dir_;
+  std::unique_ptr<CurlGlobalInitializer> global_curl_;
 };
 
 // Returns true if slow tests are runtime-enabled.
@@ -103,8 +111,6 @@ bool AllowSlowTests();
 //
 void OverrideFlagForSlowTests(const std::string& flag_name,
                               const std::string& new_value);
-
-void EnableVerboseLoggingForModule(const std::string& module, int level);
 
 // Call srand() with a random seed based on the current time, reporting
 // that seed to the logs. The time-based seed may be overridden by passing
@@ -153,14 +159,14 @@ void LogVectorDiff(const std::vector<T>& expected, const std::vector<T>& actual)
     }
 
     for (auto i = smaller_vector->size();
-         i < min(smaller_vector->size() + 16, bigger_vector->size());
+         i < std::min(smaller_vector->size() + 16, bigger_vector->size());
          ++i) {
       LOG(WARNING) << bigger_vector_desc << "[" << i << "]: " << (*bigger_vector)[i];
     }
   }
   int num_differences_logged = 0;
   size_t num_differences_left = 0;
-  size_t min_size = min(expected.size(), actual.size());
+  size_t min_size = std::min(expected.size(), actual.size());
   for (size_t i = 0; i < min_size; ++i) {
     if (expected[i] != actual[i]) {
       if (num_differences_logged < 16) {
@@ -192,6 +198,30 @@ inline std::string GetToolPath(const std::string& tool_name) {
 inline std::string GetPgToolPath(const std::string& tool_name) {
   return GetToolPath("../postgres/bin", tool_name);
 }
+
+// For now this assumes that YB Controller binaries are present in build/ybc.
+inline std::string GetYbcToolPath(const std::string& tool_name) {
+  return GetToolPath("../../ybc", tool_name);
+}
+
+std::string GetCertsDir();
+
+// See https://docs.google.com/document/d/1aGD37sMIkkGFyvm7QEe2jtru1G-qGHIObu7IyoaUPS4
+// for more context and steps to use YB Controller in UTs locally.
+// Read YB_TEST_YB_CONTROLLER from env.
+// If true, spawn YB Controller servers for backup operations.
+bool UseYbController();
+
+/*
+Returns true if YB_DISABLE_MINICLUSTER_TESTS is set true.
+We disable the Minicluster backup tests when we use YB Controller for backups.
+This is because the varz endpoint in MiniTabletServer is not functional currently which causes the
+backups to fail.
+TODO: Re-enable the tests once GH#21689 is done.
+*/
+bool DisableMiniClusterBackupTests();
+
+void AddExtraFlagsFromEnvVar(const char* env_var_name, std::vector<std::string>* args_dest);
 
 int CalcNumTablets(size_t num_tablet_servers);
 
@@ -235,11 +265,30 @@ class StopOnFailure {
   std::atomic<bool>& stop_;
 };
 
+YB_DEFINE_ENUM(CorruptionType, (kZero)(kXor55));
+
+// Corrupt bytes_to_corrupt bytes at specified offset. If offset is negative, treats it as
+// an offset relative to the end of file. Also fixes specified region to not exceed the file before
+// corrupting data.
+Status CorruptFile(
+    const std::string& file_path, int64_t offset, size_t bytes_to_corrupt,
+    CorruptionType corruption_type);
+
+Status ForkAndRunToCompletion(const std::function<void(void)>& child,
+                              const std::function<void(void)>& parent = {});
+
+Status ForkAndRunToCrashPoint(const std::function<void(void)>& child,
+                              const std::function<void(void)>& parent,
+                              std::string_view crash_point);
+
+inline Status ForkAndRunToCrashPoint(const std::function<void(void)>& f,
+                                     std::string_view crash_point) {
+  return ForkAndRunToCrashPoint(f, {} /* parent */, crash_point);
+}
+
 } // namespace yb
 
 // Gives ability to define custom parent class for test fixture.
 #define TEST_F_EX(test_case_name, test_name, parent_class) \
   GTEST_TEST_(test_case_name, test_name, parent_class, \
               ::testing::internal::GetTypeId<test_case_name>())
-
-#endif  // YB_UTIL_TEST_UTIL_H

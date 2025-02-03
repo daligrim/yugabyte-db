@@ -6,6 +6,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <float.h>
+#include <fuzzer/FuzzedDataProvider.h>
 #include <inttypes.h>
 #include <openssl/ossl_typ.h>
 #include <pthread.h>
@@ -19,6 +20,7 @@
 #include <sys/types.h>
 #include <time.h>
 #include <uuid/uuid.h>
+#include <zlib.h>
 
 #include <algorithm>
 #include <array>
@@ -29,6 +31,7 @@
 #include <chrono>
 #include <climits>
 #include <cmath>
+#include <compare>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -38,6 +41,7 @@
 #include <deque>
 #include <functional>
 #include <future>
+#include <initializer_list>
 #include <iosfwd>
 #include <iostream>
 #include <iterator>
@@ -50,20 +54,24 @@
 #include <new>
 #include <optional>
 #include <ostream>
+#include <queue>
 #include <random>
 #include <regex>
 #include <set>
 #include <shared_mutex>
+#include <span>
 #include <sstream>
 #include <stack>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <tuple>
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include <boost/algorithm/string/join.hpp>
@@ -75,6 +83,7 @@
 #include <boost/container/small_vector.hpp>
 #include <boost/container/stable_vector.hpp>
 #include <boost/core/demangle.hpp>
+#include <boost/core/enable_if.hpp>
 #include <boost/function.hpp>
 #include <boost/function/function_fwd.hpp>
 #include <boost/functional/hash.hpp>
@@ -85,10 +94,14 @@
 #include <boost/iterator/transform_iterator.hpp>
 #include <boost/mpl/and.hpp>
 #include <boost/mpl/if.hpp>
+#include <boost/multi_index/hashed_index.hpp>
+#include <boost/multi_index/mem_fun.hpp>
+#include <boost/multi_index/member.hpp>
+#include <boost/multi_index/ordered_index.hpp>
+#include <boost/multi_index_container.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
 #include <boost/optional/optional_fwd.hpp>
-#include <boost/optional/optional_io.hpp>
 #include <boost/preprocessor/cat.hpp>
 #include <boost/preprocessor/config/config.hpp>
 #include <boost/preprocessor/empty.hpp>
@@ -102,11 +115,14 @@
 #include <boost/preprocessor/stringize.hpp>
 #include <boost/preprocessor/variadic/to_seq.hpp>
 #include <boost/range/adaptor/reversed.hpp>
+#include <boost/range/any_range.hpp>
 #include <boost/range/iterator_range.hpp>
+#include <boost/range/iterator_range_core.hpp>
 #include <boost/signals2/dummy_mutex.hpp>
 #include <boost/smart_ptr/detail/yield_k.hpp>
 #include <boost/system/error_code.hpp>
 #include <boost/tti/has_type.hpp>
+#include <boost/type_traits.hpp>
 #include <boost/type_traits/is_const.hpp>
 #include <boost/type_traits/make_signed.hpp>
 #include <boost/unordered_map.hpp>
@@ -134,6 +150,10 @@
 #include <gtest/gtest_prod.h>
 #include <rapidjson/document.h>
 
+#include "yb/common/opid.fwd.h"
+#include "yb/common/opid.h"
+#include "yb/common/opid.messages.h"
+#include "yb/common/opid.pb.h"
 #include "yb/gutil/atomicops.h"
 #include "yb/gutil/bits.h"
 #include "yb/gutil/callback.h"
@@ -146,6 +166,7 @@
 #include "yb/gutil/integral_types.h"
 #include "yb/gutil/logging-inl.h"
 #include "yb/gutil/macros.h"
+#include "yb/gutil/map-util.h"
 #include "yb/gutil/mathlimits.h"
 #include "yb/gutil/once.h"
 #include "yb/gutil/port.h"
@@ -168,9 +189,9 @@
 #include "yb/gutil/threading/thread_collision_warner.h"
 #include "yb/gutil/type_traits.h"
 #include "yb/gutil/walltime.h"
+#include "yb/util/aggregate_stats.h"
 #include "yb/util/algorithm_util.h"
 #include "yb/util/atomic.h"
-#include "yb/util/auto_flags.h"
 #include "yb/util/backoff_waiter.h"
 #include "yb/util/bitmap.h"
 #include "yb/util/boost_mutex_utils.h"
@@ -180,6 +201,7 @@
 #include "yb/util/checked_narrow_cast.h"
 #include "yb/util/clone_ptr.h"
 #include "yb/util/coding_consts.h"
+#include "yb/util/col_group.h"
 #include "yb/util/compare_util.h"
 #include "yb/util/condition_variable.h"
 #include "yb/util/countdown_latch.h"
@@ -196,12 +218,17 @@
 #include "yb/util/faststring.h"
 #include "yb/util/fault_injection.h"
 #include "yb/util/file_system.h"
-#include "yb/util/flag_tags.h"
 #include "yb/util/flags.h"
+#include "yb/util/flags/auto_flags.h"
+#include "yb/util/flags/flag_tags.h"
+#include "yb/util/flags/flags_callback.h"
 #include "yb/util/format.h"
+#include "yb/util/hdr_histogram.h"
+#include "yb/util/high_water_mark.h"
 #include "yb/util/io.h"
 #include "yb/util/jsonwriter.h"
 #include "yb/util/kv_util.h"
+#include "yb/util/lazy_invoke.h"
 #include "yb/util/lockfree.h"
 #include "yb/util/locks.h"
 #include "yb/util/logging.h"
@@ -213,6 +240,7 @@
 #include "yb/util/memory/arena_list.h"
 #include "yb/util/memory/mc_types.h"
 #include "yb/util/memory/memory.h"
+#include "yb/util/memory/memory_usage.h"
 #include "yb/util/metric_entity.h"
 #include "yb/util/metrics.h"
 #include "yb/util/metrics_fwd.h"
@@ -225,9 +253,6 @@
 #include "yb/util/net/net_util.h"
 #include "yb/util/numbered_deque.h"
 #include "yb/util/operation_counter.h"
-#include "yb/util/opid.fwd.h"
-#include "yb/util/opid.h"
-#include "yb/util/opid.pb.h"
 #include "yb/util/path_util.h"
 #include "yb/util/pb_util.h"
 #include "yb/util/physical_time.h"
@@ -243,6 +268,7 @@
 #include "yb/util/shared_lock.h"
 #include "yb/util/size_literals.h"
 #include "yb/util/slice.h"
+#include "yb/util/slice_parts.h"
 #include "yb/util/stack_trace.h"
 #include "yb/util/status.h"
 #include "yb/util/status_callback.h"
@@ -252,13 +278,15 @@
 #include "yb/util/status_log.h"
 #include "yb/util/std_util.h"
 #include "yb/util/stol_utils.h"
-#include "yb/util/string_case.h"
+#include "yb/util/stopwatch.h"
 #include "yb/util/string_trim.h"
 #include "yb/util/string_util.h"
 #include "yb/util/striped64.h"
 #include "yb/util/strongly_typed_bool.h"
 #include "yb/util/strongly_typed_string.h"
 #include "yb/util/strongly_typed_uuid.h"
+#include "yb/util/sync_point.h"
+#include "yb/util/tcmalloc_util.h"
 #include "yb/util/test_macros.h"
 #include "yb/util/test_util.h"
 #include "yb/util/thread.h"
@@ -274,4 +302,6 @@
 #include "yb/util/unique_lock.h"
 #include "yb/util/uuid.h"
 #include "yb/util/varint.h"
+#include "yb/util/write_buffer.h"
 #include "yb/util/yb_partition.h"
+#include "yb/util/yb_pg_errcodes.h"

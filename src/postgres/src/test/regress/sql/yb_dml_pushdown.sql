@@ -1,47 +1,43 @@
--- These tests for UPDATE/DELETE single row operations are forked off of yb_dml_single_row
--- and test approximately same statements when expression pushdown is enabled
-SET yb_enable_expression_pushdown to on;
-
 --
 -- Test that single-row UPDATE/DELETEs bypass scan.
 --
 CREATE TABLE single_row (k int primary key, v1 int, v2 int);
 
 -- Below statements should all USE single-row.
-EXPLAIN (COSTS FALSE) DELETE FROM single_row WHERE k = 1;
-EXPLAIN (COSTS FALSE) DELETE FROM single_row WHERE k = 1 RETURNING k;
-EXPLAIN (COSTS FALSE) DELETE FROM single_row WHERE k = 1 RETURNING v1;
-EXPLAIN (COSTS FALSE) DELETE FROM single_row WHERE k IN (1);
+EXPLAIN (COSTS FALSE, VERBOSE TRUE) DELETE FROM single_row WHERE k = 1;
+EXPLAIN (COSTS FALSE, VERBOSE TRUE) DELETE FROM single_row WHERE k = 1 RETURNING k;
+EXPLAIN (COSTS FALSE, VERBOSE TRUE) DELETE FROM single_row WHERE k = 1 RETURNING v1;
+EXPLAIN (COSTS FALSE, VERBOSE TRUE) DELETE FROM single_row WHERE k IN (1);
 -- Below statements should all NOT USE single-row.
-EXPLAIN (COSTS FALSE) DELETE FROM single_row;
-EXPLAIN (COSTS FALSE) DELETE FROM single_row WHERE k = 1 and v1 = 1;
-EXPLAIN (COSTS FALSE) DELETE FROM single_row WHERE v1 = 1 and v2 = 1;
-EXPLAIN (COSTS FALSE) DELETE FROM single_row WHERE k > 1;
-EXPLAIN (COSTS FALSE) DELETE FROM single_row WHERE k != 1;
-EXPLAIN (COSTS FALSE) DELETE FROM single_row WHERE k IN (1, 2);
+EXPLAIN (COSTS FALSE, VERBOSE TRUE) DELETE FROM single_row;
+EXPLAIN (COSTS FALSE, VERBOSE TRUE) DELETE FROM single_row WHERE k = 1 and v1 = 1;
+EXPLAIN (COSTS FALSE, VERBOSE TRUE) DELETE FROM single_row WHERE v1 = 1 and v2 = 1;
+EXPLAIN (COSTS FALSE, VERBOSE TRUE) DELETE FROM single_row WHERE k > 1;
+EXPLAIN (COSTS FALSE, VERBOSE TRUE) DELETE FROM single_row WHERE k != 1;
+EXPLAIN (COSTS FALSE, VERBOSE TRUE) DELETE FROM single_row WHERE k IN (1, 2);
 
 -- Below statements should all USE single-row.
-EXPLAIN (COSTS FALSE) UPDATE single_row SET v1 = 1 WHERE k = 1;
-EXPLAIN (COSTS FALSE) UPDATE single_row SET v1 = 1 WHERE k = 1 RETURNING k, v1;
-EXPLAIN (COSTS FALSE) UPDATE single_row SET v1 = 1, v2 = 1 + 2 WHERE k = 1;
-EXPLAIN (COSTS FALSE) UPDATE single_row SET v1 = v1 + v2 WHERE k = 1;
-EXPLAIN (COSTS FALSE) UPDATE single_row SET v1 = v2 + 1 WHERE k = 1;
-EXPLAIN (COSTS FALSE) UPDATE single_row SET v1 = 1, v2 = v1 + v2 WHERE k = 1;
-EXPLAIN (COSTS FALSE) UPDATE single_row SET v1 = v2 + 1, v2 = 1 WHERE k = 1;
-EXPLAIN (COSTS FALSE) UPDATE single_row SET v1 = 1, v2 = 2 WHERE k = 1 RETURNING k, v1, v2;
-EXPLAIN (COSTS FALSE) UPDATE single_row SET v1 = 1, v2 = 2 WHERE k = 1 RETURNING *;
-EXPLAIN (COSTS FALSE) UPDATE single_row SET v1 = v1 + 1, v2 = 2 WHERE k = 1 RETURNING v2;
-EXPLAIN (COSTS FALSE) UPDATE single_row SET v1 = 1 WHERE k IN (1);
-EXPLAIN (COSTS FALSE) UPDATE single_row SET v1 = 3 + 2 WHERE k = 1;
-EXPLAIN (COSTS FALSE) UPDATE single_row SET v1 = power(2, 3 - 1) WHERE k = 1;
-EXPLAIN (COSTS FALSE) UPDATE single_row SET v1 = v1 + 3 WHERE k = 1;
-EXPLAIN (COSTS FALSE) UPDATE single_row SET v1 = v1 * 2 WHERE k = 1;
-EXPLAIN (COSTS FALSE) UPDATE single_row SET v1 = power(2, 3 - k) WHERE k = 1;
-EXPLAIN (COSTS FALSE) UPDATE single_row SET v1 = 1 WHERE k = 1 RETURNING v2;
-EXPLAIN (COSTS FALSE) UPDATE single_row SET v1 = v1 + 1 WHERE k = 1 RETURNING v1;
-EXPLAIN (COSTS FALSE) UPDATE single_row SET v1 = 1 WHERE k = 1 RETURNING *;
-EXPLAIN (COSTS FALSE) UPDATE single_row SET v1 = CASE WHEN random() < 0.1 THEN 0 ELSE 1 END WHERE k = 1;
-EXPLAIN (COSTS FALSE) UPDATE single_row SET v2 = CASE WHEN v1 % 2 = 0 THEN v2 * 3 ELSE v2 *2 END WHERE k = 1;
+EXPLAIN (COSTS FALSE, VERBOSE TRUE) UPDATE single_row SET v1 = 1 WHERE k = 1;
+EXPLAIN (COSTS FALSE, VERBOSE TRUE) UPDATE single_row SET v1 = 1 WHERE k = 1 RETURNING k, v1;
+EXPLAIN (COSTS FALSE, VERBOSE TRUE) UPDATE single_row SET v1 = 1, v2 = 1 + 2 WHERE k = 1;
+EXPLAIN (COSTS FALSE, VERBOSE TRUE) UPDATE single_row SET v1 = v1 + v2 WHERE k = 1;
+EXPLAIN (COSTS FALSE, VERBOSE TRUE) UPDATE single_row SET v1 = v2 + 1 WHERE k = 1;
+EXPLAIN (COSTS FALSE, VERBOSE TRUE) UPDATE single_row SET v1 = 1, v2 = v1 + v2 WHERE k = 1;
+EXPLAIN (COSTS FALSE, VERBOSE TRUE) UPDATE single_row SET v1 = v2 + 1, v2 = 1 WHERE k = 1;
+EXPLAIN (COSTS FALSE, VERBOSE TRUE) UPDATE single_row SET v1 = 1, v2 = 2 WHERE k = 1 RETURNING k, v1, v2;
+EXPLAIN (COSTS FALSE, VERBOSE TRUE) UPDATE single_row SET v1 = 1, v2 = 2 WHERE k = 1 RETURNING *;
+EXPLAIN (COSTS FALSE, VERBOSE TRUE) UPDATE single_row SET v1 = v1 + 1, v2 = 2 WHERE k = 1 RETURNING v2;
+EXPLAIN (COSTS FALSE, VERBOSE TRUE) UPDATE single_row SET v1 = 1 WHERE k IN (1);
+EXPLAIN (COSTS FALSE, VERBOSE TRUE) UPDATE single_row SET v1 = 3 + 2 WHERE k = 1;
+EXPLAIN (COSTS FALSE, VERBOSE TRUE) UPDATE single_row SET v1 = power(2, 3 - 1) WHERE k = 1;
+EXPLAIN (COSTS FALSE, VERBOSE TRUE) UPDATE single_row SET v1 = v1 + 3 WHERE k = 1;
+EXPLAIN (COSTS FALSE, VERBOSE TRUE) UPDATE single_row SET v1 = v1 * 2 WHERE k = 1;
+EXPLAIN (COSTS FALSE, VERBOSE TRUE) UPDATE single_row SET v1 = power(2, 3 - k) WHERE k = 1;
+EXPLAIN (COSTS FALSE, VERBOSE TRUE) UPDATE single_row SET v1 = 1 WHERE k = 1 RETURNING v2;
+EXPLAIN (COSTS FALSE, VERBOSE TRUE) UPDATE single_row SET v1 = v1 + 1 WHERE k = 1 RETURNING v1;
+EXPLAIN (COSTS FALSE, VERBOSE TRUE) UPDATE single_row SET v1 = 1 WHERE k = 1 RETURNING *;
+EXPLAIN (COSTS FALSE, VERBOSE TRUE) UPDATE single_row SET v1 = CASE WHEN random() < 0.1 THEN 0 ELSE 1 END WHERE k = 1;
+EXPLAIN (COSTS FALSE, VERBOSE TRUE) UPDATE single_row SET v2 = CASE WHEN v1 % 2 = 0 THEN v2 * 3 ELSE v2 *2 END WHERE k = 1;
 
 -- Below statements should all NOT USE single-row.
 EXPLAIN (COSTS FALSE) UPDATE single_row SET v1 = 1;
@@ -164,6 +160,21 @@ SELECT * FROM single_row;
 
 WITH temp AS (UPDATE single_row SET v1 = v1 + 1 WHERE k = 2 RETURNING k, v1)
   UPDATE single_row SET v2 = temp.v1 FROM temp WHERE single_row.k = temp.k;
+
+SELECT * FROM single_row;
+
+-- GHI 23461
+CREATE TABLE single_row_changes(k int, v1 int);
+INSERT INTO single_row_changes VALUES (1, 1), (1, 2);
+
+WITH deleted_rows AS (
+  DELETE FROM single_row_changes
+  WHERE k = 1
+  RETURNING v1
+)
+UPDATE single_row
+SET v1 = v1 + (SELECT COALESCE(SUM(v1), 0) FROM deleted_rows)
+WHERE k = 1;
 
 SELECT * FROM single_row;
 

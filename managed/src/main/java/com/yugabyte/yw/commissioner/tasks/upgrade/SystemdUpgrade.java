@@ -3,17 +3,20 @@
 package com.yugabyte.yw.commissioner.tasks.upgrade;
 
 import com.yugabyte.yw.commissioner.BaseTaskDependencies;
+import com.yugabyte.yw.commissioner.ITask.Abortable;
+import com.yugabyte.yw.commissioner.ITask.Retryable;
 import com.yugabyte.yw.commissioner.UpgradeTaskBase;
-import com.yugabyte.yw.commissioner.tasks.UniverseDefinitionTaskBase.ServerType;
 import com.yugabyte.yw.commissioner.UserTaskDetails.SubTaskGroupType;
+import com.yugabyte.yw.common.Util;
 import com.yugabyte.yw.forms.SystemdUpgradeParams;
-import com.yugabyte.yw.forms.UniverseDefinitionTaskParams;
+import com.yugabyte.yw.models.Universe;
 import com.yugabyte.yw.models.helpers.NodeDetails;
 import com.yugabyte.yw.models.helpers.NodeDetails.NodeState;
 import java.util.List;
 import javax.inject.Inject;
-import org.apache.commons.lang3.tuple.Pair;
 
+@Abortable
+@Retryable
 public class SystemdUpgrade extends UpgradeTaskBase {
 
   @Inject
@@ -37,17 +40,34 @@ public class SystemdUpgrade extends UpgradeTaskBase {
   }
 
   @Override
+  public void validateParams(boolean isFirstTry) {
+    super.validateParams(isFirstTry);
+    taskParams().verifyParams(getUniverse(), getNodeState(), isFirstTry);
+  }
+
+  @Override
+  protected void createPrecheckTasks(Universe universe) {
+    super.createPrecheckTasks(universe);
+    addBasicPrecheckTasks();
+    if (Util.isOnPremManualProvisioning(universe)) {
+      createRunEnableLinger(universe, universe.getNodes());
+    }
+  }
+
+  @Override
+  protected MastersAndTservers calculateNodesToBeRestarted() {
+    return fetchNodes(taskParams().upgradeOption);
+  }
+
+  @Override
   public void run() {
     runUpgrade(
         () -> {
           // Fetch node lists
-          Pair<List<NodeDetails>, List<NodeDetails>> nodes = fetchNodes(taskParams().upgradeOption);
+          MastersAndTservers nodes = getNodesToBeRestarted();
 
-          // Verify the request params and fail if invalid
-          taskParams().verifyParams(getUniverse());
-
-          if (taskParams().ybcInstalled) {
-            createServerControlTasks(nodes.getRight(), ServerType.CONTROLLER, "stop")
+          if (taskParams().isYbcInstalled()) {
+            createServerControlTasks(nodes.tserversList, ServerType.CONTROLLER, "stop")
                 .setSubTaskGroupType(getTaskSubGroupType());
           }
           // Rolling Upgrade Systemd
@@ -78,13 +98,6 @@ public class SystemdUpgrade extends UpgradeTaskBase {
     // Conditional Provisioning
     createSetupServerTasks(nodes, p -> p.isSystemdUpgrade = true)
         .setSubTaskGroupType(SubTaskGroupType.Provisioning);
-
-    UniverseDefinitionTaskParams universeDetails = getUniverse().getUniverseDetails();
-    taskParams().rootCA = universeDetails.rootCA;
-    taskParams().clientRootCA = universeDetails.clientRootCA;
-    taskParams().rootAndClientRootCASame = universeDetails.rootAndClientRootCASame;
-    taskParams().allowInsecure = universeDetails.allowInsecure;
-    taskParams().setTxnTableWaitCountFlag = universeDetails.setTxnTableWaitCountFlag;
 
     // Conditional Configuring
     createConfigureServerTasks(nodes, params -> params.isSystemdUpgrade = true)

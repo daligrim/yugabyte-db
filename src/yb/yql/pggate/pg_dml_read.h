@@ -12,11 +12,11 @@
 // under the License.
 //--------------------------------------------------------------------------------------------------
 
-#ifndef YB_YQL_PGGATE_PG_DML_READ_H_
-#define YB_YQL_PGGATE_PG_DML_READ_H_
+#pragma once
 
+#include <functional>
+#include <memory>
 #include <optional>
-#include <utility>
 #include <vector>
 
 #include "yb/common/pgsql_protocol.fwd.h"
@@ -33,8 +33,7 @@
 #include "yb/yql/pggate/pg_statement.h"
 #include "yb/yql/pggate/pg_tools.h"
 
-namespace yb {
-namespace pggate {
+namespace yb::pggate {
 
 //--------------------------------------------------------------------------------------------------
 // DML_READ
@@ -59,77 +58,87 @@ namespace pggate {
 
 class PgDmlRead : public PgDml {
  public:
-  PgDmlRead(PgSession::ScopedRefPtr pg_session, const PgObjectId& table_id,
-           const PgObjectId& index_id, const PgPrepareParameters *prepare_params,
-           bool is_region_local);
-  virtual ~PgDmlRead();
+  Status AppendColumnRef(PgColumnRef* colref, bool is_for_secondary_index) override;
 
-  StmtOp stmt_op() const override { return StmtOp::STMT_SELECT; }
-
-  virtual Status Prepare() = 0;
+  // Append a filter condition.
+  // Supported expression kind is serialized Postgres expression.
+  Status AppendQual(PgExpr* qual, bool is_for_secondary_index);
 
   // Allocate binds.
   virtual void PrepareBinds();
 
   // Set forward (or backward) scan.
-  void SetForwardScan(const bool is_forward_scan);
+  void SetForwardScan(bool is_forward_scan);
+
+  // Set prefix length, in columns, of distinct index scans.
+  void SetDistinctPrefixLength(int distinct_prefix_length);
+
+  // Set scan bounds
+  void SetHashBounds(uint16_t low_bound, uint16_t high_bound);
 
   // Bind a range column with a BETWEEN condition.
-  Status BindColumnCondBetween(int attr_num, PgExpr *attr_value,
-                               bool start_inclusive,
-                               PgExpr *attr_value_end,
-                               bool end_inclusive);
+  Status BindColumnCondBetween(
+      int attr_num, PgExpr* attr_value, bool start_inclusive,
+      PgExpr* attr_value_end, bool end_inclusive);
 
   // Bind a column with an IN condition.
-  Status BindColumnCondIn(int attnum, int n_attr_values, PgExpr **attr_values);
+  Status BindColumnCondIn(PgExpr* lhs, int n_attr_values, PgExpr** attr_values);
 
-  Status BindHashCode(const std::optional<Bound>& start, const std::optional<Bound>& end);
+  // Bind a column with an IS NOT NULL condition.
+  Status BindColumnCondIsNotNull(int attr_num);
+
+  void BindHashCode(const std::optional<Bound>& start, const std::optional<Bound>& end);
+
+  // Limit scan to specific ybctid range for parallel scan.
+  // Sets underlying request's bounds to specified values, also resets any psql operations
+  // remaining from the previous range scan.
+  Status BindRange(
+      Slice lower_bound, bool lower_bound_inclusive, Slice upper_bound, bool upper_bound_inclusive);
 
   // Add a lower bound to the scan. If a lower bound has already been added
   // this call will set the lower bound to the stricter of the two bounds.
-  Status AddRowLowerBound(YBCPgStatement handle, int n_col_values,
-                                    PgExpr **col_values, bool is_inclusive);
+  Status AddRowLowerBound(
+      YbcPgStatement handle, int n_col_values, PgExpr** col_values, bool is_inclusive);
 
   // Add an upper bound to the scan. If an upper bound has already been added
   // this call will set the upper bound to the stricter of the two bounds.
-  Status AddRowUpperBound(YBCPgStatement handle, int n_col_values,
-                                    PgExpr **col_values, bool is_inclusive);
+  Status AddRowUpperBound(
+      YbcPgStatement handle, int n_col_values, PgExpr** col_values, bool is_inclusive);
 
   // Execute.
-  virtual Status Exec(const PgExecParameters *exec_params);
+  Status Exec(const YbcPgExecParameters* exec_params);
+  void SetRequestedYbctids(std::reference_wrapper<const std::vector<Slice>> ybctids);
 
-  void SetCatalogCacheVersion(const uint64_t catalog_cache_version) override {
-    DCHECK_NOTNULL(read_req_)->set_ysql_catalog_version(catalog_cache_version);
+  Status ANNBindVector(PgExpr* vector);
+  Status ANNSetPrefetchSize(int32_t prefetch_size);
+
+  void SetCatalogCacheVersion(std::optional<PgOid> db_oid, uint64_t version) override {
+    DoSetCatalogCacheVersion(read_req_.get(), db_oid, version);
   }
 
   void UpgradeDocOp(PgDocOp::SharedPtr doc_op);
 
-  const LWPgsqlReadRequestPB* read_req() const { return read_req_.get(); }
+  [[nodiscard]] const LWPgsqlReadRequestPB* read_req() const { return read_req_.get(); }
 
-  bool IsReadFromYsqlCatalog() const;
+  [[nodiscard]] bool IsReadFromYsqlCatalog() const;
 
-  bool IsIndexOrderedScan() const;
+  [[nodiscard]] bool IsIndexOrderedScan() const;
+
+  [[nodiscard]] virtual bool IsPgSelectIndex() const { return false; }
 
  protected:
+  explicit PgDmlRead(const PgSession::ScopedRefPtr& pg_session);
+
   // Allocate column protobuf.
-  LWPgsqlExpressionPB *AllocColumnBindPB(PgColumn *col) override;
-  LWPgsqlExpressionPB *AllocColumnBindConditionExprPB(PgColumn *col);
-  LWPgsqlExpressionPB *AllocIndexColumnBindPB(PgColumn *col);
+  Result<LWPgsqlExpressionPB*> AllocColumnBindPB(PgColumn* col, PgExpr* expr) override;
+  LWPgsqlExpressionPB* AllocColumnBindConditionExprPB(PgColumn* col);
+  LWPgsqlExpressionPB* AllocIndexColumnBindPB(PgColumn* col);
 
   // Allocate protobuf for target.
-  LWPgsqlExpressionPB *AllocTargetPB() override;
-
-  // Allocate protobuf for a qual in the read request's where_clauses list.
-  LWPgsqlExpressionPB *AllocQualPB() override;
-
-  // Allocate protobuf for a column reference in the read request's col_refs list.
-  LWPgsqlColRefPB *AllocColRefPB() override;
-
-  // Clear the read request's col_refs list.
-  void ClearColRefPBs() override;
+  LWPgsqlExpressionPB* AllocTargetPB() override;
 
   // Allocate column expression.
-  LWPgsqlExpressionPB *AllocColumnAssignPB(PgColumn *col) override;
+  LWPgsqlExpressionPB* AllocColumnAssignPB(PgColumn* col) override;
 
   // Add column refs to protobuf read request.
   void SetColumnRefs();
@@ -138,29 +147,26 @@ class PgDmlRead : public PgDml {
   std::shared_ptr<LWPgsqlReadRequestPB> read_req_;
 
  private:
+  [[nodiscard]] bool ActualValueForIsForSecondaryIndexArg(
+      bool is_for_secondary_index) const;
+
+  [[nodiscard]] ArenaList<LWPgsqlColRefPB>& ColRefPBs() override;
+
   // Indicates that current operation reads concrete row by specifying row's DocKey.
-  bool IsConcreteRowRead() const;
+  [[nodiscard]] bool IsConcreteRowRead() const;
   Status ProcessEmptyPrimaryBinds();
-  bool IsAllPrimaryKeysBound(size_t num_range_components_in_expected);
-  bool CanBuildYbctidsFromPrimaryBinds();
-  Result<std::vector<std::string>> BuildYbctidsFromPrimaryBinds();
-  Status SubstitutePrimaryBindsWithYbctids(const PgExecParameters* exec_params);
-  Result<docdb::DocKey> EncodeRowKeyForBound(
-      YBCPgStatement handle, size_t n_col_values, PgExpr **col_values, bool for_lower_bound);
-  Status MoveBoundKeyInOperator(PgColumn* col, const LWPgsqlConditionPB& in_operator);
-  Result<LWQLValuePB*> GetBoundValue(
-      const PgColumn& col, const LWPgsqlExpressionPB& src) const;
-  Result<docdb::KeyEntryValue> BuildKeyColumnValue(
-      const PgColumn& col, const LWPgsqlExpressionPB& src, LWQLValuePB** dest);
-  Result<docdb::KeyEntryValue> BuildKeyColumnValue(
-      const PgColumn& col, const LWPgsqlExpressionPB& src);
+  [[nodiscard]] bool IsAllPrimaryKeysBound() const;
+  Result<std::unique_ptr<YbctidProvider>> BuildYbctidsFromPrimaryBinds();
+
+  Status SubstitutePrimaryBindsWithYbctids();
+  Result<dockv::DocKey> EncodeRowKeyForBound(
+      YbcPgStatement handle, size_t n_col_values, PgExpr** col_values, bool for_lower_bound);
+
+  Status InitDocOp(const YbcPgExecParameters* params);
 
   // Holds original doc_op_ object after call of the UpgradeDocOp method.
   // Required to prevent structures related to request from being freed.
   PgDocOp::SharedPtr original_doc_op_;
 };
 
-}  // namespace pggate
-}  // namespace yb
-
-#endif // YB_YQL_PGGATE_PG_DML_READ_H_
+}  // namespace yb::pggate

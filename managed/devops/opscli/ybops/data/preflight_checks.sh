@@ -19,9 +19,29 @@ yb_home_dir="/home/yugabyte"
 result_kvs=""
 YB_SUDO_PASS=""
 ports_to_check=""
+tmp_dir="/tmp"
 PROMETHEUS_FREE_SPACE_MB=100
 HOME_FREE_SPACE_MB=2048
+VM_MAX_MAP_COUNT=262144
 PYTHON_EXECUTABLES=('python3.6' 'python3' 'python3.7' 'python3.8' 'python')
+PYTHON_EXECUTABLE=""
+# Set python executable
+set_python_executable() {
+  for py_executable in "${PYTHON_EXECUTABLES[@]}"; do
+    if which "$py_executable" > /dev/null 2>&1; then
+      PYTHON_EXECUTABLE="$py_executable"
+      export PYTHON_EXECUTABLE
+      return
+    fi
+  done
+}
+set_python_executable
+LINUX_OS_NAME=""
+
+set_linux_os_name() {
+  LINUX_OS_NAME=$(awk -F= -v key="NAME" '$1==key {gsub(/"/, "", $2); print $2}'\
+  /etc/os-release 2>/dev/null)
+}
 
 preflight_provision_check() {
   # Check python is installed.
@@ -55,15 +75,20 @@ preflight_provision_check() {
     fi
     update_result_json "(Prometheus) No Pre-existing Node Exporter Running" "$no_node_exporter"
 
-    # Check prometheus files are writable.
     filepaths="/opt/prometheus /etc/prometheus /var/log/prometheus /var/run/prometheus \
-      /var/lib/prometheus /lib/systemd/system/node_exporter.service"
+      /var/lib/prometheus"
+    # Check prometheus files are writable.
+    if [[ $LINUX_OS_NAME = "SLES" ]]; then
+      filepaths="$filepaths /usr/lib/systemd/system/node_exporter.service"
+    else
+      filepaths="$filepaths /lib/systemd/system/node_exporter.service"
+    fi
     for path in $filepaths; do
       check_filepath "Prometheus" "$path" true
     done
 
     check_free_space "/opt/prometheus" $PROMETHEUS_FREE_SPACE_MB
-    check_free_space "/tmp" $PROMETHEUS_FREE_SPACE_MB # for downloading folder
+    check_free_space $tmp_dir $PROMETHEUS_FREE_SPACE_MB # for downloading folder
   fi
 
   # Check ulimit settings.
@@ -71,50 +96,7 @@ preflight_provision_check() {
   check_filepath "PAM Limits" $ulimit_filepath true
 
   # Check NTP synchronization
-  if [[ "$skip_ntp_check" = false ]]; then
-    ntp_status=$(timedatectl status)
-    ntp_check=true
-    enabled_regex='(NTP enabled: |NTP service: |Network time on: )([^'$'\n'']*)'
-    if [[ $ntp_status =~ $enabled_regex ]]; then
-      enabled_status="${BASH_REMATCH[2]// /}"
-      if [[ "$enabled_status" != "yes" ]] && [[ "$enabled_status" != "active" ]]; then
-        # Oracle8 has the line NTP service: n/a instead. Don't fail if this line exists
-        if [[ ! ("${BASH_REMATCH[1]}" == "NTP service: " \
-              && "${BASH_REMATCH[2]// /}" == "n/a") ]]; then
-          ntp_check=false
-        fi
-      fi
-    else
-      systemd_regex='systemd-timesyncd.service active:'
-      if [[ ! $ntp_status =~ $systemd_regex ]]; then # See PLAT-3373
-        ntp_check=false
-      fi
-    fi
-    synchro_regex='(NTP synchronized: |System clock synchronized: )([^'$'\n'']*)'
-    if [[ $ntp_status =~ $synchro_regex ]]; then
-      synchro_status="${BASH_REMATCH[2]// /}"
-      if [[ "$synchro_status" != "yes" ]]; then
-        ntp_check=false
-      fi
-    else
-      ntp_check=false
-    fi
-    # Check if one of chronyd, ntpd and systemd-timesyncd is running on the node
-    service_regex="Active: active \(running\)"
-    service_check=false
-    for ntp_service in chronyd ntp ntpd systemd-timesyncd; do
-      service_status=$(systemctl status $ntp_service)
-      if [[ $service_status =~ $service_regex ]]; then
-        service_check=true
-        break
-      fi
-    done
-    if $service_check && $ntp_check; then
-      update_result_json "NTP time synchronization set up" true
-    else
-      update_result_json "NTP time synchronization set up" false
-    fi
-  fi
+  check_ntp_service
 
   # Check mount points are writeable.
   IFS="," read -ra mount_points_arr <<< "$mount_points"
@@ -143,6 +125,15 @@ preflight_provision_check() {
   fi
 
   check_free_space "$yb_home_dir" $HOME_FREE_SPACE_MB
+
+  # Check Locale
+  result=$(locale -a | grep -q -E "en_US.utf8|en_US.UTF-8")
+  if [[ "$?" -eq 0 ]]; then
+    update_result_json "locale_present" true
+  else
+    update_result_json "locale_present" false
+  fi
+
 }
 
 preflight_configure_check() {
@@ -160,6 +151,55 @@ preflight_configure_check() {
 
   # Check home directory exists.
   check_filepath "Home Directory" "$yb_home_dir" false
+
+  # Check virtual memory max map limit.
+  vm_max_map_count=$(cat /proc/sys/vm/max_map_count 2> /dev/null)
+  test ${vm_max_map_count:-0} -ge $VM_MAX_MAP_COUNT
+  update_result_json_with_rc "vm_max_map_count" "$?"
+
+  # Check NTP synchronization
+  check_ntp_service
+}
+
+preflight_all_checks() {
+
+  # Check whether files in home directory are cleaned up if exists.
+  # Finds all files including the .yugabytedb folder and ignores other dot files, node-agent files.
+  yb_home_dir_clean=true
+  if [[ -e "$yb_home_dir" ]]; then
+    if [[ "$check_type" == "provision" ]]; then
+      files=$(sudo find "$yb_home_dir" -maxdepth 1 -mindepth 1  -name "bin" -o -name ".yugabytedb" -o -name "controller" -o -name "master" -o -name "tserver")
+    else
+      files=$(find "$yb_home_dir" -maxdepth 1 -mindepth 1  -name "bin" -o -name ".yugabytedb" -o -name "controller" -o -name "master" -o -name "tserver")
+    fi
+    if [[ -n "$files" ]]; then
+      yb_home_dir_clean=false
+    fi
+  fi
+  update_result_json "yb_home_dir_clean" "$yb_home_dir_clean"
+
+
+  # Check whether files in data directory are cleaned up.
+  data_dir_clean=true
+  processes=("tserver" "master" "controller")
+  IFS="," read -ra mount_points_arr <<< "$mount_points"
+  for path in "${mount_points_arr[@]}"; do
+    if [ -e "$path/pg_data" ]; then
+      data_dir_clean=false
+      break
+    fi
+    if [ -e "$path/ybc-data" ]; then
+      data_dir_clean=false
+      break
+    fi
+    for daemon in "${processes[@]}"; do
+      if [ -e "$path/yb-data/$daemon" ]; then
+        data_dir_clean=false
+        break
+      fi
+    done
+  done
+  update_result_json "data_dir_clean" "$data_dir_clean"
 }
 
 # Checks for an available python executable
@@ -202,6 +242,69 @@ check_free_space() {
   update_result_json_with_rc "$1 has free space of $required_mb MB $SPACE_STR" "$?"
 }
 
+check_ntp_service() {
+  if [[ "$skip_ntp_check" = false ]]; then
+    ntp_status=$(timedatectl status)
+    ntp_check=true
+    enabled_regex='(NTP enabled: |NTP service: |Network time on: )([^'$'\n'']*)'
+    if [[ $ntp_status =~ $enabled_regex ]]; then
+      enabled_status="${BASH_REMATCH[2]// /}"
+      if [[ "$enabled_status" != "yes" ]] && [[ "$enabled_status" != "active" ]]; then
+        # Oracle8 has the line NTP service: n/a instead. Don't fail if this line exists
+        if [[ ! ("${BASH_REMATCH[1]}" == "NTP service: " \
+              && "${BASH_REMATCH[2]// /}" == "n/a") ]]; then
+          ntp_check=false
+        fi
+      fi
+    else
+      systemd_regex='systemd-timesyncd.service active:'
+      if [[ ! $ntp_status =~ $systemd_regex ]]; then # See PLAT-3373
+        ntp_check=false
+      fi
+    fi
+    synchro_regex='(NTP synchronized: |System clock synchronized: )([^'$'\n'']*)'
+    if [[ $ntp_status =~ $synchro_regex ]]; then
+      synchro_status="${BASH_REMATCH[2]// /}"
+      if [[ "$synchro_status" != "yes" ]]; then
+        ntp_check=false
+      fi
+    else
+      ntp_check=false
+    fi
+    # Check if one of chronyd, ntpd and systemd-timesyncd is running on the node
+    service_regex="Active: active \(running\)"
+    service_check=false
+    skew_ms=500
+    for ntp_service in chronyd ntp ntpd systemd-timesyncd; do
+      service_status=$(systemctl status $ntp_service)
+      if [[ $service_status =~ $service_regex ]]; then
+        service_check=true
+        if [[ $ntp_service == "chronyd" ]]; then
+          chrony_tracking="$(chronyc tracking)"
+          skew=$(echo "${chrony_tracking}" | awk "/System time/ {print \$4}")
+          skew_ms=$("${PYTHON_EXECUTABLE}" -c "print(int(${skew} * 1000))")
+        elif [[ $ntp_service == "ntp" || $ntp_service == "ntpd" ]]; then
+          skew_ms=$(ntpq -p | awk '$1 ~ "^*" {print $9}')
+        elif [[ $ntp_service == "systemd-timesyncd" ]]; then
+          skew_ms=0
+        fi
+        break
+      fi
+    done
+    if $service_check && $ntp_check; then
+      update_result_json "NTP time synchronization set up" true
+    else
+      update_result_json "NTP time synchronization set up" false
+    fi
+    echo "Skew: $skew_ms ms"
+    if awk "BEGIN{exit !(${skew_ms} < 400)}"; then
+      update_result_json "ntp_skew" true
+    else
+      update_result_json "ntp_skew" false
+    fi
+  fi
+}
+
 update_result_json() {
   # Input: test_name, check_passed
   if [[ -z "$result_kvs" ]]; then
@@ -241,6 +344,8 @@ Options:
     Bash file containing the sudo password variable.
   --ports_to_check PORTS_TO_CHECK
     Comma-separated list of ports to check availability
+  --tmp_dir TMP_DIRECTORY
+    Tmp Directory on the specified node.
   --cleanup
     Deletes this script after being run. Allows `scp` commands to port over new preflight scripts.
   -h, --help
@@ -290,6 +395,10 @@ while [[ $# -gt 0 ]]; do
       yb_home_dir="$2"
       shift
     ;;
+    --tmp_dir)
+      tmp_dir="$2"
+      shift
+    ;;
     --sudo_pass_file)
       if [ -f $2 ]; then
         . $2
@@ -314,6 +423,8 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
+set_linux_os_name
+preflight_all_checks > /dev/null 2>&1
 if [[ "$check_type" == "provision" ]]; then
   preflight_provision_check >/dev/null 2>&1
 else

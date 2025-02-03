@@ -2,9 +2,8 @@
 title: YugabyteDB configuration reference
 headerTitle: Configuration
 linkTitle: Configuration
-description: Configuration reference for core database services, including yb-tserver, yb-master, and yugabyted.
-headcontent: Configuration of the core database services.
-image: /images/section_icons/sample-data/s_s1-sampledata-3x.png
+description: YugabyteDB configuration reference for core database services, including yb-tserver, yb-master, and yugabyted.
+headcontent: Configure core database services
 menu:
   stable:
     identifier: configuration
@@ -12,54 +11,47 @@ menu:
     weight: 2600
 type: indexpage
 ---
-<div class="row">
 
-   <div class="col-12 col-md-6 col-lg-12 col-xl-6">
-    <a class="section-link icon-offset" href="yb-tserver/">
-      <div class="head">
-        <img class="icon" src="/images/section_icons/reference/configuration/yb-tserver.png" aria-hidden="true" />
-        <div class="title">yb-tserver</div>
-      </div>
-      <div class="body">
-        Configure yb-tserver to store and manages data for client applications.
-      </div>
-    </a>
-  </div>
+## Server management
 
-  <div class="col-12 col-md-6 col-lg-12 col-xl-6">
-    <a class="section-link icon-offset" href="yb-master/">
-      <div class="head">
-        <img class="icon" src="/images/section_icons/reference/configuration/yb-master.png" aria-hidden="true" />
-        <div class="title">yb-master</div>
-      </div>
-      <div class="body">
-        Configure yb-master to manage cluster metadata, tablets, and coordination of cluster-wide operations.
-      </div>
-    </a>
-  </div>
+YugabyteDB uses a two-server architecture, with YB-TServers managing the data and YB-Masters managing the metadata. You can use the yb-tserver and yb-master binaries to start and configure the servers.
 
-  <div class="col-12 col-md-6 col-lg-12 col-xl-6">
-    <a class="section-link icon-offset" href="yugabyted/">
-      <div class="head">
-        <img class="icon" src="/images/section_icons/reference/configuration/yb-master.png" aria-hidden="true" />
-        <div class="title">yugabyted</div>
-      </div>
-      <div class="body">
-        Use the new yugabyted to develop and test local clusters.
-      </div>
-    </a>
-  </div>
+For simplified deployment, use the yugabyted utility. yugabyted acts as a parent server across the YB-TServer and YB-Masters servers.
 
-  <div class="col-12 col-md-6 col-lg-12 col-xl-6">
-    <a class="section-link icon-offset" href="default-ports/">
-      <div class="head">
-        <img class="icon" src="/images/section_icons/reference/configuration/yb-master.png" aria-hidden="true" />
-        <div class="title">Default ports</div>
-      </div>
-      <div class="body">
-        Default ports for APIs, RPC and admin web servers.
-      </div>
-    </a>
-  </div>
+{{<index/block>}}
+  {{<index/item
+      title="yb-tserver reference"
+      body="Configure YB-TServer servers to store and manage data for client applications."
+      href="yb-tserver/"
+      icon="/images/section_icons/reference/configuration/yb-tserver.png">}}
 
-</div>
+  {{<index/item
+      title="yb-master reference"
+      body="Configure YB-Master servers to manage cluster metadata, tablets, and coordination of cluster-wide operations."
+      href="yb-master/"
+      icon="/images/section_icons/reference/configuration/yb-master.png">}}
+
+  {{<index/item
+      title="yugabyted reference"
+      body="Use the yugabyted utility to launch and manage universes."
+      href="yugabyted/"
+      icon="/images/section_icons/deploy/manual-deployment.png">}}
+
+{{</index/block>}}
+
+## Operating system, ports, and databases
+
+{{<index/block>}}
+  {{<index/item
+      title="Supported operating systems"
+      body="Operating systems for deploying YugabyteDB and YugabyteDB Anywhere."
+      href="operating-systems/"
+      icon="/images/section_icons/deploy/enterprise/administer.png">}}
+
+  {{<index/item
+      title="Default ports"
+      body="Default ports for APIs, RPCs, and admin web servers."
+      href="default-ports/"
+      icon="/images/section_icons/deploy/enterprise/administer.png">}}
+
+{{</index/block>}}

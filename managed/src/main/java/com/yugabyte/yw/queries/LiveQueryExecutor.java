@@ -14,7 +14,6 @@ import java.util.UUID;
 import java.util.concurrent.Callable;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
-import play.api.Play;
 import play.libs.Json;
 import play.libs.ws.WSClient;
 
@@ -69,7 +68,8 @@ public class LiveQueryExecutor implements Callable<JsonNode> {
     if (response.has("connections")) {
       for (JsonNode objNode : response.get("connections")) {
         if (objNode.has("backend_type")
-            && objNode.get("backend_type").asText().equalsIgnoreCase("client backend")
+            && (objNode.get("backend_type").asText().equalsIgnoreCase("client backend")
+                || objNode.get("backend_type").asText().startsWith("yb-conn-mgr"))
             && objNode.has("backend_status")
             && !objNode.get("backend_status").asText().equalsIgnoreCase("idle")) {
           try {

@@ -32,15 +32,25 @@
 
 #include "yb/util/test_util.h"
 
-#include <glog/logging.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+
+#include <cstdlib>
+
 #include <gtest/gtest-spi.h>
 
 #include "yb/gutil/casts.h"
+#include "yb/gutil/strings/join.h"
 #include "yb/gutil/strings/strcat.h"
 #include "yb/gutil/strings/util.h"
 #include "yb/gutil/walltime.h"
 
+#include "yb/util/crash_point.h"
+#include "yb/util/curl_util.h"
 #include "yb/util/env.h"
+#include "yb/util/env_util.h"
+#include "yb/util/flags.h"
 #include "yb/util/logging.h"
 #include "yb/util/path_util.h"
 #include "yb/util/spinlock_profiling.h"
@@ -49,22 +59,47 @@
 #include "yb/util/thread.h"
 #include "yb/util/debug/trace_event.h"
 
-DEFINE_string(test_leave_files, "on_failure",
+DEFINE_NON_RUNTIME_string(test_leave_files, "on_failure",
               "Whether to leave test files around after the test run. "
               " Valid values are 'always', 'on_failure', or 'never'");
 
-DEFINE_int32(test_random_seed, 0, "Random seed to use for randomized tests");
+DEFINE_NON_RUNTIME_int32(test_random_seed, 0, "Random seed to use for randomized tests");
 DECLARE_int64(memory_limit_hard_bytes);
 DECLARE_bool(enable_tracing);
+DECLARE_bool(TEST_enable_sync_points);
 DECLARE_bool(TEST_running_test);
 DECLARE_bool(never_fsync);
 DECLARE_string(vmodule);
+DEFINE_test_flag(bool, use_yb_controller, false, "Use YBController in tests.");
 
 using std::string;
 using strings::Substitute;
 using gflags::FlagSaver;
 
 namespace yb {
+
+namespace {
+
+class YBTestEnvironment : public ::testing::Environment {
+ public:
+  void SetUp() override {
+  }
+
+  void TearDown() override {
+  }
+};
+
+class YBTestEnvironmentRegisterer {
+ public:
+  YBTestEnvironmentRegisterer() {
+    ::testing::AddGlobalTestEnvironment(new YBTestEnvironment());
+  }
+
+};
+
+YBTestEnvironmentRegisterer yb_test_environment_registerer;
+
+}  // namespace
 
 static const char* const kSlowTestsEnvVariable = "YB_ALLOW_SLOW_TESTS";
 
@@ -75,8 +110,8 @@ static const uint64 kTestBeganAtMicros = Env::Default()->NowMicros();
 ///////////////////////////////////////////////////
 
 YBTest::YBTest()
-  : env_(new EnvWrapper(Env::Default())),
-    test_dir_(GetTestDataDirectory()) {
+    : env_(new EnvWrapper(Env::Default())),
+      test_dir_(GetTestDataDirectory()) {
   InitThreading();
   debug::EnableTraceEvents();
 }
@@ -106,12 +141,15 @@ YBTest::~YBTest() {
 }
 
 void YBTest::SetUp() {
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_running_test) = true;
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_enable_sync_points) = true;
+
   InitSpinLockContentionProfiling();
   InitGoogleLoggingSafeBasic("yb_test");
-  FLAGS_enable_tracing = true;
-  FLAGS_memory_limit_hard_bytes = 8 * 1024 * 1024 * 1024L;
-  FLAGS_TEST_running_test = true;
-  FLAGS_never_fsync = true;
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_enable_tracing) = true;
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_memory_limit_hard_bytes) = 8 * 1024 * 1024 * 1024L;
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_never_fsync) = true;
+
   for (const char* env_var_name : {
       "ASAN_OPTIONS",
       "LSAN_OPTIONS",
@@ -123,6 +161,8 @@ void YBTest::SetUp() {
       LOG(INFO) << "Environment variable " << env_var_name << ": " << value;
     }
   }
+
+  global_curl_ = std::make_unique<CurlGlobalInitializer>();
 }
 
 string YBTest::GetTestPath(const string& relative_path) {
@@ -163,14 +203,6 @@ void OverrideFlagForSlowTests(const std::string& flag_name,
   }
   google::SetCommandLineOptionWithMode(flag_name.c_str(), new_value.c_str(),
                                        google::SET_FLAG_IF_DEFAULT);
-}
-
-void EnableVerboseLoggingForModule(const std::string& module, int level) {
-  if (!FLAGS_vmodule.empty()) {
-    FLAGS_vmodule += Format(",$0=$1", module, level);
-  } else {
-    FLAGS_vmodule = Format("$0=$1", module, level);
-  }
 }
 
 int SeedRandom() {
@@ -280,6 +312,55 @@ string GetToolPath(const string& rel_path, const string& tool_name) {
   return tool_path;
 }
 
+bool UseYbController() {
+  bool value = false;
+  if (FLAGS_TEST_use_yb_controller) {
+    value = true;
+  }
+  const char* env = getenv("YB_TEST_YB_CONTROLLER");
+  if (env) {
+    auto s = string(env);
+    if (s == "1" || s == "true") {
+      value = true;
+    }
+  }
+  LOG(INFO) << "YB_TEST_YB_CONTROLLER = " << value;
+  return value;
+}
+
+bool DisableMiniClusterBackupTests() {
+  const char* env = getenv("YB_DISABLE_MINICLUSTER_BACKUP_TESTS");
+  bool value = false;
+  if (env) {
+    auto s = string(env);
+    if (s == "1" || s == "true") {
+      value = true;
+    }
+  }
+  LOG(INFO) << "YB_DISABLE_MINICLUSTER_BACKUP_TESTS = " << value;
+  return value;
+}
+
+void AddExtraFlagsFromEnvVar(const char* env_var_name, std::vector<std::string>* args_dest) {
+  const char* extra_daemon_flags_env_var_value = getenv(env_var_name);
+  if (extra_daemon_flags_env_var_value) {
+    LOG(INFO) << "Setting extra daemon flags as specified by env var " << env_var_name << ": "
+              << extra_daemon_flags_env_var_value;
+    // TODO: this has an issue with handling quoted arguments with embedded spaces.
+    std::istringstream iss(extra_daemon_flags_env_var_value);
+    copy(std::istream_iterator<string>(iss),
+         std::istream_iterator<string>(),
+         std::back_inserter(*args_dest));
+  } else {
+    LOG(INFO) << "Env var " << env_var_name << " not specified, not setting extra flags from it";
+  }
+}
+
+string GetCertsDir() {
+  const auto sub_dir = "test_certs";
+  return JoinPathSegments(env_util::GetRootDir(sub_dir), sub_dir);
+}
+
 int CalcNumTablets(size_t num_tablet_servers) {
 #ifdef NDEBUG
   return 0;  // Will use the default.
@@ -288,6 +369,86 @@ int CalcNumTablets(size_t num_tablet_servers) {
 #else
   return narrow_cast<int>(num_tablet_servers * 3);
 #endif
+}
+
+Status CorruptFile(
+    const std::string& file_path, int64_t offset, size_t bytes_to_corrupt,
+    CorruptionType corruption_type) {
+  if (bytes_to_corrupt == 0) {
+    LOG(INFO) << "Not corrupting file " << file_path << " since bytes_to_corrupt == 0";
+    return Status::OK();
+  }
+  struct stat sbuf;
+  if (stat(file_path.c_str(), &sbuf) != 0) {
+    const char* msg = strerror(errno);
+    return STATUS_FORMAT(IOError, "$0: $1", msg, file_path);
+  }
+
+  if (offset < 0) {
+    offset = std::max<int64_t>(sbuf.st_size + offset, 0);
+  }
+  offset = std::min<int64_t>(offset, sbuf.st_size);
+  if (std::cmp_greater(offset + bytes_to_corrupt, sbuf.st_size)) {
+    bytes_to_corrupt = sbuf.st_size - offset;
+  }
+
+  LOG(INFO) << "Corrupting file " << file_path << ", " << bytes_to_corrupt << " bytes at offset "
+            << offset << ", file size: " << sbuf.st_size;
+
+  RWFileOptions opts;
+  opts.mode = Env::CreateMode::OPEN_EXISTING;
+  opts.sync_on_close = true;
+  std::unique_ptr<RWFile> file;
+  RETURN_NOT_OK(Env::Default()->NewRWFile(opts, file_path, &file));
+  std::unique_ptr<uint8_t[]> scratch(new uint8_t[bytes_to_corrupt]);
+  Slice data_read;
+  RETURN_NOT_OK(file->Read(offset, bytes_to_corrupt, &data_read, scratch.get()));
+  SCHECK_EQ(data_read.size(), bytes_to_corrupt, IOError, "Unexpected number of bytes read");
+
+  for (uint8_t* p = data_read.mutable_data(); p < data_read.end(); ++p) {
+    switch (corruption_type) {
+      case CorruptionType::kZero:
+        *p = 0;
+        continue;
+      case CorruptionType::kXor55:
+        *p ^= 0x55;
+        continue;
+    }
+    FATAL_INVALID_ENUM_VALUE(CorruptionType, corruption_type);
+  }
+
+  RETURN_NOT_OK(file->Write(offset, data_read));
+  RETURN_NOT_OK(file->Sync());
+  return file->Close();
+}
+
+Status ForkAndRunToCompletion(const std::function<void(void)>& child,
+                              const std::function<void(void)>& parent) {
+  int pid = fork();
+  if (pid == 0) {
+    child();
+    std::exit(testing::Test::HasFailure());
+  } else {
+    if (parent) {
+      parent();
+    }
+    int wstatus;
+    waitpid(pid, &wstatus, 0 /* options */);
+    if (WEXITSTATUS(wstatus) != 0) {
+      return STATUS(RuntimeError, "Child process has test failures");
+    }
+    return Status::OK();
+  }
+}
+
+Status ForkAndRunToCrashPoint(const std::function<void(void)>& child,
+                              const std::function<void(void)>& parent,
+                              std::string_view crash_point) {
+  return ForkAndRunToCompletion([&child, crash_point] {
+    SetTestCrashPoint(crash_point);
+    child();
+    FAIL() << "Child process did not reach crash point";
+  }, parent);
 }
 
 } // namespace yb

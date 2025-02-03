@@ -40,16 +40,16 @@
 #include <string>
 #include <vector>
 
+#include "yb/util/callsite_profiling.h"
 #include "yb/util/env.h"
 #include "yb/util/errno.h"
-#include "yb/util/status.h"
 #include "yb/util/status_log.h"
+#include "yb/util/status.h"
 #include "yb/util/subprocess.h"
 #include "yb/util/thread.h"
 
 namespace yb {
 
-using std::shared_ptr;
 using std::string;
 using std::vector;
 using strings::Substitute;
@@ -68,7 +68,7 @@ void PstackWatcher::Shutdown() {
   {
     MutexLock guard(lock_);
     running_ = false;
-    cond_.Broadcast();
+    YB_PROFILE(cond_.Broadcast());
   }
   if (thread_) {
     CHECK_OK(ThreadJoiner(thread_.get()).Join());
@@ -96,7 +96,7 @@ void PstackWatcher::Run() {
 
   WARN_NOT_OK(DumpStacks(DUMP_FULL), "Unable to print pstack from watcher");
   running_ = false;
-  cond_.Broadcast();
+  YB_PROFILE(cond_.Broadcast());
 }
 
 Status PstackWatcher::HasProgram(const char* progname) {

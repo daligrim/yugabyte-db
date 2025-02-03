@@ -11,10 +11,10 @@
 // under the License.
 //
 
-#ifndef YB_COMMON_COMMON_TYPES_UTIL_H
-#define YB_COMMON_COMMON_TYPES_UTIL_H
+#pragma once
 
 #include "yb/common/common_types.pb.h"
+#include "yb/util/strongly_typed_uuid.h"
 
 namespace yb {
 
@@ -29,6 +29,6 @@ const char* DatabaseTypeName(YQLDatabase db);
 // Returns the db type from its string name.
 YQLDatabase DatabaseTypeByName(const std::string& db_type_name);
 
-} // namespace yb
+YB_STRONGLY_TYPED_UUID_DECL(UniverseUuid);
 
-#endif  // YB_COMMON_COMMON_TYPES_UTIL_H
+} // namespace yb

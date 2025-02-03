@@ -13,16 +13,15 @@
 //
 //--------------------------------------------------------------------------------------------------
 
-#ifndef YB_YQL_PGGATE_TEST_PGGATE_TEST_H_
-#define YB_YQL_PGGATE_TEST_PGGATE_TEST_H_
+#pragma once
 
 #include <dirent.h>
 #include <stdint.h>
 
 #include "pg_type_d.h" // NOLINT
 
-#include "yb/common/value.pb.h"
-#include "yb/common/ybc_util.h"
+#include "yb/common/common_fwd.h"
+#include "yb/common/value.messages.h"
 
 #include "yb/integration-tests/external_mini_cluster.h"
 
@@ -31,6 +30,7 @@
 #include "yb/util/shared_mem.h"
 #include "yb/util/test_util.h"
 
+#include "yb/yql/pggate/util/ybc_util.h"
 #include "yb/yql/pggate/ybc_pg_typedefs.h"
 
 // This file comes from this directory:
@@ -51,47 +51,55 @@ class PggateTest : public YBTest {
   static constexpr int kNumOfTablets = 3;
   static constexpr const char* kDefaultDatabase = "pggate_test_database";
   static constexpr const char* kDefaultSchema = "pggate_test_schema";
-  static constexpr YBCPgOid kDefaultDatabaseOid = 1;
+  static constexpr YbcPgOid kDefaultDatabaseOid = 1;
+  static constexpr const char* kDefaultTemplateDatabaseName = "template1";
 
   PggateTest();
   virtual ~PggateTest();
 
   //------------------------------------------------------------------------------------------------
-  static void CheckYBCStatus(YBCStatus status, const char* file_name, int line_number);
+  static void CheckYBCStatus(YbcStatus status, const char* file_name, int line_number);
 
   //------------------------------------------------------------------------------------------------
   // Test start and cleanup functions.
   void SetUp() override;
   void TearDown() override;
 
-  // Init cluster for each test case.
-  Status Init(const char *test_name, int num_tablet_servers = kNumOfTablets);
+  // Init cluster for each test case. If 'replication_factor' is not explicitly passed in, it
+  // defaults to the number of master nodes.
+  Status Init(const char* test_name,
+              int num_tablet_servers = kNumOfTablets,
+              int replication_factor = 0,
+              bool should_create_db = true);
 
-  // Create simulated cluster.
-  Status CreateCluster(int num_tablet_servers);
+  // Create simulated cluster. If 'replication_factor' is not explicitly passed in, it defaults to
+  // the number of master nodes.
+  Status CreateCluster(int num_tablet_servers, int replication_factor = 0);
 
   //------------------------------------------------------------------------------------------------
-  // Setup the database for testing.
-  void SetupDB(const string& db_name = kDefaultDatabase, YBCPgOid db_oid = kDefaultDatabaseOid);
-  void CreateDB(const string& db_name = kDefaultDatabase, YBCPgOid db_oid = kDefaultDatabaseOid);
-  void ConnectDB(const string& db_name = kDefaultDatabase);
+
+  virtual void CustomizeExternalMiniCluster(ExternalMiniClusterOptions* opts) {}
 
  protected:
   void BeginDDLTransaction();
   void CommitDDLTransaction();
   void BeginTransaction();
   void CommitTransaction();
+  void ExecCreateTableTransaction(YbcPgStatement pg_stmt);
 
   //------------------------------------------------------------------------------------------------
   // Simulated cluster.
   std::shared_ptr<ExternalMiniCluster> cluster_;
   tserver::TServerSharedObject tserver_shared_object_;
+
+ private:
+  void CreateDB();
 };
 
 //--------------------------------------------------------------------------------------------------
 // Test type table and other variables.
 //--------------------------------------------------------------------------------------------------
-void YBCTestGetTypeTable(const YBCPgTypeEntity **type_table, int *count);
+YbcPgTypeEntities YBCTestGetTypeTable();
 
 //--------------------------------------------------------------------------------------------------
 // Test API
@@ -102,34 +110,32 @@ typedef uint64_t Datum;
 void *PggateTestAlloc(size_t bytes);
 
 // Add column.
-YBCStatus YBCTestCreateTableAddColumn(YBCPgStatement handle, const char *attr_name, int attr_num,
+YbcStatus YBCTestCreateTableAddColumn(YbcPgStatement handle, const char *attr_name, int attr_num,
                                       DataType yb_type, bool is_hash, bool is_range);
 
 // Column ref expression.
-YBCStatus YBCTestNewColumnRef(YBCPgStatement stmt, int attr_num, DataType yb_type,
-                              YBCPgExpr *expr_handle);
+YbcStatus YBCTestNewColumnRef(YbcPgStatement stmt, int attr_num, DataType yb_type,
+                              YbcPgExpr *expr_handle);
 
 // Constant expressions.
-YBCStatus YBCTestNewConstantBool(YBCPgStatement stmt, bool value, bool is_null,
-                                 YBCPgExpr *expr_handle);
-YBCStatus YBCTestNewConstantInt1(YBCPgStatement stmt, int8_t value, bool is_null,
-                                 YBCPgExpr *expr_handle);
-YBCStatus YBCTestNewConstantInt2(YBCPgStatement stmt, int16_t value, bool is_null,
-                                 YBCPgExpr *expr_handle);
-YBCStatus YBCTestNewConstantInt4(YBCPgStatement stmt, int32_t value, bool is_null,
-                                 YBCPgExpr *expr_handle);
-YBCStatus YBCTestNewConstantInt8(YBCPgStatement stmt, int64_t value, bool is_null,
-                                 YBCPgExpr *expr_handle);
-YBCStatus YBCTestNewConstantInt8Op(YBCPgStatement stmt, int64_t value, bool is_null,
-                                 YBCPgExpr *expr_handle, bool is_gt);
-YBCStatus YBCTestNewConstantFloat4(YBCPgStatement stmt, float value, bool is_null,
-                                   YBCPgExpr *expr_handle);
-YBCStatus YBCTestNewConstantFloat8(YBCPgStatement stmt, double value, bool is_null,
-                                   YBCPgExpr *expr_handle);
-YBCStatus YBCTestNewConstantText(YBCPgStatement stmt, const char *value, bool is_null,
-                                 YBCPgExpr *expr_handle);
+YbcStatus YBCTestNewConstantBool(YbcPgStatement stmt, bool value, bool is_null,
+                                 YbcPgExpr *expr_handle);
+YbcStatus YBCTestNewConstantInt1(YbcPgStatement stmt, int8_t value, bool is_null,
+                                 YbcPgExpr *expr_handle);
+YbcStatus YBCTestNewConstantInt2(YbcPgStatement stmt, int16_t value, bool is_null,
+                                 YbcPgExpr *expr_handle);
+YbcStatus YBCTestNewConstantInt4(YbcPgStatement stmt, int32_t value, bool is_null,
+                                 YbcPgExpr *expr_handle);
+YbcStatus YBCTestNewConstantInt8(YbcPgStatement stmt, int64_t value, bool is_null,
+                                 YbcPgExpr *expr_handle);
+YbcStatus YBCTestNewConstantInt8Op(YbcPgStatement stmt, int64_t value, bool is_null,
+                                 YbcPgExpr *expr_handle, bool is_gt);
+YbcStatus YBCTestNewConstantFloat4(YbcPgStatement stmt, float value, bool is_null,
+                                   YbcPgExpr *expr_handle);
+YbcStatus YBCTestNewConstantFloat8(YbcPgStatement stmt, double value, bool is_null,
+                                   YbcPgExpr *expr_handle);
+YbcStatus YBCTestNewConstantText(YbcPgStatement stmt, const char *value, bool is_null,
+                                 YbcPgExpr *expr_handle);
 
 }  // namespace pggate
 }  // namespace yb
-
-#endif // YB_YQL_PGGATE_TEST_PGGATE_TEST_H_

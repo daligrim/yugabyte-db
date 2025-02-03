@@ -1,6 +1,6 @@
 // Copyright (c) YugaByte, Inc.
 
-import React, { Component } from 'react';
+import { Component } from 'react';
 import PropTypes from 'prop-types';
 import { Row, Col } from 'react-bootstrap';
 import { sortBy } from 'lodash';
@@ -107,7 +107,7 @@ export default class RegionMap extends Component {
         zoomControl={false}
         className="yb-region-map"
         minZoom={1}
-        maxZoom={5}
+        maxZoom={3}
         touchZoom={false}
         scrollWheelZoom={false}
         doubleClickZoom={false}

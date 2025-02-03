@@ -16,8 +16,8 @@
 #include "yb/common/transaction_error.h"
 
 #include "yb/docdb/docdb.pb.h"
-#include "yb/docdb/key_bytes.h"
-#include "yb/docdb/value_type.h"
+#include "yb/dockv/key_bytes.h"
+#include "yb/dockv/value_type.h"
 
 #include "yb/master/master_backup.pb.h"
 #include "yb/master/master_error.h"
@@ -27,40 +27,25 @@
 #include "yb/tablet/tablet_snapshots.h"
 
 #include "yb/tserver/backup.pb.h"
+#include "yb/tserver/tserver_error.h"
 
 #include "yb/util/atomic.h"
-#include "yb/util/flag_tags.h"
+#include "yb/util/flags.h"
 #include "yb/util/pb_util.h"
 #include "yb/util/result.h"
 
 using namespace std::literals;
 
-DEFINE_uint64(snapshot_coordinator_cleanup_delay_ms, 30000,
+DEFINE_UNKNOWN_uint64(snapshot_coordinator_cleanup_delay_ms, 30000,
               "Delay for snapshot cleanup after deletion.");
 
-DEFINE_int64(max_concurrent_snapshot_rpcs, -1,
-             "Maximum number of tablet snapshot RPCs that can be outstanding. "
-             "Only used if its value is >= 0. If its value is 0 then it means that "
-             "INT_MAX number of snapshot rpcs can be concurrent. "
-             "If its value is < 0 then the max_concurrent_snapshot_rpcs_per_tserver gflag and "
-             "the number of TServers in the primary cluster are used to determine "
-             "the number of maximum number of tablet snapshot RPCs that can be outstanding.");
-TAG_FLAG(max_concurrent_snapshot_rpcs, runtime);
+DEFINE_test_flag(bool, treat_hours_as_milliseconds_for_snapshot_expiry, false,
+    "Test only flag to expire snapshots after x milliseconds instead of x hours. Used "
+    "to speed up tests");
 
-DEFINE_int64(max_concurrent_snapshot_rpcs_per_tserver, 1,
-             "Maximum number of tablet snapshot RPCs per tserver that can be outstanding. "
-             "Only used if the value of the gflag max_concurrent_snapshot_rpcs is < 0. "
-             "When used it is multiplied with the number of TServers in the active cluster "
-             "(not read-replicas) to obtain the total maximum concurrent snapshot RPCs. If "
-             "the cluster config is not found and we are not able to determine the number of "
-             "live tservers then the total maximum concurrent snapshot RPCs is just the "
-             "value of this flag.");
-TAG_FLAG(max_concurrent_snapshot_rpcs_per_tserver, runtime);
+namespace yb::master {
 
-namespace yb {
-namespace master {
-
-Result<docdb::KeyBytes> EncodedSnapshotKey(
+Result<dockv::KeyBytes> EncodedSnapshotKey(
     const TxnSnapshotId& id, SnapshotCoordinatorContext* context) {
   return EncodedKey(SysRowEntryType::SNAPSHOT, id.AsSlice(), context);
 }
@@ -86,10 +71,14 @@ SnapshotState::SnapshotState(
       id_(id), snapshot_hybrid_time_(request.snapshot_hybrid_time()),
       previous_snapshot_hybrid_time_(HybridTime::FromPB(request.previous_snapshot_hybrid_time())),
       schedule_id_(TryFullyDecodeSnapshotScheduleId(request.schedule_id())), version_(1),
-      throttler_(throttle_limit) {
+      throttler_(throttle_limit),
+      imported_(request.imported()) {
   InitTabletIds(request.tablet_id(),
                 request.imported() ? SysSnapshotEntryPB::COMPLETE : SysSnapshotEntryPB::CREATING);
   request.extra_data().UnpackTo(&entries_);
+  if (request.retention_duration_hours()) {
+    retention_duration_hours_ = request.retention_duration_hours();
+  }
 }
 
 SnapshotState::SnapshotState(
@@ -100,9 +89,12 @@ SnapshotState::SnapshotState(
       id_(id), snapshot_hybrid_time_(entry.snapshot_hybrid_time()),
       previous_snapshot_hybrid_time_(HybridTime::FromPB(entry.previous_snapshot_hybrid_time())),
       schedule_id_(TryFullyDecodeSnapshotScheduleId(entry.schedule_id())),
-      version_(entry.version()) {
+      version_(entry.version()), imported_(entry.imported()) {
   InitTablets(entry.tablet_snapshots());
   *entries_.mutable_entries() = entry.entries();
+  if (entry.has_retention_duration_hours()) {
+    retention_duration_hours_ = entry.retention_duration_hours();
+  }
 }
 
 std::string SnapshotState::ToString() const {
@@ -114,14 +106,14 @@ std::string SnapshotState::ToString() const {
 }
 
 Status SnapshotState::ToPB(
-    SnapshotInfoPB* out, ListSnapshotsDetailOptionsPB options) {
+    SnapshotInfoPB* out, const ListSnapshotsDetailOptionsPB& options) const {
   out->set_id(id_.data(), id_.size());
   return ToEntryPB(out->mutable_entry(), ForClient::kTrue, options);
 }
 
 Status SnapshotState::ToEntryPB(
     SysSnapshotEntryPB* out, ForClient for_client,
-    ListSnapshotsDetailOptionsPB options) {
+    const ListSnapshotsDetailOptionsPB& options) const {
   out->set_state(for_client ? VERIFY_RESULT(AggregatedState()) : initial_state());
   out->set_snapshot_hybrid_time(snapshot_hybrid_time_.ToUint64());
   if (previous_snapshot_hybrid_time_) {
@@ -142,7 +134,12 @@ Status SnapshotState::ToEntryPB(
     out->set_schedule_id(schedule_id_.data(), schedule_id_.size());
   }
 
+  if (retention_duration_hours_) {
+    out->set_retention_duration_hours(*retention_duration_hours_);
+  }
+
   out->set_version(version_);
+  out->set_imported(imported_);
 
   return Status::OK();
 }
@@ -153,7 +150,7 @@ Status SnapshotState::StoreToWriteBatch(docdb::KeyValueWriteBatchPB* out) {
   auto pair = out->add_write_pairs();
   pair->set_key(encoded_key.AsSlice().cdata(), encoded_key.size());
   faststring value;
-  value.push_back(docdb::ValueEntryTypeAsChar::kString);
+  value.push_back(dockv::ValueEntryTypeAsChar::kString);
   SysSnapshotEntryPB entry;
   RETURN_NOT_OK(ToEntryPB(&entry, ForClient::kFalse, ListSnapshotsDetailOptionsPB()));
   RETURN_NOT_OK(pb_util::AppendToString(entry, &value));
@@ -175,13 +172,19 @@ Status SnapshotState::TryStartDelete() {
   return Status::OK();
 }
 
+bool SnapshotState::delete_started() const {
+  return delete_started_;
+}
+
 void SnapshotState::DeleteAborted(const Status& status) {
   delete_started_ = false;
 }
 
 void SnapshotState::PrepareOperations(TabletSnapshotOperations* out) {
-  DoPrepareOperations([this, out](const TabletData& tablet) -> bool {
+  DoPrepareOperations([this, out](const TabletData& tablet, int64_t serial_no) -> bool {
     if (Throttler().Throttle()) {
+      VLOG_WITH_PREFIX(4)
+          << "Skip operation " << initial_state() << " for " << tablet.id << " because of throttle";
       return false;
     }
     out->push_back(TabletSnapshotOperation {
@@ -190,7 +193,9 @@ void SnapshotState::PrepareOperations(TabletSnapshotOperations* out) {
       .snapshot_id = id_,
       .state = initial_state(),
       .snapshot_hybrid_time = snapshot_hybrid_time_,
+      .serial_no = serial_no,
     });
+    VLOG_WITH_PREFIX(4) << "Add operation: " << out->back().ToString();
     return true;
   });
 }
@@ -206,16 +211,22 @@ bool SnapshotState::NeedCleanup() const {
          !cleanup_tracker_.Started();
 }
 
-bool SnapshotState::IsTerminalFailure(const Status& status) {
+std::optional<SysSnapshotEntryPB::State> SnapshotState::GetTerminalStateForStatus(
+    const Status& status) {
   // Table was removed.
   if (status.IsExpired()) {
-    return true;
+    return SysSnapshotEntryPB::FAILED;
   }
   // Would not be able to create snapshot at specific time, since history was garbage collected.
   if (TransactionError(status) == TransactionErrorCode::kSnapshotTooOld) {
-    return true;
+    return SysSnapshotEntryPB::FAILED;
   }
-  return false;
+  // Trying to delete a snapshot of an already deleted tablet.
+  if (tserver::TabletServerError(status) == tserver::TabletServerErrorPB::TABLET_NOT_FOUND &&
+      initial_state() == SysSnapshotEntryPB::DELETING) {
+    return SysSnapshotEntryPB::DELETED;
+  }
+  return std::nullopt;
 }
 
 bool SnapshotState::ShouldUpdate(const SnapshotState& other) const {
@@ -224,6 +235,10 @@ bool SnapshotState::ShouldUpdate(const SnapshotState& other) const {
   // If we have several updates for single snapshot, they are loaded in chronological order.
   // So latest update should be picked.
   return version() < other_version;
+}
+
+Result<bool> SnapshotState::Complete() const {
+  return VERIFY_RESULT(AggregatedState()) == SysSnapshotEntryPB::COMPLETE;
 }
 
 Result<tablet::CreateSnapshotData> SnapshotState::SysCatalogSnapshotData(
@@ -253,5 +268,33 @@ Status SnapshotState::CheckDoneStatus(const Status& status) {
   return status;
 }
 
-} // namespace master
-} // namespace yb
+bool SnapshotState::HasExpired(HybridTime now) const {
+  if (schedule_id_ || !retention_duration_hours_ ||
+      *retention_duration_hours_ < 0 || !snapshot_hybrid_time_) {
+    return false;
+  }
+  auto delta = FLAGS_TEST_treat_hours_as_milliseconds_for_snapshot_expiry ?
+      MonoDelta::FromMilliseconds(*retention_duration_hours_) :
+      MonoDelta::FromHours(*retention_duration_hours_);
+  HybridTime expiry_time = snapshot_hybrid_time_.AddDelta(delta);
+  return now > expiry_time;
+}
+
+size_t SnapshotState::ResetRunning() {
+  auto result = StateWithTablets::ResetRunning();
+  for (size_t i = 0; i != result; ++i) {
+    Throttler().RemoveOutstandingTask();
+  }
+  return result;
+}
+
+ListSnapshotsDetailOptionsPB ListSnapshotsDetailOptionsFactory::CreateWithNoDetails() {
+  auto result = ListSnapshotsDetailOptionsPB();
+  result.set_show_namespace_details(false);
+  result.set_show_udtype_details(false);
+  result.set_show_table_details(false);
+  result.set_show_tablet_details(false);
+  return result;
+}
+
+} // namespace yb::master

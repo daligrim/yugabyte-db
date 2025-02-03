@@ -4,7 +4,7 @@ headerTitle: REASSIGN OWNED
 linkTitle: REASSIGN OWNED
 description: Use the REASSIGN OWNED statement to change the ownership of database objects owned by any of the "old_roles" to "new_role".
 menu:
-  stable:
+  stable_api:
     identifier: dcl_reassign_owned
     parent: statements
 type: docs
@@ -16,29 +16,10 @@ Use the `REASSIGN OWNED` statement to change the ownership of database objects o
 
 ## Syntax
 
-<ul class="nav nav-tabs nav-tabs-yb">
-  <li >
-    <a href="#grammar" class="nav-link active" id="grammar-tab" data-toggle="tab" role="tab" aria-controls="grammar" aria-selected="true">
-      <i class="fas fa-file-alt" aria-hidden="true"></i>
-      Grammar
-    </a>
-  </li>
-  <li>
-    <a href="#diagram" class="nav-link" id="diagram-tab" data-toggle="tab" role="tab" aria-controls="diagram" aria-selected="false">
-      <i class="fas fa-project-diagram" aria-hidden="true"></i>
-      Diagram
-    </a>
-  </li>
-</ul>
-
-<div class="tab-content">
-  <div id="grammar" class="tab-pane fade show active" role="tabpanel" aria-labelledby="grammar-tab">
-  {{% includeMarkdown "../../syntax_resources/the-sql-language/statements/reassign_owned,role_specification.grammar.md" %}}
-  </div>
-  <div id="diagram" class="tab-pane fade" role="tabpanel" aria-labelledby="diagram-tab">
-  {{% includeMarkdown "../../syntax_resources/the-sql-language/statements/reassign_owned,role_specification.diagram.md" %}}
-  </div>
-</div>
+{{%ebnf%}}
+  reassign_owned,
+  role_specification
+{{%/ebnf%}}
 
 ## Semantics
 

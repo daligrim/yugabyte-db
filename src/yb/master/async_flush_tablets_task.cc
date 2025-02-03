@@ -24,6 +24,7 @@ namespace yb {
 namespace master {
 
 using std::string;
+using std::vector;
 using tserver::TabletServerErrorPB;
 
 ////////////////////////////////////////////////////////////
@@ -35,12 +36,15 @@ AsyncFlushTablets::AsyncFlushTablets(Master *master,
                                      const scoped_refptr<TableInfo>& table,
                                      const vector<TabletId>& tablet_ids,
                                      const FlushRequestId& flush_id,
-                                     bool is_compaction)
-    : RetrySpecificTSRpcTask(master, callback_pool, ts_uuid, table,
+                                     bool is_compaction,
+                                     bool regular_only,
+                                     LeaderEpoch epoch)
+: RetrySpecificTSRpcTaskWithTable(master, callback_pool, ts_uuid, table, std::move(epoch),
                              /* async_task_throttler */ nullptr),
       tablet_ids_(tablet_ids),
       flush_id_(flush_id),
-      is_compaction_(is_compaction) {
+      is_compaction_(is_compaction),
+      regular_only_(regular_only) {
 }
 
 string AsyncFlushTablets::description() const {
@@ -63,6 +67,9 @@ void AsyncFlushTablets::HandleResponse(int attempt) {
         LOG(WARNING) << "TS " << permanent_uuid() << ": flush tablets failed because tablet "
                      << resp_.failed_tablet_id() << " was not found. "
                      << "No further retry: " << status.ToString();
+        // Mark response_handling_ as true to denote task state is transitioned
+        // to complete and there will be no retries.
+        response_handling_ = true;
         TransitionToCompleteState();
         break;
       default:
@@ -70,6 +77,7 @@ void AsyncFlushTablets::HandleResponse(int attempt) {
                      << status.ToString();
     }
   } else {
+    response_handling_ = true;
     TransitionToCompleteState();
     VLOG(1) << "TS " << permanent_uuid() << ": flush tablets complete";
   }
@@ -81,6 +89,9 @@ void AsyncFlushTablets::HandleResponse(int attempt) {
         flush_id_, permanent_uuid_,
         resp_.has_error() ? StatusFromPB(resp_.error().status()) : Status::OK());
   } else {
+    if (response_handling_) {
+      LOG(DFATAL) << "Expected task to be transitioned to complete state";
+    }
     VLOG(1) << "FlushTablets task is not completed";
   }
 }
@@ -95,12 +106,21 @@ bool AsyncFlushTablets::SendRequest(int attempt) {
   for (const TabletId& id : tablet_ids_) {
     req.add_tablet_ids(id);
   }
+  req.set_regular_only(regular_only_);
 
+  response_handling_ = false;
   ts_admin_proxy_->FlushTabletsAsync(req, &resp_, &rpc_, BindRpcCallback());
   VLOG(1) << "Send flush tablets request to " << permanent_uuid_
           << " (attempt " << attempt << "):\n"
           << req.DebugString();
   return true;
+}
+
+void AsyncFlushTablets::Finished(const Status& status) {
+  // Call explicit handling only if reponse is not handled in AsyncFlushTablets::HandleResponse.
+  if (!response_handling_) {
+    master_->flush_manager()->HandleFlushTabletsRpcFinish(flush_id_, permanent_uuid_, status);
+  }
 }
 
 } // namespace master

@@ -2,20 +2,17 @@
 title: Collations
 linkTitle: Collations
 description: YSQL collations
-image: /images/section_icons/secure/create-roles.png
 menu:
   preview:
     identifier: advanced-features-collations
     parent: advanced-features
-    weight: 240
-aliases:
-  - /preview/explore/ysql-language-features/collations/
+    weight: 100
 type: docs
 ---
 
 ## Collation basics
 
-YSQL provides collation support. A _collation_ is a set of rules that define how to compare and sort character strings. YSQL's collation support is based on PostgreSQL with a few [limitations](#ysql-collation-limitations).
+YSQL provides collation support. A _collation_ is a set of rules that define how to compare and sort character strings. YSQL collation support is based on PostgreSQL with a few [limitations](#ysql-collation-limitations).
 
 As in PostgreSQL, most YSQL data types are not related to character strings and therefore are considered _not collatable_. For example:
 
@@ -79,7 +76,7 @@ select count(collname) from pg_collation where collprovider = 'i';
 (1 row)
 ```
 
-## Collation Creation
+## Collation creation
 
 In addition to predefined collations, you can define new collations. For example,
 
@@ -103,7 +100,7 @@ insert into coll_tab2 values (E'El Nin\u0303o');
 insert into coll_tab2 values (E'El Ni\u00F1o');
 ```
 
-In libicu, the two strings `E'El Nin\u0303o'` and `E'El Ni\u00F1o'` are equal despite their different character encodings. Currently YSQL is based upon PostgreSQL 11.2 and only supports deterministic collations. In a deterministic collation, the two strings `E'El Nin\u0303o'` and `E'El Ni\u00F1o'` are not equal. Internally when libicu reports two strings are equal, YSQL uses `strcmp` as a tie-breaker to further compare them. This means that in YSQL two strings are not equal unless their database character encodings are identical. After YSQL is upgraded to PostgreSQL 13 which supports non-deterministic collations and does not use any tie-breaker, we also plan to enhance YSQL to support non-deterministic collations.
+In libicu, the two strings `E'El Nin\u0303o'` and `E'El Ni\u00F1o'` are equal despite their different character encodings. Currently YSQL is based upon PostgreSQL 15 and only supports deterministic collations. In a deterministic collation, the two strings `E'El Nin\u0303o'` and `E'El Ni\u00F1o'` are not equal. Internally when libicu reports two strings are equal, YSQL uses `strcmp` as a tie-breaker to further compare them. This means that in YSQL two strings are not equal unless their database character encodings are identical. After YSQL is upgraded to PostgreSQL 13 which supports non-deterministic collations and does not use any tie-breaker, we also plan to enhance YSQL to support non-deterministic collations.
 
 ## Advantage of collation
 
@@ -139,7 +136,7 @@ select * from coll_tab4 order by name;
 (2 rows)
 ```
 
-## Index Collation
+## Index collation
 
 When a table column has an explicit collation, an index built on the column will be sorted according to the column collation. YSQL also allows the index to have its own explicit collation that is different from that of the table column. For example:
 
@@ -148,9 +145,9 @@ create table coll_tab5(name text collate "en-US-x-icu");
 create index name_idx on coll_tab5(name collate "C" asc);
 ```
 
-This can be useful to speed up queries that involve pattern matching operators such as LIKE because a regular index will be sorted according to collation "en-US-x-icu" and such an index cannot be used by pattern matching operators.
+This can speed up queries that involve pattern matching operators such as LIKE because a regular index will be sorted according to collation "en-US-x-icu" and such an index cannot be used by pattern matching operators.
 
-## Collation Strength
+## Collation strength
 
 YSQL uses the same rules as in PostgreSQL to determine which collation is used in sorting character strings. An explicitly specified collation has more _strength_ then a referenced column, which has more strength than a text expression without an explicit collation. For example:
 
@@ -255,7 +252,7 @@ There are a number of YSQL limitations on collation due to the internal implemen
     yugabyte=#
     ```
 
-* Libc collations are very limited:
+* libc collations are very limited:
 
     ```sql
     select collname from pg_collation where collprovider = 'c';

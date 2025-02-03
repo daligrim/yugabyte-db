@@ -3,8 +3,7 @@ title: Transactions
 headerTitle: Transactions
 linkTitle: Transactions
 description: Transactions in YugabyteDB.
-headcontent: Transactions in YugabyteDB.
-image: /images/section_icons/explore/transactional.png
+headcontent: How transactions work in YugabyteDB
 menu:
   preview:
     identifier: explore-transactions
@@ -12,67 +11,51 @@ menu:
     weight: 240
 type: indexpage
 ---
-YugabyteDB is a transactional database that supports distributed transactions. A transaction is a sequence of operations performed as a single logical unit of work. A transaction has four key properties - **Atomicity**, **Consistency**, **Isolation** and **Durability** - commonly abbreviated as ACID.
 
+YugabyteDB is a transactional database that supports distributed transactions. A transaction is a sequence of operations performed as a single logical unit of work. YugabyteDB provides [ACID](../../architecture/key-concepts/#acid) guarantees for all transactions.
 
-The table below summarizes the support for transactions across YSQL and YCQL APIs.
+The following table summarizes the support for transactions across the YSQL and YCQL APIs.
 
-| <span style="font-size:20px;">Property</span> | <span style="font-size:20px;">YSQL</span> | <span style="font-size:20px;">YCQL</span> | <span style="font-size:20px;">Comments</span> |
-|--------------------------------------------------|-------------|----------|----------|
-| <span style="font-size:16px;">[Distributed transactions](distributed-transactions-ysql/)</span> | <span style="font-size:16px;">Yes</span> | <span style="font-size:16px;">Yes</span> | Perform multi-row or multi-table transactions. <br/> Application can connect to any node of the cluster. |
-| <span style="font-size:16px;">[Isolation levels](isolation-levels/)</span> | <span style="font-size:16px;">Serializable <br/>Snapshot</span>  | <span style="font-size:16px;">Snapshot</span> | *Repeatable read* isolation level in PostgreSQL maps to <br/>*snapshot* isolation in YSQL |
-| Set `AUTOCOMMIT = false` | <span style="font-size:16px;">Yes</span> | <span style="font-size:16px;">No</span> | The transaction must be expressed as one statement in YCQL. |
-
+| Property | YSQL | YCQL | Comments |
+| :------- | :--- | :--- | :------- |
+| Distributed transactions | Yes | Yes | Perform multi-row or multi-table transactions.<br/>An application can connect to any node of the cluster. |
+| Isolation levels | Serializable<br/>Snapshot<br/>Read Committed | Snapshot | Repeatable read isolation level in PostgreSQL maps to snapshot isolation in YSQL. |
+| `AUTOCOMMIT = false` setting | Yes | No | The transaction must be expressed as one statement in YCQL. |
 
 <!--
-| <span style="font-size:16px;">[Explicit locking](explicit-locking/)</span>         | <span style="font-size:16px;">Yes</span> | <span style="font-size:16px;">No</span>       | Ability to perform row and table level locking |
-| <span style="font-size:16px;">[DDL statements](ddl-operations/)</span> | <span style="font-size:16px;">Transaction per <br/>DDL-statement</span>  | <span style="font-size:16px;">Transaction per <br/>DDL-statement</span> | Each DDL statement is a transaction in both YSQL and YCQL, <br/>even if other DDL statements are in a transaction block in YSQL. |
-| <span style="font-size:16px;">[Non-transactional tables](non-transactional-tables/)</span> | <span style="font-size:16px;">No</span>         | <span style="font-size:16px;">Yes</span>      | Ability to disable multi-row transactions on a per-table basis. <br/>Useful for some features like automatic data expiry. |
-
+| [Explicit locking] | Yes | No | Ability to perform row- and table-level locking |
+| [DDL statements] | Transaction per DDL statement  | Transaction per DDL statement | Each DDL statement is a transaction in both YSQL and YCQL, even if other DDL statements are in a transaction block in YSQL. |
+| [Non-transactional tables] | No | Yes | Ability to disable multi-row transactions on a per-table basis. <br/>Useful for some features such as automatic data expiry. |
 -->
 
-The various features are explained in the sections below.
+{{<index/block>}}
 
-<div class="row">
+  {{<index/item
+    title="Distributed transactions"
+    body="Distributed transactions in YugabyteDB."
+    href="distributed-transactions-ysql/"
+    icon="fa-thin fa-sitemap">}}
 
-   <div class="col-12 col-md-6 col-lg-12 col-xl-6">
-    <a class="section-link icon-offset" href="distributed-transactions-ysql/">
-      <div class="head">
-        <div class="icon"><i class="fas fa-sitemap"></i></div>
-        <div class="title">Distributed Transactions</div>
-      </div>
-      <div class="body">
-        Understand how distributed transactions work in YugabyteDB.
-      </div>
-    </a>
-  </div>
-  <div class="col-12 col-md-6 col-lg-12 col-xl-6">
-    <a class="section-link icon-offset" href="isolation-levels/">
-      <div class="head">
-        <div class="icon"><i class="fas fa-stream"></i></div>
-        <div class="title">Isolation Levels</div>
-      </div>
-      <div class="body">
-        Details about isolation levels in YugabyteDB.
-      </div>
-    </a>
-  </div>
-  <div class="col-12 col-md-6 col-lg-12 col-xl-6">
-    <a class="section-link icon-offset" href="explicit-locking/">
-      <div class="head">
-        <div class="icon"><i class="fas fa-lock"></i></div>
-        <div class="title">Explicit Locking</div>
-      </div>
-      <div class="body">
-        Explicit row-level locking in YSQL.
-      </div>
-    </a>
-  </div>
+  {{<index/item
+    title="Isolation levels"
+    body="Serializable, snapshot, and read committed isolation in YugabyteDB."
+    href="isolation-levels/"
+    icon="fa-thin fa-bars-staggered">}}
+
+  {{<index/item
+    title="Explicit locking"
+    body="Explicit row-level locking in YSQL."
+    href="explicit-locking/"
+    icon="fa-thin fa-lock">}}
+
+{{</index/block>}}
+
 <!-- ADD THIS ONCE READY:
+
   <div class="col-12 col-md-6 col-lg-12 col-xl-6">
     <a class="section-link icon-offset" href="ddl-operations/">
       <div class="head">
-        <div class="icon"><i class="fas fa-table"></i></div>
+        <div class="icon"><i class="fa-solid fa-table"></i></div>
         <div class="title">DDL Operations</div>
       </div>
       <div class="body">
@@ -83,7 +66,7 @@ The various features are explained in the sections below.
   <div class="col-12 col-md-6 col-lg-12 col-xl-6">
     <a class="section-link icon-offset" href="non-transactional-tables/">
       <div class="head">
-        <div class="icon"><i class="fas fa-strikethrough"></i></div>
+        <div class="icon"><i class="fa-solid fa-strikethrough"></i></div>
         <div class="title">Non-Transactional Tables</div>
       </div>
       <div class="body">
@@ -92,4 +75,3 @@ The various features are explained in the sections below.
     </a>
   </div>
 -->
-</div>

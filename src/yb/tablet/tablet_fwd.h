@@ -10,8 +10,7 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_TABLET_TABLET_FWD_H
-#define YB_TABLET_TABLET_FWD_H
+#pragma once
 
 #include <memory>
 
@@ -23,8 +22,7 @@
 #include "yb/util/math_util.h"
 #include "yb/util/strongly_typed_bool.h"
 
-namespace yb {
-namespace tablet {
+namespace yb::tablet {
 
 class AbstractTablet;
 
@@ -36,19 +34,23 @@ typedef scoped_refptr<RaftGroupMetadata> RaftGroupMetadataPtr;
 
 class Tablet;
 typedef std::shared_ptr<Tablet> TabletPtr;
+typedef std::weak_ptr<Tablet> TabletWeakPtr;
 
 struct TableInfo;
 typedef std::shared_ptr<TableInfo> TableInfoPtr;
 
 class TabletPeer;
 typedef std::shared_ptr<TabletPeer> TabletPeerPtr;
+typedef std::weak_ptr<TabletPeer> TabletPeerWeakPtr;
 
 class ChangeMetadataOperation;
+class CloneOperation;
 class Operation;
 class OperationFilter;
 class SnapshotCoordinator;
 class SnapshotOperation;
 class SplitOperation;
+class TabletMetrics;
 class TabletSnapshots;
 class TabletSplitter;
 class TabletStatusListener;
@@ -71,22 +73,17 @@ struct PgsqlReadRequestResult;
 struct QLReadRequestResult;
 struct RemoveIntentsData;
 struct TabletInitData;
-struct TabletMetrics;
 struct TransactionApplyData;
 struct TransactionStatusInfo;
 
 YB_DEFINE_ENUM(FlushMode, (kSync)(kAsync));
 YB_DEFINE_ENUM(RequireLease, (kFalse)(kTrue)(kFallbackToFollower));
+YB_STRONGLY_TYPED_BOOL(AbortOps);
 YB_STRONGLY_TYPED_BOOL(Destroy);
 YB_STRONGLY_TYPED_BOOL(DisableFlushOnShutdown);
 YB_STRONGLY_TYPED_BOOL(IsSysCatalogTablet);
 YB_STRONGLY_TYPED_BOOL(ShouldAbortActiveTransactions);
 YB_STRONGLY_TYPED_BOOL(TransactionsEnabled);
-
-// Used to indicate that a transaction-related operation has already been applied to regular RocksDB
-// (which was flushed) but the corresponding deletion of intents from the intents RocksDB has not
-// been flushed and was therefore lost.
-YB_STRONGLY_TYPED_BOOL(AlreadyAppliedToRegularDB);
 
 enum class FlushFlags {
   kNone = 0,
@@ -94,11 +91,9 @@ enum class FlushFlags {
   kRegular = 1,
   kIntents = 2,
   kNoScopedOperation = 4,
+  kVectorIndexes = 8,
 
-  kAllDbs = kRegular | kIntents
+  kAllDbs = kRegular | kIntents | kVectorIndexes
 };
 
-}  // namespace tablet
-}  // namespace yb
-
-#endif  // YB_TABLET_TABLET_FWD_H
+} // namespace yb::tablet

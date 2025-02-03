@@ -11,84 +11,92 @@
 // under the License.
 //
 
-#ifndef YB_DOCDB_DOCDB_FWD_H
-#define YB_DOCDB_DOCDB_FWD_H
+#pragma once
 
 #include "yb/common/common_fwd.h"
 
 #include "yb/docdb/docdb.fwd.h"
+#include "yb/dockv/dockv_fwd.h"
 
+#include "yb/qlexpr/qlexpr_fwd.h"
+
+#include "yb/util/clone_ptr.h"
 #include "yb/util/enums.h"
 #include "yb/util/math_util.h"
+#include "yb/util/ref_cnt_buffer.h"
 #include "yb/util/strongly_typed_bool.h"
 
-namespace yb {
-namespace docdb {
+namespace yb::docdb {
 
+class BoundedRocksDbIterator;
 class ConsensusFrontier;
 class DeadlineInfo;
 class DocDBCompactionFilterFactory;
-class DocKey;
+class DocDBStatistics;
 class DocOperation;
-class DocPath;
+class DocPgsqlScanSpec;
+class DocQLScanSpec;
 class DocRowwiseIterator;
 class DocWriteBatch;
-class ExternalTxnIntentsState;
 class HistoryRetentionPolicy;
 class IntentAwareIterator;
-class KeyBytes;
-class KeyEntryValue;
+class IntentAwareIteratorIf;
+class IntentIterator;
+class LockBatch;
 class ManualHistoryRetentionPolicy;
+class ObjectLockManager;
 class PgsqlWriteOperation;
-class PrimitiveValue;
 class QLWriteOperation;
 class RedisWriteOperation;
-class RowPacker;
-class SchemaPacking;
-class SchemaPackingStorage;
+class ScanChoices;
+class SchemaPackingProvider;
 class SharedLockManager;
-class SubDocKey;
+class StorageSet;
+class TableInfoProvider;
+class TransactionStatusCache;
+class VectorIndex;
+class WaitQueue;
 class YQLRowwiseIteratorIf;
 class YQLStorageIf;
 
 struct ApplyTransactionState;
-struct ColumnPackingData;
-struct CompactionSchemaPacking;
 struct DocDB;
 struct DocReadContext;
+struct FetchedEntry;
+struct HistoryRetentionDirective;
 struct IntentKeyValueForCDC;
 struct KeyBounds;
+template <typename T>
 struct LockBatchEntry;
-struct ValueControlFields;
+struct ObjectLockOwner;
+struct ObjectLockPrefix;
+struct PgsqlReadOperationData;
+struct ReadOperationData;
+struct VectorIndexInsertEntry;
+struct VectorIndexSearchResultEntry;
 
 using DocKeyHash = uint16_t;
-using LockBatchEntries = std::vector<LockBatchEntry>;
 using DocReadContextPtr = std::shared_ptr<DocReadContext>;
+template <typename LockManager>
+using LockBatchEntries = std::vector<LockBatchEntry<LockManager>>;
+// Lock state stores the number of locks acquired for each intent type.
+// The count for each intent type resides in sequential bits (block) in lock state.
+// For example the count of locks on a particular intent type could be received as:
+// (lock_state >> (to_underlying(intent_type) * kIntentTypeBits)) & kFirstIntentTypeMask.
+// Refer shared_lock_manager.cc for further details.
+using LockState = uint64_t;
+using ScanChoicesPtr = std::unique_ptr<ScanChoices>;
 
-using IndexRequests = std::vector<std::pair<const IndexInfo*, QLWriteRequestPB>>;
-
-enum class KeyEntryType;
-enum class ValueEntryType;
-
-YB_STRONGLY_TYPED_BOOL(PartialRangeKeyIntents);
-
-// Automatically decode keys that are stored in string-typed PrimitiveValues when converting a
-// PrimitiveValue to string. This is useful when displaying write batches for secondary indexes.
-YB_STRONGLY_TYPED_BOOL(AutoDecodeKeys);
+using ConsensusFrontierPtr = clone_ptr<ConsensusFrontier>;
+using IndexRequests = std::vector<std::pair<const qlexpr::IndexInfo*, QLWriteRequestPB>>;
+using VectorIndexPtr = std::shared_ptr<VectorIndex>;
+using VectorIndexes = std::vector<VectorIndexPtr>;
+using VectorIndexesPtr = std::shared_ptr<VectorIndexes>;
+using VectorIndexInsertEntries = std::vector<VectorIndexInsertEntry>;
+using VectorIndexSearchResult = std::vector<VectorIndexSearchResultEntry>;
 
 YB_STRONGLY_TYPED_BOOL(SkipFlush);
+YB_STRONGLY_TYPED_BOOL(SkipSeek);
+YB_STRONGLY_TYPED_BOOL(FastBackwardScan);
 
-YB_DEFINE_ENUM(OperationKind, (kRead)(kWrite));
-
-// "Weak" intents are written for ancestor keys of a key that's being modified. For example, if
-// we're writing a.b.c with snapshot isolation, we'll write weak snapshot isolation intents for
-// keys "a" and "a.b".
-//
-// "Strong" intents are written for keys that are being modified. In the example above, we will
-// write a strong snapshot isolation intent for the key a.b.c itself.
-YB_DEFINE_ENUM(IntentStrength, (kWeak)(kStrong));
-
-}  // namespace docdb
-}  // namespace yb
-
-#endif // YB_DOCDB_DOCDB_FWD_H
+}  // namespace yb::docdb

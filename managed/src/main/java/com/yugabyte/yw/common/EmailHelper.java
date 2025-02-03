@@ -2,14 +2,31 @@
 
 package com.yugabyte.yw.common;
 
+import static play.mvc.Http.Status.INTERNAL_SERVER_ERROR;
+
 import com.google.common.annotations.VisibleForTesting;
 import com.google.inject.Singleton;
 import com.typesafe.config.Config;
 import com.yugabyte.yw.common.alerts.SmtpData;
+import com.yugabyte.yw.common.certmgmt.castore.CustomCAStoreManager;
 import com.yugabyte.yw.common.config.RuntimeConfigFactory;
 import com.yugabyte.yw.forms.AlertingData;
 import com.yugabyte.yw.models.Customer;
 import com.yugabyte.yw.models.configs.CustomerConfig;
+import jakarta.mail.Authenticator;
+import jakarta.mail.Message;
+import jakarta.mail.MessagingException;
+import jakarta.mail.Multipart;
+import jakarta.mail.PasswordAuthentication;
+import jakarta.mail.Session;
+import jakarta.mail.Transport;
+import jakarta.mail.internet.AddressException;
+import jakarta.mail.internet.InternetAddress;
+import jakarta.mail.internet.MimeBodyPart;
+import jakarta.mail.internet.MimeMessage;
+import jakarta.mail.internet.MimeMultipart;
+import java.security.KeyStore;
+import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -17,18 +34,9 @@ import java.util.Map.Entry;
 import java.util.Properties;
 import java.util.UUID;
 import javax.inject.Inject;
-import javax.mail.Authenticator;
-import javax.mail.Message;
-import javax.mail.MessagingException;
-import javax.mail.Multipart;
-import javax.mail.PasswordAuthentication;
-import javax.mail.Session;
-import javax.mail.Transport;
-import javax.mail.internet.AddressException;
-import javax.mail.internet.InternetAddress;
-import javax.mail.internet.MimeBodyPart;
-import javax.mail.internet.MimeMessage;
-import javax.mail.internet.MimeMultipart;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.TrustManagerFactory;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -42,6 +50,8 @@ public class EmailHelper {
   public static final String DEFAULT_EMAIL_SEPARATORS = ";,";
 
   @Inject private RuntimeConfigFactory configFactory;
+
+  @Inject private CustomCAStoreManager customCAStoreManager;
 
   /**
    * Sends email with subject and content to recipients from destinations. STMP parameters are in
@@ -121,19 +131,20 @@ public class EmailHelper {
         props.put("mail.smtp.auth", "false");
       }
       props.put("mail.smtp.starttls.enable", String.valueOf(smtpData.useTLS));
+      props.put("mail.smtp.ssl.protocols", "TLSv1.3 TLSv1.2 TLSv1.1 TLSv1");
       String smtpServer =
           StringUtils.isEmpty(smtpData.smtpServer)
               ? runtimeConfig.getString("yb.health.default_smtp_server")
               : smtpData.smtpServer;
-      props.put("mail.smtp.host", smtpServer);
-      props.put(
-          "mail.smtp.port",
+      String smtpPort =
           String.valueOf(
               smtpData.smtpPort == -1
                   ? (smtpData.useSSL
                       ? runtimeConfig.getInt("yb.health.default_smtp_port_ssl")
                       : runtimeConfig.getInt("yb.health.default_smtp_port"))
-                  : smtpData.smtpPort));
+                  : smtpData.smtpPort);
+      props.put("mail.smtp.host", smtpServer);
+      props.put("mail.smtp.port", smtpPort);
       props.put("mail.smtp.ssl.enable", String.valueOf(smtpData.useSSL));
       if (smtpData.useSSL) {
         props.put("mail.smtp.ssl.trust", smtpServer);
@@ -150,6 +161,28 @@ public class EmailHelper {
       props.put(
           smtpData.useSSL ? "mail.smtps.connectiontimeout" : "mail.smtp.connectiontimeout",
           connectionTimeout);
+
+      if ((smtpData.useSSL || smtpData.useTLS)
+          && customCAStoreManager != null
+          && customCAStoreManager.isEnabled()) {
+        props.put("mail.smtp.socketFactory.port", smtpPort);
+        // Plug in YBA's trust store.
+        KeyStore ybaAndJavaKeyStore = customCAStoreManager.getYbaAndJavaKeyStore();
+        try {
+          TrustManagerFactory trustFactory =
+              TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+          trustFactory.init(ybaAndJavaKeyStore);
+          TrustManager[] ybaJavaTrustManagers = trustFactory.getTrustManagers();
+          SecureRandom secureRandom = new SecureRandom();
+          SSLContext sslContext = SSLContext.getInstance("TLS");
+          sslContext.init(null, ybaJavaTrustManagers, secureRandom);
+          props.put("mail.smtp.ssl.context", sslContext);
+          props.put("mail.smtp.ssl.socketFactory", sslContext.getSocketFactory());
+        } catch (Exception e) {
+          throw new PlatformServiceException(
+              INTERNAL_SERVER_ERROR, "Error occurred when building SSL context" + e.getMessage());
+        }
+      }
 
       String timeout = String.valueOf(runtimeConfig.getInt("yb.health.smtp_timeout_ms"));
       props.put(smtpData.useSSL ? "mail.smtps.timeout" : "mail.smtp.timeout", timeout);
@@ -193,9 +226,9 @@ public class EmailHelper {
     Customer customer = Customer.get(customerUUID);
     List<String> destinations = new ArrayList<>();
     String ybEmail = getYbEmail(customer);
-    CustomerConfig config = CustomerConfig.getAlertConfig(customer.uuid);
+    CustomerConfig config = CustomerConfig.getAlertConfig(customer.getUuid());
     if (config != null) {
-      AlertingData alertingData = Json.fromJson(config.data, AlertingData.class);
+      AlertingData alertingData = Json.fromJson(config.getData(), AlertingData.class);
       if (alertingData.sendAlertsToYb && !StringUtils.isEmpty(ybEmail)) {
         destinations.add(ybEmail);
       }
@@ -212,22 +245,8 @@ public class EmailHelper {
   /**
    * Returns the {@link SmtpData} instance fulfilled with parameters of the specified customer.
    *
-   * <p>If the the Smtp configuration doesn't exist for the customer, the default Smtp configuration
-   * is created with the next data:
-   *
-   * <p>
-   *
-   * <ul>
-   *   <li>stmpUsername is taken from the configuration file, parameter
-   *       <i><b>yb.health.ses_email_username</b></i>;
-   *   <li>smtpPassword is taken from the configuration file, parameter
-   *       <i><b>yb.health.ses_email_password</b></i>;
-   *   <li>useSSL is taken from the configuration file, parameter
-   *       <i><b>yb.health.default_ssl</b></i>, by default is <b>true</b>.
-   * </ul>
-   *
-   * <p>Also if emailFrom is empty (for both cases) it is filled with the default YB address (see
-   * {@link #getYbEmail})
+   * <p>Also if emailFrom is empty it is filled with the default YB address (see {@link
+   * #getYbEmail})
    *
    * @param customerUUID
    * @return filled SmtpData if all parameters exist or NULL otherwise
@@ -235,18 +254,11 @@ public class EmailHelper {
   public SmtpData getSmtpData(UUID customerUUID) {
     Customer customer = Customer.get(customerUUID);
     CustomerConfig smtpConfig = CustomerConfig.getSmtpConfig(customerUUID);
-    SmtpData smtpData;
-    if (smtpConfig != null) {
-      smtpData = Json.fromJson(smtpConfig.data, SmtpData.class);
-    } else {
-      Config runtimeConfig = configFactory.forCustomer(customer);
-      smtpData = new SmtpData();
-      smtpData.smtpUsername = runtimeConfig.getString("yb.health.ses_email_username");
-      smtpData.smtpPassword = runtimeConfig.getString("yb.health.ses_email_password");
-      smtpData.useSSL = runtimeConfig.getBoolean("yb.health.default_ssl");
-      smtpData.useTLS = runtimeConfig.getBoolean("yb.health.default_tls");
-    }
 
+    if (smtpConfig == null) {
+      return null;
+    }
+    SmtpData smtpData = Json.fromJson(smtpConfig.getData(), SmtpData.class);
     if (StringUtils.isEmpty(smtpData.emailFrom)) {
       smtpData.emailFrom = getYbEmail(customer);
     }

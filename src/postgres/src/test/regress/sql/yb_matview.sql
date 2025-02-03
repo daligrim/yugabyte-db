@@ -4,6 +4,7 @@
 
 CREATE TABLE test_yb (col int);
 INSERT INTO test_yb VALUES (null);
+CREATE UNLOGGED MATERIALIZED VIEW unlogged_mv_yb AS SELECT * FROM test_yb; -- not supported
 CREATE MATERIALIZED VIEW mtest_yb AS SELECT * FROM test_yb;
 CREATE UNIQUE INDEX ON mtest_yb(col);
 REFRESH MATERIALIZED VIEW NONCONCURRENTLY mtest_yb;
@@ -169,9 +170,9 @@ INSERT INTO arrays VALUES
 (null);
 INSERT INTO arrays SELECT '{0}' FROM generate_series(1, 1000);
 CREATE MATERIALIZED VIEW mvtest_tv7 AS SELECT * FROM arrays;
-explain select * from mvtest_tv7 where a @> '{6}';
+explain (costs off) select * from mvtest_tv7 where a @> '{6}';
 CREATE INDEX NONCONCURRENTLY ON mvtest_tv7 using ybgin (a);
-explain select * from mvtest_tv7 where a @> '{6}';
+explain (costs off) select * from mvtest_tv7 where a @> '{6}';
 select * from mvtest_tv7 where a @> '{6}' order by k;
 INSERT INTO arrays SELECT '{0}' FROM generate_series(1, 1000);
 INSERT INTO arrays VALUES
@@ -203,17 +204,71 @@ END$$;
 SELECT * FROM view_as_1;
 
 -- Colocated materialized view
-CREATE DATABASE mydb WITH colocated = true;
+CREATE DATABASE mydb WITH colocation = true;
 \c mydb;
 CREATE TABLE base (col int);
 CREATE MATERIALIZED VIEW mv AS SELECT * FROM base;
+CREATE UNIQUE INDEX mv_idx ON mv(col);
 SELECT * FROM mv;
 INSERT INTO base VALUES (1);
 REFRESH MATERIALIZED VIEW mv;
+SELECT num_tablets, num_hash_key_columns, is_colocated FROM
+    yb_table_properties('mv'::regclass);
+SELECT num_tablets, num_hash_key_columns, is_colocated FROM
+    yb_table_properties('mv_idx'::regclass);
 SELECT * FROM mv;
 INSERT INTO base VALUES (2);
+REFRESH MATERIALIZED VIEW CONCURRENTLY mv;
+SELECT * FROM mv ORDER BY col;
+DROP MATERIALIZED VIEW mv;
+SELECT * FROM mv; -- should fail.
+CREATE MATERIALIZED VIEW mv WITH (COLOCATION=false) AS SELECT * FROM base;
+CREATE UNIQUE INDEX mv_idx ON mv(col);
+SELECT * FROM mv ORDER BY col;
+INSERT INTO base VALUES (3);
+REFRESH MATERIALIZED VIEW mv;
+SELECT num_tablets, num_hash_key_columns, is_colocated FROM
+    yb_table_properties('mv'::regclass);
+SELECT num_tablets, num_hash_key_columns, is_colocated FROM
+    yb_table_properties('mv_idx'::regclass);
+SELECT * FROM mv ORDER BY col;
+INSERT INTO base VALUES (4);
+REFRESH MATERIALIZED VIEW CONCURRENTLY mv;
+SELECT * FROM mv ORDER BY col;
+DROP MATERIALIZED VIEW mv;
+SELECT * FROM mv; -- should fail.
+
+-- Tablegroup materialized view
+CREATE DATABASE testdb;
+\c testdb;
+CREATE TABLEGROUP test_tg;
+CREATE TABLE test_t (col int) TABLEGROUP test_tg;
+CREATE MATERIALIZED VIEW mv AS SELECT * FROM test_t;
+SELECT * FROM mv;
+INSERT INTO test_t VALUES (1);
+REFRESH MATERIALIZED VIEW mv;
+SELECT * FROM mv;
+INSERT INTO test_t VALUES (2);
 CREATE UNIQUE INDEX ON mv(col);
 REFRESH MATERIALIZED VIEW CONCURRENTLY mv;
 SELECT * FROM mv ORDER BY col;
 DROP MATERIALIZED VIEW mv;
 SELECT * FROM mv;
+
+-- Split options on indexes should not be copied after a non-concurrent refresh
+-- on a matview.
+\c yugabyte;
+CREATE TABLE test_yb(t int, j int);
+CREATE MATERIALIZED VIEW mv AS SELECT * FROM test_yb;
+CREATE INDEX idx ON mv(t) SPLIT INTO 5 TABLETS;
+REFRESH MATERIALIZED VIEW mv;
+SELECT num_tablets, num_hash_key_columns FROM yb_table_properties('idx'::regclass);
+
+-- Matview with tablespace
+DROP MATERIALIZED VIEW mv;
+CREATE TABLESPACE mv_tblspace1 LOCATION '/data';
+CREATE TABLESPACE mv_tblspace2 LOCATION '/data';
+CREATE MATERIALIZED VIEW mv TABLESPACE mv_tblspace1 AS SELECT * FROM test_yb;
+\d mv;
+ALTER MATERIALIZED VIEW mv SET TABLESPACE mv_tblspace2;
+\d mv;

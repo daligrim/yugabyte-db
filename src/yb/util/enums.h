@@ -11,11 +11,11 @@
 // under the License.
 //
 
-#ifndef YB_UTIL_ENUMS_H_
-#define YB_UTIL_ENUMS_H_
+#pragma once
 
 #include <bitset>
 #include <string>
+#include <unordered_map>
 
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/core/demangle.hpp>
@@ -31,6 +31,7 @@
 
 #include "yb/util/math_util.h" // For constexpr_max
 #include "yb/util/result.h"
+#include "yb/util/string_util.h"
 
 namespace yb {
 
@@ -105,10 +106,6 @@ class AllEnumItemsIterable {
     BOOST_PP_TUPLE_ELEM(2, 0, data):: \
         BOOST_PP_CAT(BOOST_PP_APPLY(BOOST_PP_TUPLE_ELEM(2, 1, data)), YB_ENUM_ITEM_NAME(elem))
 
-#define YB_ENUM_LIST_ITEM(s, data, elem) \
-    BOOST_PP_TUPLE_ELEM(2, 0, data):: \
-        BOOST_PP_CAT(BOOST_PP_APPLY(BOOST_PP_TUPLE_ELEM(2, 1, data)), YB_ENUM_ITEM_NAME(elem))
-
 #define YB_ENUM_CASE_NAME(s, data, elem) \
   case BOOST_PP_TUPLE_ELEM(2, 0, data):: \
       BOOST_PP_CAT(BOOST_PP_APPLY(BOOST_PP_TUPLE_ELEM(2, 1, data)), YB_ENUM_ITEM_NAME(elem)): \
@@ -124,8 +121,7 @@ class AllEnumItemsIterable {
 #define YB_ENUM_MAX_PREFIX(enum_name, prefix, value) prefix
 #define YB_ENUM_MAX_VALUE(enum_name, prefix, value) value
 
-#define YB_DEFINE_ENUM_IMPL(enum_name, prefix, list) \
-  enum class enum_name { \
+#define YB_DEFINE_ENUM_IMPL_BODY(enum_name, prefix, list) { \
     BOOST_PP_SEQ_FOR_EACH(YB_ENUM_ITEM, prefix, list) \
   }; \
   \
@@ -135,7 +131,6 @@ class AllEnumItemsIterable {
     } \
     return nullptr; \
   } \
-  \
   inline __attribute__((unused)) std::string ToString(enum_name value) { \
     const char* c_str = ToCString(value); \
     if (c_str != nullptr) \
@@ -146,7 +141,10 @@ class AllEnumItemsIterable {
   inline __attribute__((unused)) std::ostream& operator<<(std::ostream& out, enum_name value) { \
     return out << ToString(value); \
   } \
-  \
+  inline __attribute__((unused)) std::istream& operator>>(std::istream& in, enum_name& value) { \
+    ::yb::detail::EnumFromInputStreamHelper<enum_name>(in, value); \
+    return in; \
+  } \
   constexpr __attribute__((unused)) size_t BOOST_PP_CAT(kElementsIn, enum_name) = \
       BOOST_PP_SEQ_SIZE(list); \
   constexpr __attribute__((unused)) size_t BOOST_PP_CAT(k, BOOST_PP_CAT(enum_name, MapSize)) =  \
@@ -173,9 +171,19 @@ class AllEnumItemsIterable {
   } \
   /**/
 
+#define YB_DEFINE_ENUM_IMPL(enum_name, prefix, list) \
+  enum class enum_name \
+  YB_DEFINE_ENUM_IMPL_BODY(enum_name, prefix, list)
+
+#define YB_DEFINE_ENUM_IMPL_TYPE(enum_name, type, prefix, list) \
+  enum class enum_name : type \
+  YB_DEFINE_ENUM_IMPL_BODY(enum_name, prefix, list)
+
 // Please see the usage of YB_DEFINE_ENUM before the auxiliary macros above.
 #define YB_DEFINE_ENUM(enum_name, list) YB_DEFINE_ENUM_IMPL(enum_name, BOOST_PP_NIL, list)
 #define YB_DEFINE_ENUM_EX(enum_name, prefix, list) YB_DEFINE_ENUM_IMPL(enum_name, (prefix), list)
+#define YB_DEFINE_TYPED_ENUM(enum_name, type, list) \
+  YB_DEFINE_ENUM_IMPL_TYPE(enum_name, type, BOOST_PP_NIL, list)
 
 // This macro can be used after exhaustive (compile-time-checked) switches on enums without a
 // default clause to handle invalid values due to memory corruption.
@@ -379,6 +387,12 @@ class EnumBitSet {
     return impl_.to_ullong() > rhs.impl_.to_ullong();
   }
 
+  EnumBitSet<Enum> operator~() const {
+    EnumBitSet<Enum> result;
+    result.impl_ = ~impl_;
+    return result;
+  }
+
  private:
   std::bitset<MapSize(static_cast<Enum*>(nullptr))> impl_;
 
@@ -423,6 +437,29 @@ Result<EnumType> ParseEnumInsensitive(const std::string& str) {
 }
 
 
-}  // namespace yb
+namespace detail {
 
-#endif  // YB_UTIL_ENUMS_H_
+template<typename EnumType>
+void EnumFromInputStreamHelper(std::istream& in, EnumType& value) {
+  std::string token;
+  in >> token;
+  if (in.fail()) {
+    return;
+  }
+  auto parse_result = ParseEnumInsensitive<EnumType>(token);
+  if (parse_result.ok()) {
+    value = parse_result.get();
+    return;
+  }
+  // The vast majority of enums are defined with kFoo, kBar, etc. as their values.
+  parse_result = ParseEnumInsensitive<EnumType>("k" + token);
+  if (parse_result.ok()) {
+    value = parse_result.get();
+    return;
+  }
+  in.setstate(std::ios_base::failbit);
+}
+
+}  // namespace detail
+
+}  // namespace yb

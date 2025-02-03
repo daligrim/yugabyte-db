@@ -15,15 +15,17 @@
 
 #include <memory>
 
-#include <glog/logging.h>
+#include <boost/multi_index/member.hpp>
 
 #include "yb/common/common.pb.h"
 
-#include "yb/docdb/doc_kv_util.h"
+#include "yb/docdb/docdb.h"
+
+#include "yb/dockv/doc_kv_util.h"
 #include "yb/docdb/docdb-internal.h"
-#include "yb/docdb/intent.h"
-#include "yb/docdb/value.h"
-#include "yb/docdb/value_type.h"
+#include "yb/dockv/intent.h"
+#include "yb/dockv/value.h"
+#include "yb/dockv/value_type.h"
 
 #include "yb/rocksdb/compaction_filter.h"
 
@@ -33,24 +35,23 @@
 #include "yb/util/atomic.h"
 #include "yb/util/logging.h"
 #include "yb/util/string_util.h"
+#include "yb/util/flags.h"
 
-DEFINE_uint64(aborted_intent_cleanup_ms, 60000, // 1 minute by default, 1 sec for testing
-             "Duration in ms after which to check if a transaction is aborted.");
+DEFINE_RUNTIME_uint64(aborted_intent_cleanup_ms, 60000,  // 1 minute by default, 1 sec for testing
+    "Duration in ms after which to check if a transaction is aborted.");
 
-DEFINE_uint64(aborted_intent_cleanup_max_batch_size, 256, // Cleanup 256 transactions at a time
-              "Number of transactions to collect for possible cleanup.");
+DEFINE_UNKNOWN_uint64(aborted_intent_cleanup_max_batch_size, 256,
+    // Cleanup 256 transactions at a time
+    "Number of transactions to collect for possible cleanup.");
 
-DEFINE_int32(external_intent_cleanup_secs, 60 * 60 * 24, // 24 hours by default
-             "Duration in secs after which to cleanup external intents.");
+DEFINE_UNKNOWN_uint32(external_intent_cleanup_secs, 60 * 60 * 24,  // 24 hours by default
+    "Duration in secs after which to cleanup external intents.");
 
-DEFINE_uint64(intents_compaction_filter_max_errors_to_log, 100,
+DEFINE_UNKNOWN_uint64(intents_compaction_filter_max_errors_to_log, 100,
               "Maximum number of errors to log for life cycle of the intents compcation filter.");
 
-using std::shared_ptr;
 using std::unique_ptr;
-using std::unordered_set;
 using rocksdb::CompactionFilter;
-using rocksdb::VectorToString;
 
 namespace yb {
 namespace docdb {
@@ -73,26 +74,27 @@ class DocDBIntentsCompactionFilter : public rocksdb::CompactionFilter {
 
   void CompactionFinished() override;
 
-  TransactionIdSet& transactions_to_cleanup() {
-    return transactions_to_cleanup_;
-  }
-
-  void AddToSet(const TransactionId& transaction_id, TransactionIdSet* set);
-
  private:
-  void CleanupTransactions();
+  Status CleanupTransactions();
 
   std::string LogPrefix() const;
 
   Result<boost::optional<TransactionId>> FilterTransactionMetadata(
       const Slice& key, const Slice& existing_value);
 
-  Result<rocksdb::FilterDecision> FilterExternalIntent(const Slice& key);
+  Result<boost::optional<TransactionId>> FilterExternalIntent(const Slice& key);
+
+  Result<std::pair<TransactionId, OpId>> ParsePostApplyTransactionMetadata(
+      const Slice& key, const Slice& existing_value);
+
+  void AddTransactionToCleanup(const TransactionId& transaction_id);
+
+  void SetTransactionApplyOpId(const TransactionId& transaction_id, const OpId& apply_op_id);
 
   tablet::Tablet* const tablet_;
   const MicrosTime compaction_start_time_;
 
-  TransactionIdSet transactions_to_cleanup_;
+  TransactionIdApplyOpIdMap transactions_to_cleanup_;
   int rejected_transactions_ = 0;
   uint64_t num_errors_ = 0;
 
@@ -111,17 +113,18 @@ class DocDBIntentsCompactionFilter : public rocksdb::CompactionFilter {
   } \
 }
 
-void DocDBIntentsCompactionFilter::CleanupTransactions() {
+Status DocDBIntentsCompactionFilter::CleanupTransactions() {
   VLOG_WITH_PREFIX(3) << "DocDB intents compaction filter is being deleted";
-  if (transactions_to_cleanup_.empty()) {
-    return;
+  if (!transactions_to_cleanup_.empty()) {
+    TransactionStatusManager* manager = tablet_->transaction_participant();
+    if (rejected_transactions_ > 0) {
+      LOG_WITH_PREFIX(WARNING) << "Number of aborted transactions not cleaned up "
+                               << "on account of reaching size limits: " << rejected_transactions_;
+    }
+    RETURN_NOT_OK(manager->Cleanup(std::move(transactions_to_cleanup_)));
   }
-  TransactionStatusManager* manager = tablet_->transaction_participant();
-  if (rejected_transactions_ > 0) {
-    LOG_WITH_PREFIX(WARNING) << "Number of aborted transactions not cleaned up " <<
-                                "on account of reaching size limits:" << rejected_transactions_;
-  }
-  manager->Cleanup(std::move(transactions_to_cleanup_));
+
+  return Status::OK();
 }
 
 DocDBIntentsCompactionFilter::~DocDBIntentsCompactionFilter() {
@@ -135,20 +138,32 @@ rocksdb::FilterDecision DocDBIntentsCompactionFilter::Filter(
     filter_usage_logged_ = true;
   }
 
-  if (GetKeyType(key, StorageDbType::kIntents) == KeyType::kExternalIntents) {
-    auto filter_decision_result = FilterExternalIntent(key);
-    MAYBE_LOG_ERROR_AND_RETURN_KEEP(filter_decision_result);
-    return *filter_decision_result;
+  const auto key_type = GetKeyType(key, StorageDbType::kIntents);
+  if (key_type == KeyType::kExternalIntents) {
+    auto transaction_id_result = FilterExternalIntent(key);
+    MAYBE_LOG_ERROR_AND_RETURN_KEEP(transaction_id_result);
+    auto transaction_id_optional = *transaction_id_result;
+    if (!transaction_id_optional.has_value()) {
+      return rocksdb::FilterDecision::kKeep;
+    }
+    return rocksdb::FilterDecision::kDiscard;
   }
 
-  // Find transaction metadata row.
-  if (GetKeyType(key, StorageDbType::kIntents) == KeyType::kTransactionMetadata) {
+  if (key_type == KeyType::kTransactionMetadata) {
     auto transaction_id_result = FilterTransactionMetadata(key, existing_value);
     MAYBE_LOG_ERROR_AND_RETURN_KEEP(transaction_id_result);
     auto transaction_id_optional = *transaction_id_result;
-    if (transaction_id_optional.has_value()) {
-      AddToSet(transaction_id_optional.value(), &transactions_to_cleanup_);
+    if (!transaction_id_optional.has_value()) {
+      return rocksdb::FilterDecision::kKeep;
     }
+    AddTransactionToCleanup(*transaction_id_optional);
+  }
+
+  if (key_type == KeyType::kPostApplyTransactionMetadata) {
+    auto result = ParsePostApplyTransactionMetadata(key, existing_value);
+    MAYBE_LOG_ERROR_AND_RETURN_KEEP(result);
+    const auto& [transaction_id, apply_op_id] = *result;
+    SetTransactionApplyOpId(transaction_id, apply_op_id);
   }
 
   // TODO(dtxn): If/when we add processing of reverse index or intents here - we will need to
@@ -168,31 +183,60 @@ Result<boost::optional<TransactionId>> DocDBIntentsCompactionFilter::FilterTrans
   if (!write_time) {
     write_time = HybridTime(metadata_pb.start_hybrid_time()).GetPhysicalValueMicros();
   }
-  if (compaction_start_time_ < write_time + FLAGS_aborted_intent_cleanup_ms * 1000) {
+
+  if (write_time > compaction_start_time_) {
     return boost::none;
   }
+
+  const uint64_t delta_micros = compaction_start_time_ - write_time;
+  if (delta_micros <
+      GetAtomicFlag(&FLAGS_aborted_intent_cleanup_ms) * MonoTime::kMillisecondsPerSecond) {
+    return boost::none;
+  }
+
   Slice key_slice = key;
   return VERIFY_RESULT_PREPEND(
-      DecodeTransactionIdFromIntentValue(&key_slice), "Could not decode Transaction metadata");
+      dockv::DecodeTransactionIdFromIntentValue(&key_slice),
+      "Could not decode Transaction metadata");
 }
 
-Result<rocksdb::FilterDecision>
-DocDBIntentsCompactionFilter::FilterExternalIntent(const Slice& key) {
+Result<std::pair<TransactionId, OpId>>
+DocDBIntentsCompactionFilter::ParsePostApplyTransactionMetadata(
+    const Slice& key, const Slice& existing_value) {
+  PostApplyTransactionMetadataPB metadata_pb;
+  if (!metadata_pb.ParseFromArray(
+          existing_value.cdata(), narrow_cast<int>(existing_value.size()))) {
+    return STATUS(IllegalState, "Failed to parse post-apply transaction metadata");
+  }
+
+  OpId apply_op_id = metadata_pb.has_apply_op_id() ? OpId::FromPB(metadata_pb.apply_op_id())
+                                                   : OpId::Invalid();
+
   Slice key_slice = key;
-  RETURN_NOT_OK_PREPEND(key_slice.consume_byte(KeyEntryTypeAsChar::kExternalTransactionId),
-                        "Could not decode external transaction byte");
-  // Ignoring transaction id result since function just returns kKeep or kDiscard.
-  RETURN_NOT_OK_PREPEND(
+  TransactionId transaction_id = VERIFY_RESULT_PREPEND(
+      dockv::DecodeTransactionIdFromIntentValue(&key_slice),
+      "Could not decode post-apply transaction metadata");
+
+  return std::make_pair(transaction_id, apply_op_id);
+}
+
+Result<boost::optional<TransactionId>> DocDBIntentsCompactionFilter::FilterExternalIntent(
+    const Slice& key) {
+  Slice key_slice = key;
+  // We know the first byte of the slice is kExternalTransactionId or kTransactionId, so we can
+  // safely strip if off.
+  key_slice.consume_byte();
+  auto txn_id = VERIFY_RESULT_PREPEND(
       DecodeTransactionId(&key_slice), "Could not decode external transaction id");
   auto doc_hybrid_time = VERIFY_RESULT_PREPEND(
-      DecodeInvertedDocHt(key_slice), "Could not decode hybrid time");
+      dockv::DecodeInvertedDocHt(key_slice), "Could not decode hybrid time");
   auto write_time_micros = doc_hybrid_time.hybrid_time().GetPhysicalValueMicros();
   int64_t delta_micros = compaction_start_time_ - write_time_micros;
   if (delta_micros >
       GetAtomicFlag(&FLAGS_external_intent_cleanup_secs) * MonoTime::kMicrosecondsPerSecond) {
-    return rocksdb::FilterDecision::kDiscard;
+    return txn_id;
   }
-  return rocksdb::FilterDecision::kKeep;
+  return boost::none;
 }
 
 void DocDBIntentsCompactionFilter::CompactionFinished() {
@@ -200,15 +244,25 @@ void DocDBIntentsCompactionFilter::CompactionFinished() {
     LOG_WITH_PREFIX(WARNING) << Format(
         "Found $0 total errors during intents compaction filter.", num_errors_);
   }
-  CleanupTransactions();
+  const auto s = CleanupTransactions();
+  if (!s.ok()) {
+    YB_LOG_EVERY_N_SECS(DFATAL, 60) << "Error cleaning up transactions: " << AsString(s);
+  }
 }
 
-void DocDBIntentsCompactionFilter::AddToSet(const TransactionId& transaction_id,
-                                            TransactionIdSet* set) {
-  if (set->size() <= FLAGS_aborted_intent_cleanup_max_batch_size) {
-    set->insert(transaction_id);
+void DocDBIntentsCompactionFilter::AddTransactionToCleanup(const TransactionId& transaction_id) {
+  if (transactions_to_cleanup_.size() <= FLAGS_aborted_intent_cleanup_max_batch_size) {
+    transactions_to_cleanup_.emplace(transaction_id, OpId::Invalid());
   } else {
     rejected_transactions_++;
+  }
+}
+
+void DocDBIntentsCompactionFilter::SetTransactionApplyOpId(
+    const TransactionId& transaction_id, const OpId& apply_op_id) {
+  auto itr = transactions_to_cleanup_.find(transaction_id);
+  if (itr != transactions_to_cleanup_.end()) {
+    itr->second = apply_op_id;
   }
 }
 

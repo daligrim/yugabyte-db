@@ -14,7 +14,6 @@
 #include "yb/client/session.h"
 
 #include "yb/client/async_rpc.h"
-#include "yb/client/batcher.h"
 #include "yb/client/client.h"
 #include "yb/client/client_error.h"
 #include "yb/client/error.h"
@@ -28,29 +27,46 @@
 #include "yb/tserver/tserver_error.h"
 
 #include "yb/util/debug-util.h"
+#include "yb/util/flags.h"
 #include "yb/util/logging.h"
 #include "yb/util/metrics.h"
 #include "yb/util/status_log.h"
+#include "yb/util/sync_point.h"
 
 using namespace std::literals;
 using namespace std::placeholders;
 
-DEFINE_int32(client_read_write_timeout_ms, 60000, "Timeout for client read and write operations.");
+DEFINE_UNKNOWN_int32(client_read_write_timeout_ms, 60000,
+    "Timeout for client read and write operations.");
 
-namespace yb {
-namespace client {
+DEFINE_UNKNOWN_int32(ysql_client_read_write_timeout_ms, -1,
+    "Timeout for YSQL's yb-client read/write "
+    "operations. Falls back on max(client_read_write_timeout_ms, 600s) if set to -1." );
 
-using internal::AsyncRpcMetrics;
-using internal::Batcher;
+DEFINE_RUNTIME_int32(retryable_request_timeout_secs, 660,
+    "Maximum amount of time to keep write request in index, to prevent duplicate writes."
+    "If the client timeout is less than this value, then use the client timeout instead.");
 
-using std::shared_ptr;
+namespace yb::client {
 
 YBSession::YBSession(YBClient* client, const scoped_refptr<ClockBase>& clock) {
   batcher_config_.client = client;
   batcher_config_.non_transactional_read_point =
       clock ? std::make_unique<ConsistentReadPoint>(clock) : nullptr;
   const auto metric_entity = client->metric_entity();
-  async_rpc_metrics_ = metric_entity ? std::make_shared<AsyncRpcMetrics>(metric_entity) : nullptr;
+  async_rpc_metrics_ =
+      metric_entity ? std::make_shared<internal::AsyncRpcMetrics>(metric_entity) : nullptr;
+}
+
+YBSession::YBSession(YBClient* client, MonoDelta delta, const scoped_refptr<ClockBase>& clock)
+    : YBSession(client, clock) {
+  SetTimeout(delta);
+}
+
+YBSession::YBSession(
+    YBClient* client, CoarseTimePoint deadline, const scoped_refptr<ClockBase>& clock)
+    : YBSession(client, clock) {
+  SetDeadline(deadline);
 }
 
 void YBSession::RestartNonTxnReadPoint(const Restart restart) {
@@ -63,17 +79,17 @@ void YBSession::RestartNonTxnReadPoint(const Restart restart) {
   }
 }
 
-void YBSession::SetReadPoint(const ReadHybridTime& read_time) {
-  read_point()->SetReadTime(read_time, {} /* local_limits */);
+void YBSession::SetReadPoint(const ReadHybridTime& read_time, const TabletId& tablet_id) {
+  ConsistentReadPoint::HybridTimeMap local_limits;
+  if (!tablet_id.empty()) {
+    local_limits.emplace(tablet_id, read_time.local_limit);
+  }
+  read_point()->SetReadTime(read_time, std::move(local_limits));
 }
 
 bool YBSession::IsRestartRequired() {
   auto rp = read_point();
   return rp && rp->IsRestartRequired();
-}
-
-void YBSession::DeferReadPoint() {
-  batcher_config_.non_transactional_read_point->Defer();
 }
 
 void YBSession::SetTransaction(YBTransactionPtr transaction) {
@@ -130,9 +146,12 @@ void YBSession::SetDeadline(CoarseTimePoint deadline) {
 namespace {
 
 internal::BatcherPtr CreateBatcher(const YBSession::BatcherConfig& config) {
+  auto session = config.session.lock();
+  CHECK_NOTNULL(session);
+
   auto batcher = std::make_shared<internal::Batcher>(
-      config.client, config.session.lock(), config.transaction, config.read_point(),
-      config.force_consistent_read);
+      config.client, session, config.transaction, config.read_point(), config.force_consistent_read,
+      config.leader_term);
   batcher->SetRejectionScoreSource(config.rejection_score_source);
   return batcher;
 }
@@ -181,14 +200,9 @@ void BatcherFlushDone(
                     << ": (first op error: " << errors[0]->status() << ")";
 
   internal::BatcherPtr retry_batcher = CreateBatcher(batcher_config);
-  retry_batcher->SetDeadline(done_batcher->deadline());
-  for (auto& error : errors) {
-    VLOG_WITH_FUNC(5) << "Retrying " << AsString(error->failed_op())
-                      << " due to: " << error->status();
-    const auto op = error->shared_failed_op();
-    op->ResetTablet();
-    retry_batcher->Add(op);
-  }
+  retry_batcher->InitFromFailedBatcher(done_batcher, errors);
+  DEBUG_ONLY_TEST_SYNC_POINT("BatcherFlushDone:Retry:1");
+
   FlushBatcherAsync(retry_batcher, std::move(callback), batcher_config,
       internal::IsWithinTransactionRetry::kTrue);
 }
@@ -241,12 +255,12 @@ YBClient* YBSession::client() const {
 }
 
 void YBSession::FlushStarted(internal::BatcherPtr batcher) {
-  std::lock_guard<simple_spinlock> l(lock_);
+  std::lock_guard l(lock_);
   flushed_batchers_.insert(batcher);
 }
 
 void YBSession::FlushFinished(internal::BatcherPtr batcher) {
-  std::lock_guard<simple_spinlock> l(lock_);
+  std::lock_guard l(lock_);
   CHECK_EQ(flushed_batchers_.erase(batcher), 1);
 }
 
@@ -285,7 +299,9 @@ internal::Batcher& YBSession::Batcher() {
       batcher_->SetDeadline(deadline_);
     } else {
       auto timeout = timeout_;
+      // In retail mode default to 60s.
       if (PREDICT_FALSE(!timeout.Initialized())) {
+        DCHECK(false) << "Session deadline or timeout must always be set.\n" << GetStackTrace();
         YB_LOG_EVERY_N(WARNING, 100000)
             << "Client writing with no deadline set, using 60 seconds.\n"
             << GetStackTrace();
@@ -298,15 +314,33 @@ internal::Batcher& YBSession::Batcher() {
   return *batcher_;
 }
 
+namespace {
+void PrepareAndApplyYbOp(internal::Batcher* batcher, YBOperationPtr yb_op) {
+  VLOG(5) << "YBSession Apply yb_op: " << yb_op->ToString();
+  yb_op->reset_request_id();
+  batcher->Add(std::move(yb_op));
+}
+}  // namespace
+
 void YBSession::Apply(YBOperationPtr yb_op) {
-  Batcher().Add(yb_op);
+  PrepareAndApplyYbOp(&Batcher(), std::move(yb_op));
+}
+
+void YBSession::Apply(const std::vector<YBOperationPtr>& ops) {
+  if (ops.empty()) {
+    return;
+  }
+  auto& batcher = Batcher();
+  for (const auto& yb_op : ops) {
+    PrepareAndApplyYbOp(&batcher, yb_op);
+  }
 }
 
 bool YBSession::IsInProgress(YBOperationPtr yb_op) const {
   if (batcher_ && batcher_->Has(yb_op)) {
     return true;
   }
-  std::lock_guard<simple_spinlock> l(lock_);
+  std::lock_guard l(lock_);
   for (const auto& b : flushed_batchers_) {
     if (b->Has(yb_op)) {
       return true;
@@ -315,66 +349,40 @@ bool YBSession::IsInProgress(YBOperationPtr yb_op) const {
   return false;
 }
 
-void YBSession::Apply(const std::vector<YBOperationPtr>& ops) {
-  if (ops.empty()) {
-    return;
-  }
-  auto& batcher = Batcher();
-  for (const auto& op : ops) {
-    batcher.Add(op);
-  }
-}
-
 FlushStatus YBSession::TEST_FlushAndGetOpsErrors() {
   return FlushFuture().get();
 }
 
 Status YBSession::TEST_Flush() {
-  return FlushFuture().get().status;
+  auto flush_status = TEST_FlushAndGetOpsErrors();
+  if (VLOG_IS_ON(2)) {
+    for (auto& error : flush_status.errors) {
+      VLOG(2) << "Flush of operation " << error->failed_op().ToString()
+              << " failed: " << error->status();
+    }
+  }
+
+  if (flush_status.status.IsIOError() &&
+      flush_status.status.message() == client::internal::Batcher::kErrorReachingOutToTServersMsg &&
+      !flush_status.errors.empty()) {
+    // TODO: move away from string comparison here and use a more specific status than IOError.
+    // See https://github.com/YugaByte/yugabyte-db/issues/702
+
+    // When any error occurs during the dispatching of YBOperation, YBSession saves the error and
+    // returns IOError. When it happens, just return the first error seen.
+    return flush_status.errors.front()->status();
+  }
+  return std::move(flush_status.status);
 }
 
 Status YBSession::TEST_ApplyAndFlush(YBOperationPtr yb_op) {
   Apply(std::move(yb_op));
-
-  return FlushFuture().get().status;
+  return TEST_Flush();
 }
 
 Status YBSession::TEST_ApplyAndFlush(const std::vector<YBOperationPtr>& ops) {
   Apply(ops);
-  return FlushFuture().get().status;
-}
-
-Status YBSession::ApplyAndFlushSync(const std::vector<YBOperationPtr>& ops) {
-  Apply(ops);
-  auto future = FlushFuture();
-
-  auto deadline = deadline_;
-  if (deadline == CoarseTimePoint()) {
-    if (timeout_.Initialized()) {
-      deadline = CoarseMonoClock::Now() + timeout_;
-    } else {
-      // Client writing with no deadline set, using 60 seconds.
-      deadline = CoarseMonoClock::Now() + 60s;
-    }
-  }
-
-  auto future_status = future.wait_until(deadline);
-  SCHECK(future_status == std::future_status::ready, TimedOut, "Timed out waiting for Flush");
-  return future.get().status;
-}
-
-Status YBSession::ApplyAndFlushSync(YBOperationPtr ops) {
-  return ApplyAndFlushSync(std::vector<YBOperationPtr>{ops});
-}
-
-Status YBSession::ReadSync(std::shared_ptr<YBOperation> yb_op) {
-  CHECK(yb_op->read_only());
-  return ApplyAndFlushSync(std::move(yb_op));
-}
-
-Status YBSession::TEST_ReadSync(std::shared_ptr<YBOperation> yb_op) {
-  CHECK(yb_op->read_only());
-  return TEST_ApplyAndFlush(std::move(yb_op));
+  return TEST_Flush();
 }
 
 size_t YBSession::TEST_CountBufferedOperations() const {
@@ -389,7 +397,7 @@ bool YBSession::TEST_HasPendingOperations() const {
   if (batcher_ && batcher_->HasPendingOperations()) {
     return true;
   }
-  std::lock_guard<simple_spinlock> l(lock_);
+  std::lock_guard l(lock_);
   for (const auto& b : flushed_batchers_) {
     if (b->HasPendingOperations()) {
       return true;
@@ -405,11 +413,33 @@ void YBSession::SetForceConsistentRead(ForceConsistentRead value) {
   }
 }
 
+void YBSession::SetBatcherBackgroundTransactionMeta(
+    const TransactionMetadata& background_transaction_meta) {
+  Batcher().SetBackgroundTransactionMeta(background_transaction_meta);
+}
+
 bool ShouldSessionRetryError(const Status& status) {
   return IsRetryableClientError(status) ||
          tserver::TabletServerError(status) == tserver::TabletServerErrorPB::TABLET_SPLIT ||
          consensus::ConsensusError(status) == consensus::ConsensusErrorPB::TABLET_SPLIT;
 }
 
-} // namespace client
-} // namespace yb
+int YsqlClientReadWriteTimeoutMs() {
+  return (FLAGS_ysql_client_read_write_timeout_ms < 0
+      ? std::max(FLAGS_client_read_write_timeout_ms, 600000)
+      : FLAGS_ysql_client_read_write_timeout_ms);
+}
+
+int SysCatalogRetryableRequestTimeoutSecs() {
+  return std::max(RetryableRequestTimeoutSecs(TableType::PGSQL_TABLE_TYPE),
+                  RetryableRequestTimeoutSecs(TableType::YQL_TABLE_TYPE));
+}
+
+int RetryableRequestTimeoutSecs(TableType table_type) {
+  const int client_timeout_ms = table_type == TableType::PGSQL_TABLE_TYPE
+      ? YsqlClientReadWriteTimeoutMs()
+      : FLAGS_client_read_write_timeout_ms;
+  return std::min(GetAtomicFlag(&FLAGS_retryable_request_timeout_secs), client_timeout_ms / 1000);
+}
+
+} // namespace yb::client

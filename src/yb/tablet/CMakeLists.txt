@@ -31,7 +31,6 @@
 #
 
 set(YB_PCH_PREFIX tablet)
-set(YB_PCH_DEP_LIBS opid_proto)
 
 set(TABLET_SRCS
   abstract_tablet.cc
@@ -45,6 +44,8 @@ set(TABLET_SRCS
   tablet.cc
   tablet_bootstrap.cc
   tablet_bootstrap_if.cc
+  tablet_bootstrap_state_flusher.cc
+  tablet_bootstrap_state_manager.cc
   tablet_component.cc
   tablet_metrics.cc
   tablet_peer_mm_ops.cc
@@ -53,8 +54,11 @@ set(TABLET_SRCS
   transaction_loader.cc
   transaction_participant.cc
   transaction_status_resolver.cc
+  write_post_apply_metadata_task.cc
   operations/operation.cc
+  operations/change_auto_flags_config_operation.cc
   operations/change_metadata_operation.cc
+  operations/clone_operation.cc
   operations/history_cutoff_operation.cc
   operations/operation_driver.cc
   operations/operation_tracker.cc
@@ -65,7 +69,6 @@ set(TABLET_SRCS
   operations/write_operation.cc
   maintenance_manager.cc
   mvcc.cc
-  tablet_metadata.cc
   tablet_retention_policy.cc
   preparer.cc
   write_query.cc
@@ -75,6 +78,7 @@ set(TABLET_DEPS pq_utils)
 
 YRPC_GENERATE(
   TABLET_PROTO_SRCS TABLET_PROTO_HDRS TABLET_PROTO_TGTS
+  MESSAGES TRUE
   SOURCE_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../..
   BINARY_ROOT ${CMAKE_CURRENT_BINARY_DIR}/../..
   NO_SERVICE_PROTO_FILES
@@ -85,14 +89,36 @@ YRPC_GENERATE(
   )
 set(TABLET_PROTO_LIBS
   docdb_proto
+  dockv_proto
   protobuf
   fs_proto
   consensus_metadata_proto
   yb_common)
 ADD_YB_LIBRARY(tablet_proto
   SRCS ${TABLET_PROTO_SRCS}
-  DEPS ${TABLET_PROTO_LIBS} opid_proto
+  DEPS ${TABLET_PROTO_LIBS}
   NONLINK_DEPS ${TABLET_PROTO_TGTS})
+
+ADD_YB_LIBRARY(
+  tablet_metadata
+  SRCS kv_formatter.cc tablet_metadata.cc
+  DEPS tablet_proto yb_docdb)
+
+add_dependencies(tablet_metadata gen_src_yb_cdc_cdc_consumer_proto)
+add_dependencies(tablet_metadata gen_src_yb_cdc_cdc_service_proto)
+add_dependencies(tablet_metadata gen_src_yb_cdc_xcluster_producer_proto)
+add_dependencies(tablet_metadata gen_src_yb_consensus_consensus_proto)
+add_dependencies(tablet_metadata gen_src_yb_consensus_consensus_types_proto)
+add_dependencies(tablet_metadata gen_src_yb_master_catalog_entity_info_proto)
+add_dependencies(tablet_metadata gen_src_yb_master_master_backup_proto)
+add_dependencies(tablet_metadata gen_src_yb_master_master_client_proto)
+add_dependencies(tablet_metadata gen_src_yb_master_master_ddl_proto)
+add_dependencies(tablet_metadata gen_src_yb_master_master_replication_proto)
+add_dependencies(tablet_metadata gen_src_yb_master_master_types_proto)
+add_dependencies(tablet_metadata gen_src_yb_rpc_any_proto)
+add_dependencies(tablet_metadata gen_src_yb_tserver_backup_proto)
+add_dependencies(tablet_metadata gen_src_yb_tserver_tserver_proto)
+add_dependencies(tablet_metadata gen_src_yb_tserver_tserver_types_proto)
 
 ADD_YB_LIBRARY(
   tablet
@@ -113,11 +139,13 @@ target_link_libraries(tablet
   yb_common
   gutil
   server_common
+  yb_ash
   yb_fs
   yb_rocksutil
   yb_util
   consensus
   rocksdb
+  tablet_metadata
   yb_docdb
   yb_client
   yb_pggate_util
@@ -144,3 +172,4 @@ ADD_YB_TEST(composite-pushdown-test)
 ADD_YB_TEST(tablet_peer-test)
 ADD_YB_TEST(tablet_random_access-test)
 ADD_YB_TEST(tablet_data_integrity-test)
+ADD_YB_TEST(operations/operation_tracker-test)

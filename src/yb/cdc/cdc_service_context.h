@@ -37,9 +37,7 @@ class CDCServiceContext {
   // Returns permanent UUID of this instance.
   virtual const std::string& permanent_uuid() const = 0;
 
-  // Creates async client initialiser with given name and default timeout.
-  virtual std::unique_ptr<client::AsyncClientInitialiser> MakeClientInitializer(
-      const std::string& client_name, MonoDelta default_timeout) const = 0;
+  virtual Result<uint32> GetAutoFlagsConfigVersion() const = 0;
 
   virtual ~CDCServiceContext() = default;
 };

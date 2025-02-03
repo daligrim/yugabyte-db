@@ -14,7 +14,7 @@
 #include "yb/master/sys_catalog_writer.h"
 
 #include "yb/common/pgsql_protocol.pb.h"
-#include "yb/common/ql_expr.h"
+#include "yb/qlexpr/ql_expr.h"
 #include "yb/common/ql_protocol_util.h"
 
 #include "yb/docdb/doc_ql_scanspec.h"
@@ -30,6 +30,10 @@
 
 #include "yb/util/pb_util.h"
 #include "yb/util/status_format.h"
+
+DEFINE_RUNTIME_bool(ignore_null_sys_catalog_entries, false,
+                    "Whether we should ignore system catalog entries with NULL value during "
+                    "iteration.");
 
 namespace yb {
 namespace master {
@@ -51,6 +55,29 @@ Status SetColumnId(
   return Status::OK();
 }
 
+Status ReadNextSysCatalogRow(
+    const qlexpr::QLTableRow& value_map, const Schema& schema, int8_t entry_type,
+    ssize_t type_col_idx, ssize_t entry_id_col_idx, ssize_t metadata_col_idx,
+    const EnumerationCallback& callback) {
+  QLValue found_entry_type, entry_id, metadata;
+  RETURN_NOT_OK(value_map.GetValue(schema.column_id(type_col_idx), &found_entry_type));
+  SCHECK_EQ(found_entry_type.int8_value(), entry_type, Corruption, "Found wrong entry type");
+  RETURN_NOT_OK(value_map.GetValue(schema.column_id(entry_id_col_idx), &entry_id));
+  RETURN_NOT_OK(value_map.GetValue(schema.column_id(metadata_col_idx), &metadata));
+  if (metadata.type() != InternalType::kBinaryValue) {
+    auto status = STATUS_FORMAT(
+        Corruption, "Unexpected value type for metadata: $0, row: $1, type: $2, id: $3",
+        metadata.type(), value_map.ToString(), static_cast<SysRowEntryType>(entry_type),
+        Slice(entry_id.binary_value()).ToDebugHexString());
+    if (FLAGS_ignore_null_sys_catalog_entries && IsNull(metadata)) {
+      LOG(DFATAL) << status;
+      return Status::OK();
+    }
+    return status;
+  }
+  return callback(entry_id.binary_value(), metadata.binary_value());
+}
+
 } // namespace
 
 bool IsWrite(QLWriteRequestPB::QLStmtType op_type) {
@@ -69,10 +96,11 @@ Status SysCatalogWriter::DoMutateItem(
     const std::string& item_id,
     const google::protobuf::Message& prev_pb,
     const google::protobuf::Message& new_pb,
-    QLWriteRequestPB::QLStmtType op_type) {
+    QLWriteRequestPB::QLStmtType op_type,
+    bool skip_if_clean) {
   const bool is_write = IsWrite(op_type);
 
-  if (is_write) {
+  if (is_write && skip_if_clean) {
     std::string diff;
 
     if (pb_util::ArePBsEqual(prev_pb, new_pb, VLOG_IS_ON(2) ? &diff : nullptr)) {
@@ -81,15 +109,21 @@ Status SysCatalogWriter::DoMutateItem(
       return Status::OK();
     }
 
-    VLOG(2) << "Updating item " << item_id << " in catalog: " << diff;
   }
 
   return FillSysCatalogWriteRequest(
       type, item_id, new_pb, op_type, schema_with_ids_, req_->add_ql_write_batch());
 }
 
+Status SysCatalogWriter::Mutate(
+    int8_t type, const std::string& item_id, const google::protobuf::Message& new_pb,
+    QLWriteRequestPB::QLStmtType op_type) {
+  return FillSysCatalogWriteRequest(
+      type, item_id, new_pb, op_type, schema_with_ids_, req_->add_ql_write_batch());
+}
+
 Status SysCatalogWriter::InsertPgsqlTableRow(const Schema& source_schema,
-                                             const QLTableRow& source_row,
+                                             const qlexpr::QLTableRow& source_row,
                                              const TableId& target_table_id,
                                              const Schema& target_schema,
                                              const uint32_t target_schema_version,
@@ -105,8 +139,8 @@ Status SysCatalogWriter::InsertPgsqlTableRow(const Schema& source_schema,
   pgsql_write->set_table_id(target_table_id);
   pgsql_write->set_schema_version(target_schema_version);
 
-  // Postgres sys catalog table is non-partitioned. So there should be no hash column.
-  DCHECK_EQ(source_schema.num_hash_key_columns(), 0);
+  RSTATUS_DCHECK_EQ(source_schema.num_hash_key_columns(), 0, InternalError, "Postgres sys catalog "
+                    "table is non-partitioned, so there should be no hash columns.");
   for (size_t i = 0; i < source_schema.num_range_key_columns(); i++) {
     const auto& value = source_row.GetValue(source_schema.column_id(i));
     if (value) {
@@ -123,6 +157,28 @@ Status SysCatalogWriter::InsertPgsqlTableRow(const Schema& source_schema,
       column_value->set_column_id(target_schema.column_id(i));
       column_value->mutable_expr()->mutable_value()->CopyFrom(*value);
     }
+  }
+
+  return Status::OK();
+}
+
+Status SysCatalogWriter::DeleteYsqlTableRow(const Schema& schema,
+                                            const qlexpr::QLTableRow& row,
+                                            const TableId& table_id,
+                                            const uint32_t schema_version) {
+  PgsqlWriteRequestPB* pgsql_write = req_->add_pgsql_write_batch();
+  pgsql_write->set_client(YQL_CLIENT_PGSQL);
+  pgsql_write->set_stmt_type(PgsqlWriteRequestPB::PGSQL_DELETE);
+  pgsql_write->set_table_id(table_id);
+  pgsql_write->set_schema_version(schema_version);
+
+  RSTATUS_DCHECK_EQ(schema.num_hash_key_columns(), 0, InternalError, "Postgres sys catalog "
+                    "table is non-partitioned, so there should be no hash columns.");
+  for (size_t i = 0; i < schema.num_range_key_columns(); i++) {
+    const auto& value = row.GetValue(schema.column_id(i));
+    SCHECK(value, Corruption, "Range value of column id $0 missing for table $1",
+           schema.column_id(i), table_id);
+    pgsql_write->add_range_column_values()->mutable_value()->CopyFrom(*value);
   }
 
   return Status::OK();
@@ -170,12 +226,12 @@ Status FillSysCatalogWriteRequest(
 Status EnumerateSysCatalog(
     tablet::Tablet* tablet, const Schema& schema, int8_t entry_type,
     const EnumerationCallback& callback) {
-  auto iter = VERIFY_RESULT(tablet->NewRowIterator(
-      schema.CopyWithoutColumnIds(), ReadHybridTime::Max(), /* table_id= */ "",
+  dockv::ReaderProjection projection(schema);
+  auto iter = VERIFY_RESULT(tablet->NewUninitializedDocRowIterator(
+      projection, ReadHybridTime::Max(), /* table_id= */ "",
       CoarseTimePoint::max(), tablet::AllowBootstrappingState::kTrue));
 
-  return EnumerateSysCatalog(
-      down_cast<docdb::DocRowwiseIterator*>(iter.get()), schema, entry_type, callback);
+  return EnumerateSysCatalog(iter.get(), schema, entry_type, callback);
 }
 
 Status EnumerateSysCatalog(
@@ -189,35 +245,60 @@ Status EnumerateSysCatalog(
   QLConditionPB cond;
   cond.set_op(QL_OP_AND);
   QLAddInt8Condition(&cond, schema.column_id(type_col_idx), QL_OP_EQUAL, entry_type);
-  const std::vector<docdb::KeyEntryValue> empty_hash_components;
+  const dockv::KeyEntryValues empty_hash_components;
   docdb::DocQLScanSpec spec(
       schema, boost::none /* hash_code */, boost::none /* max_hash_code */,
       empty_hash_components, &cond, nullptr /* if_req */, rocksdb::kDefaultQueryId);
   RETURN_NOT_OK(doc_iter->Init(spec));
 
-  while (VERIFY_RESULT(doc_iter->HasNext())) {
+  qlexpr::QLTableRow value_map;
+  while (VERIFY_RESULT(doc_iter->FetchNext(&value_map))) {
     YB_RETURN_NOT_OK_PREPEND(
         ReadNextSysCatalogRow(
-            doc_iter, schema, entry_type,
+            value_map, schema, entry_type,
             type_col_idx, entry_id_col_idx, metadata_col_idx, callback),
         "System catalog snapshot is corrupted or built using different build type");
   }
   return Status::OK();
 }
 
-Status ReadNextSysCatalogRow(
-    docdb::DocRowwiseIterator* doc_iter, const Schema& schema, int8_t entry_type,
-    ssize_t type_col_idx, ssize_t entry_id_col_idx, ssize_t metadata_col_idx,
-    const EnumerationCallback& callback) {
-  QLTableRow value_map;
+Status EnumerateAllSysCatalogEntries(
+    tablet::Tablet* tablet, const Schema& schema, const SysCatalogEntryCallback& callback) {
+  dockv::ReaderProjection projection(schema);
+  auto iter = VERIFY_RESULT(tablet->NewUninitializedDocRowIterator(
+      projection, ReadHybridTime::Max(), /* table_id= */ "",
+      CoarseTimePoint::max(), tablet::AllowBootstrappingState::kTrue));
+
+  return EnumerateAllSysCatalogEntries(iter.get(), schema, callback);
+}
+
+Status EnumerateAllSysCatalogEntries(
+    docdb::DocRowwiseIterator* doc_iter, const Schema& schema,
+    const SysCatalogEntryCallback& callback) {
+  const auto type_col_idx = VERIFY_RESULT(schema.ColumnIndexByName(kSysCatalogTableColType));
+  const auto entry_id_col_idx = VERIFY_RESULT(schema.ColumnIndexByName(kSysCatalogTableColId));
+  const auto metadata_col_idx = VERIFY_RESULT(schema.ColumnIndexByName(
+      kSysCatalogTableColMetadata));
+
+  const dockv::KeyEntryValues empty_hash_components;
+  docdb::DocQLScanSpec spec(
+      schema, boost::none /* hash_code */, boost::none /* max_hash_code */,
+      empty_hash_components, nullptr  /* req */,
+      nullptr /* if_req */, rocksdb::kDefaultQueryId);
+  RETURN_NOT_OK(doc_iter->Init(spec));
+
+  qlexpr::QLTableRow value_map;
   QLValue found_entry_type, entry_id, metadata;
-  RETURN_NOT_OK(doc_iter->NextRow(&value_map));
-  RETURN_NOT_OK(value_map.GetValue(schema.column_id(type_col_idx), &found_entry_type));
-  SCHECK_EQ(found_entry_type.int8_value(), entry_type, Corruption, "Found wrong entry type");
-  RETURN_NOT_OK(value_map.GetValue(schema.column_id(entry_id_col_idx), &entry_id));
-  RETURN_NOT_OK(value_map.GetValue(schema.column_id(metadata_col_idx), &metadata));
-  SCHECK_EQ(metadata.type(), InternalType::kBinaryValue, Corruption, "Found wrong metadata type");
-  RETURN_NOT_OK(callback(entry_id.binary_value(), metadata.binary_value()));
+  while (VERIFY_RESULT(doc_iter->FetchNext(&value_map))) {
+    RETURN_NOT_OK(value_map.GetValue(schema.column_id(type_col_idx), &found_entry_type));
+    RETURN_NOT_OK(value_map.GetValue(schema.column_id(entry_id_col_idx), &entry_id));
+    RETURN_NOT_OK(value_map.GetValue(schema.column_id(metadata_col_idx), &metadata));
+    SCHECK_EQ(metadata.type(), InternalType::kBinaryValue, Corruption,
+              "System catalog snapshot is corrupted, or is built using different build type");
+    RETURN_NOT_OK(callback(
+        found_entry_type.int8_value(), entry_id.binary_value(), metadata.binary_value()));
+  }
+
   return Status::OK();
 }
 

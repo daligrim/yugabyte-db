@@ -45,7 +45,6 @@
 #include <boost/optional/optional.hpp>
 #include <cds/container/basket_queue.h>
 #include <cds/gc/dhp.h>
-#include <glog/logging.h>
 
 #include "yb/gutil/atomicops.h"
 #include "yb/gutil/ref_counted.h"
@@ -56,7 +55,7 @@
 #include "yb/rpc/service_if.h"
 
 #include "yb/util/countdown_latch.h"
-#include "yb/util/flag_tags.h"
+#include "yb/util/flags.h"
 #include "yb/util/lockfree.h"
 #include "yb/util/logging.h"
 #include "yb/util/metrics.h"
@@ -68,24 +67,22 @@
 
 using namespace std::literals;
 using namespace std::placeholders;
-using std::shared_ptr;
-using strings::Substitute;
+using std::string;
 
-DEFINE_int64(max_time_in_queue_ms, 6000,
-             "Fail calls that get stuck in the queue longer than the specified amount of time "
-                 "(in ms)");
+DEFINE_RUNTIME_int64(max_time_in_queue_ms, 6000,
+    "Fail calls that get stuck in the queue longer than the specified amount of time (in ms)");
 TAG_FLAG(max_time_in_queue_ms, advanced);
-TAG_FLAG(max_time_in_queue_ms, runtime);
-DEFINE_int64(backpressure_recovery_period_ms, 600000,
-             "Once we hit a backpressure/service-overflow we will consider dropping stale requests "
-             "for this duration (in ms)");
+DEFINE_RUNTIME_int64(backpressure_recovery_period_ms, 600000,
+    "Once we hit a backpressure/service-overflow we will consider dropping stale requests "
+    "for this duration (in ms)");
 TAG_FLAG(backpressure_recovery_period_ms, advanced);
-TAG_FLAG(backpressure_recovery_period_ms, runtime);
 DEFINE_test_flag(bool, enable_backpressure_mode_for_testing, false,
             "For testing purposes. Enables the rpc's to be considered timed out in the queue even "
             "when we have not had any backpressure in the recent past.");
 
-METRIC_DEFINE_coarse_histogram(server, rpc_incoming_queue_time,
+DECLARE_bool(TEST_ash_debug_aux);
+
+METRIC_DEFINE_event_stats(server, rpc_incoming_queue_time,
                         "RPC Queue Time",
                         yb::MetricUnit::kMicroseconds,
                         "Number of microseconds incoming RPC requests spend in the worker queue");
@@ -143,8 +140,8 @@ class ServicePoolImpl final : public InboundCallHandler {
           auto id = Format("rpcs_in_queue_$0", service_->service_name());
           EscapeMetricNameForPrometheus(&id);
           string description = id + " metric for ServicePoolImpl";
-          rpcs_in_queue_ = entity->FindOrCreateGauge(
-              std::unique_ptr<GaugePrototype<int64_t>>(new OwningGaugePrototype<int64_t>(
+          rpcs_in_queue_ = entity->FindOrCreateMetric<AtomicGauge<int64_t>>(
+              std::shared_ptr<GaugePrototype<int64_t>>(new OwningGaugePrototype<int64_t>(
                   entity->prototype().name(), std::move(id),
                   description, MetricUnit::kRequests, description, MetricLevel::kInfo)),
               static_cast<int64>(0) /* initial_value */);
@@ -184,6 +181,7 @@ class ServicePoolImpl final : public InboundCallHandler {
 
   void Enqueue(const InboundCallPtr& call) {
     TRACE_TO(call->trace(), "Inserting onto call queue");
+    SET_WAIT_STATUS_TO(call->wait_state(), OnCpu_Passive);
 
     auto task = call->BindTask(this);
     if (!task) {
@@ -238,10 +236,6 @@ class ServicePoolImpl final : public InboundCallHandler {
       return;
     }
 
-    if (status.IsServiceUnavailable()) {
-      Overflow(call, "global", thread_pool_.options().queue_limit);
-      return;
-    }
     YB_LOG_EVERY_N_SECS(WARNING, 1)
         << LogPrefix()
         << call->method_name() << " request on " << service_->service_name() << " from "
@@ -257,6 +251,12 @@ class ServicePoolImpl final : public InboundCallHandler {
   void Handle(InboundCallPtr incoming) override {
     incoming->RecordHandlingStarted(incoming_queue_time_);
     ADOPT_TRACE(incoming->trace());
+    if (GetAtomicFlag(&FLAGS_TEST_ash_debug_aux) && incoming->wait_state()) {
+      incoming->wait_state()->UpdateAuxInfo(
+          ash::AshAuxInfo{.method = incoming->method_name().ToBuffer()});
+    }
+    ADOPT_WAIT_STATE(incoming->wait_state());
+    SCOPED_WAIT_STATUS(OnCpu_Active);
 
     const char* error_message;
     if (PREDICT_FALSE(incoming->ClientTimedOut())) {
@@ -411,7 +411,7 @@ class ServicePoolImpl final : public InboundCallHandler {
   ThreadPool& thread_pool_;
   Scheduler& scheduler_;
   ServiceIfPtr service_;
-  scoped_refptr<Histogram> incoming_queue_time_;
+  scoped_refptr<EventStats> incoming_queue_time_;
   scoped_refptr<Counter> rpcs_timed_out_in_queue_;
   scoped_refptr<Counter> rpcs_timed_out_early_in_queue_;
   scoped_refptr<Counter> rpcs_queue_overflow_;

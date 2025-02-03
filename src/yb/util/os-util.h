@@ -34,12 +34,11 @@
 // - Fixes for cpplint.
 // - Fixed parsing when thread names have spaces.
 
-#ifndef YB_UTIL_OS_UTIL_H
-#define YB_UTIL_OS_UTIL_H
+#pragma once
 
 #include <string>
 
-#include "yb/util/status_fwd.h"
+#include "yb/util/result.h"
 
 namespace yb {
 
@@ -72,8 +71,6 @@ Status GetThreadStats(int64_t tid, ThreadStats* stats);
 // non-0 exit code), and true otherwise. *msg is set to an error message including the OS
 // error string, if any, and the first 1k of output if there was any error, or just the
 // first 1k of output otherwise.
-bool RunShellProcess(const std::string& cmd, std::string* msg);
+Result<std::string> RunShellProcess(const std::string& cmd);
 
 } // namespace yb
-
-#endif /* YB_UTIL_OS_UTIL_H */

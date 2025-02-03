@@ -15,301 +15,155 @@ type: docs
 
   <li>
     <a href="../create-universe-multi-zone/" class="nav-link active">
-      <i class="fas fa-building" aria-hidden="true"></i>
-Generic</a>
+      <i class="fa-solid fa-building" aria-hidden="true"></i>
+      Generic</a>
   </li>
 
   <li>
     <a href="../create-universe-multi-zone-kubernetes/" class="nav-link">
-      <i class="fas fa-cubes" aria-hidden="true"></i>
+      <i class="fa-regular fa-dharmachakra" aria-hidden="true"></i>
       Kubernetes
     </a>
   </li>
 
 </ul>
 
-You can create a YugabyteDB universe using any cloud provider, except Kubernetes, in one geographic region across multiple availability zones.
+YugabyteDB Anywhere allows you to create a universe in one geographic region across multiple availability zones using a provider configuration.
+
+For specific scenarios such as creating large numbers of tables, high rates of DDL change, and so on, consider creating a universe with dedicated nodes for YB-Master processes. Refer to [Create a universe with dedicated nodes](../dedicated-master/) for more details.
 
 ## Prerequisites
 
-Before you start creating a universe, ensure that you performed steps applicable to the cloud provider of your choice, as described in [Configure a cloud provider](/preview/yugabyte-platform/configure-yugabyte-platform/set-up-cloud-provider/).
+Before you start creating a universe, ensure that you have created a provider configuration as described in [Create provider configurations](../../configure-yugabyte-platform/).
 
 ## Create a universe
 
-If no universes have been created yet, the **Dashboard** does not display any.
+To create a universe:
 
-Click **Create Universe** to create a universe and then enter your intent.
+1. Navigate to **Dashboard** or **Universes**, and click **Create Universe**.
 
-The **Provider**, **Regions**, and **Instance Type** fields are initialized based on the [configured cloud providers](../../configure-yugabyte-platform/set-up-cloud-provider/). When you provide the value in the **Nodes** field, the nodes are automatically placed across all the availability zones to guarantee the maximum availability.
+1. Enter the universe details. Refer to [Universe settings](#universe-settings).
 
-To create a multi-zone universe using [Google Cloud provider (GCP)](../../configure-yugabyte-platform/set-up-cloud-provider/gcp/), perform the following:
+1. To add a read replica, click **Configure Read Replica**. Refer to [Create a read replica cluster](../read-replicas/).
 
-- Enter a universe name (**helloworld1**).
+1. Click **Create** when you are done and wait for the configuration to complete.
 
-- Enter the region (**Oregon**).
+![Create Universe on GCP](/images/yp/create-uni-multi-zone-1-gcp.png)
 
-- Change the instance type (**n1-standard-8**).
+## Universe settings
 
-- Accept default values for all of the remaining fields (replication factor = 3, number of nodes = 3), as per the following illustration:<br><br>
+### Cloud Configuration
 
-  ![Create Universe on GCP](/images/yp/create-uni-multi-zone-1.png)<br><br>
+Specify the provider and geolocations for the nodes in the universe:
 
-- Click **Create**.
+- Enter a name for the universe.
+
+- Choose the [provider configuration](../../configure-yugabyte-platform/) to use to create the universe.
+
+- Select the regions in which to deploy nodes. The available regions will depend on the provider you selected.
+
+- Specify the master placement for the YB-Master processes. Refer to [Create a universe with dedicated nodes](../dedicated-master/) for more details.
+
+- Enter the number of nodes to deploy in the universe. When you provide the value in the **Nodes** field, the nodes are automatically placed across all the availability zones to guarantee the maximum availability.
+
+- Select the [replication factor](../../../architecture/docdb-replication/replication/#replication-factor) for the universe.
+
+- Configure the availability zones where the nodes will be deployed by clicking **Add Zone**.
+
+- Use the **Preferred** setting to set the [preferred zone or region](../../../explore/multi-region-deployments/synchronous-replication-yba/#preferred-region).
+
+### Instance Configuration
+
+Specify the instance to use for the universe nodes:
+
+- Choose the **Linux version** to be provisioned on the nodes of the universe.
+
+- Select the **Instance Type** to use for the nodes in the universe.
+
+- Specify the number and size of the storage volumes, and the storage type.
+
+### Security Configurations
+
+#### IP Settings
+
+To enable public access to the universe, select the **Assign Public IP** option.
+
+#### Authentication Settings
+
+Enable the YSQL and YCQL endpoints and database authentication.
+
+Enter the password to use for the default database admin superuser (yugabyte for YSQL, and cassandra for YCQL). For more information, refer to [Database authorization](../../security/authorization-platform/).
+
+You can also enable and disable the API endpoints and authentication after deployment. Navigate to your universe, click **Actions**, and choose **Edit YSQL Configuration** or **Edit YCQL Configuration**.
+
+By default, the API endpoints use ports 5433 (YSQL) and 9042 (YCQL). You can [customize these ports](#advanced-configuration), and, after deployment, you can modify the YCQL API and admin UI endpoint ports. To change YCQL ports, navigate to your universe, click **Actions**, choose **Edit YCQL Configuration**, and select the **Override YCQL Default Ports** option.
+
+#### Encryption Settings
+
+Enable encryption in transit to encrypt universe traffic. You can enable the following:
+
+- **Node-to-Node TLS** to encrypt traffic between universe nodes.
+- **Client-to-Node TLS** to encrypt traffic between universe nodes and external clients.
+
+    Note that if you want to enable Client-to-Node encryption, you first must enable Node-to-Node encryption.
+
+Encryption requires a certificate. YugabyteDB Anywhere can generate a self-signed certificate automatically, or you can use your own certificate.
+
+To use your own, you must first add it to YugabyteDB Anywhere; refer to [Add certificates](../../security/enable-encryption-in-transit/add-certificate-self/).
+
+To have YugabyteDB Anywhere generate a certificate for the universe, use the default **Root Certificate** setting of **Create New Certificate**. To use a certificate you added or a previously generated certificate, select it from the **Root Certificate** menu.
+
+For more information on using and managing certificates, refer to [Encryption in transit](../../security/enable-encryption-in-transit/).
+
+To encrypt the universe data, select the **Enable encryption at rest** option and select the [KMS configuration](../../security/create-kms-config/aws-kms/) to use for encryption. For more information, refer to [Encryption at rest](../../security/enable-encryption-at-rest/).
+
+### Advanced Configuration
+
+DB Version
+: Choose the version of YugabyteDB to install on the nodes. If the version you want to add is not listed, you can add it to YugabyteDB Anywhere. Refer to [Manage YugabyteDB releases](../../manage-deployments/ybdb-releases/).
+
+Access key
+: The access key is the SSH key that is created in the provider. Usually, each provider has its own access key, but if you are reusing keys across providers, they are listed here.
+
+Instance Profile ARN
+: For AWS providers, you can assign an ARN to the nodes in the universe; this allow them to be seamlessly backed up without explicit credentials.
+
+Enhanced Postgres Compatibility
+: If database version is v2024.2 or later, you can enable early access features for PostgreSQL compatibility. For more information, refer to [Enhanced PostgreSQL Compatibility Mode](../../../develop/postgresql-compatibility/).
+
+Enable Connection Pooling
+: {{<tags/feature/ea>}}If database version is v2024.2 or later, you can enable [Built-in connection pooling](../../../explore/going-beyond-sql/connection-mgr-ysql/).
+: While in Early Access, connection pooling is not available by default. To make the feature available, set the *Allow users to enable or disable connection pooling* Global Runtime Configuration option (config key `yb.universe.allow_connection_pooling`) to true. Refer to [Manage runtime configuration settings](../../administer-yugabyte-platform/manage-runtime-config/). You must be a Super Admin to set global runtime configuration flags.
+
+Enable Systemd Services
+: To use cron instead of systemd for managing nodes, you can disable systemd services. This is not recommended.
+
+Override Deployment Ports
+: To customize the [ports used for the universe](../../prepare/networking/), select the **Override Deployment Ports** option and enter the custom port numbers for the services you want to change. Any value from `1024` to `65535` is valid, as long as it doesn't conflict with anything else running on nodes to be provisioned.
+
+### G-Flags
+
+Optionally, add configuration flags for your YB-Master and YB-TServer nodes. You can also set flags after universe creation. Refer to [Edit configuration flags](../../manage-deployments/edit-config-flags/).
+
+### User Tags
+
+The instances created on a cloud provider can be assigned special metadata to help manage, bill, or audit the resources. You can define these tags when you create a new universe, as well as modify or delete tags of an existing universe. Refer to [Create and edit instance tags](../../manage-deployments/instance-tags/).
 
 ## Examine the universe
+
+After the universe is ready, its **Overview** tab should appear similar to the following illustration:
+
+![Multi-zone universe ready](/images/yp/multi-zone-universe-ready-1-220.png)
 
 The **Universes** view allows you to examine various aspects of the universe:
 
 - **Overview** provides the information on the current YugabyteDB Anywhere version, the number of nodes included in the primary cluster, the cost associated with running the universe, the CPU and disk usage, the geographical location of the nodes, the operations per second and average latency, the number of different types of tables, as well as the health monitor.
-- **Tables** provides details about YSQL, YCQL, and YEDIS tables included in the universe.
+- **Tables** provides details about YSQL and YCQL tables included in the universe. Table sizes are calculated across all the nodes in the cluster.
 - **Nodes** provide details on nodes included in the universe and allows you to perform actions on a specific node (connect, stop, remove, display live and slow queries, download logs). You can also use **Nodes** to open the cloud provider's instances page. For example, in case of GCP, if you navigate to **Compute Engine > VM Instances** and search for instances that contain the name of your universe in the instances name, you should see a list of instances.
 - **Metrics** displays graphs representing information on operations, latency, and other parameters for each type of node and server.
 - **Queries** displays details about live and slow queries that you can filter by column and text.
-- **Replication** provides information about any [xCluster replication](../../create-deployments/async-replication-platform/) in the universe.
+- **xCluster Disaster Recovery** provides information about any [disaster recovery](../../back-up-restore-universes/disaster-recovery/) configured for the universe.
+- **xCluster Replication** provides information about any [asynchronous replication](../../manage-deployments/xcluster-replication/) in the universe.
 - **Tasks** provides details about the state of tasks running on the universe, as well as the tasks that have run in the past against this universe.
 - **Backups** displays information about scheduled backups, if any, and allows you to create, restore, and delete backups.
 - **Health** displays the detailed performance status of the nodes and components involved in their operation. **Health** also allows you to pause health check alerts.
-
-## Connect to a database node
-
-Once the universe is ready, its **Overview** tab should appear similar to the following illustration:
-
-![Multi-zone universe ready](/images/yp/multi-zone-universe-ready-1.png)
-
-You connect to a database node as follows:
-
-- Open the **Nodes** tab to find a list of the IP addresses of the available nodes that have been created and configured, as shown in the following illustration:<br><br>
-
-  ![Multi-zone universe nodes](/images/yp/multi-zone-universe-nodes-1.png)
-
-- Determine the node to which you wish to connect and click the corresponding **Action > Connect**.
-
-- Copy the SSH command displayed in the **Access your node** dialog shown in the following illustration:
-
-  ![Multi-zone universe connect](/images/yp/multi-zone-universe-connect-2.png)
-
-- Run the preceding command from the YugabyteDB Anywhere server, as follows:
-
-  ```sh
-  centos@yugaware-1:~$ sudo ssh -i /opt/yugabyte/yugaware/data/keys/109e95b5-bf08-4a8f-a7fb-2d2866865e15/yb-gcp-config-key.pem -ostricthostkeychecking=no -p 54422 yugabyte@10.150.1.56
-
-  Are you sure you want to continue connecting (yes/no)? yes
-  [centos@yb-dev-helloworld1-n1 ~]$
-  ```
-
-## Run workloads
-
-YugabyteDB Anywhere includes a number of sample applications enclosed in Docker containers.
-
-To access instructions on how to run sample applications, select your universe's **Overview** and then click **Actions > Run Sample Apps** to open the **Run Sample Apps** dialog shown in the following illustration:
-
-![Multi-zone universe sample apps](/images/yp/multi-zone-universe-sample-apps-1.png)
-
-<!--
-
-You can run one of the key-value workloads against the YCQL API and the YEDIS API as follows:
-
-- Install Java by executing the following command:
-
-```sh
-$ sudo yum install java-1.8.0-openjdk.x86_64 -y
-```
-
-- Switch to the yugabyte user by executing the following command:
-
-```sh
-$ sudo su - yugabyte
-```
-
-- Export the `YCQL_ENDPOINTS` environment variable, supplying the IP addresses for nodes in the cluster, as follows:
-
-  - Navigate to the **Universes > Overview** tab and click **YCQL Endpoints** to open a new tab with a list of IP addresses, as shown in the following illustration:
-
-    ![YCQL end points](/images/ee/multi-zone-universe-ycql-endpoints.png)
-
-  - Click the **Export** icon for **YCQL Services** to trigger export into a shell variable on the database node **yb-dev-helloworld1-n1** to which you are connected. Remember to replace the following IP addresses with those displayed in the YugabyteDB Anywhere UI.
-
-    ```sh
-    $ export YCQL_ENDPOINTS="10.138.0.3:9042,10.138.0.4:9042,10.138.0.5:9042"
-    ```
-
-- Export the `YEDIS_ENDPOINTS` environment variable by repeating the preceding procedure and as per the following illustration and command:
-
-  ![YCQL end points](/images/ee/multi-zone-universe-yedis-endpoints.png)
-
-  ```sh
-  $ export YEDIS_ENDPOINTS="10.138.0.3:6379,10.138.0.4:6379,10.138.0.5:6379"
-  ```
-
-### CassandraKeyValue workload
-
-To start the CassandraKeyValue workload, execute the following command:
-
-```sh
-$ java -jar /home/yugabyte/tserver/java/yb-sample-apps.jar \
-            --workload CassandraKeyValue \
-            --nodes $YCQL_ENDPOINTS \
-            --num_threads_write 2 \
-            --num_threads_read 32 \
-            --value_size 128 \
-            --num_unique_keys 10000000 \
-            --nouuid
-```
-
-The sample application produces output similar to the following and reports some statistics in the steady state:
-
-```output
-Created table: [CREATE TABLE IF NOT EXISTS CassandraKeyValue (k varchar, v blob, primary key (k));]
-...
-Read: 47388.10 ops/sec (0.67 ms/op), 816030 total ops  | Write: 1307.80 ops/sec (1.53 ms/op), 22900 total ops
-Read: 47419.99 ops/sec (0.67 ms/op), 1053156 total ops | Write: 1303.85 ops/sec (1.53 ms/op), 29420 total ops
-Read: 47220.98 ops/sec (0.68 ms/op), 1289285 total ops | Write: 1311.67 ops/sec (1.52 ms/op), 35979 total ops
-```
-
--->
-
-The **Metrics** tab of the universe allows you to see the metrics graphs, where server-side metrics tally with the client-side metrics reported by the load tester.
-
-<!--
-
-![YCQL Load Metrics](/images/ee/multi-zone-universe-ycql-load-metrics.png)
-
--->
-
-You can also view metrics at a per-node level.
-
-<!--
-
-![YCQL Load Metrics Per Node](/images/ee/multi-zone-universe-ycql-load-metrics-per-node.png)
-
--->
-
-You can stop the load tester as follows:
-
-- Find the container by executing the following command:
-
-  ```shell
-  user@yugaware-1:~$ sudo docker container ls | grep "yugabytedb/yb-sample-apps"
-  ```
-
-  <br>Expect an output similar to the following:
-
-  ```output
-  <container_id> yugabytedb/yb-sample-apps "/usr/bin/java -jar …" 17 seconds ago Up 16 seconds                                                                                                            jovial_morse
-  ```
-
-  <br>For example, if the container ID is ac144a49d57d, you would see the following output:
-
-  ```output
-  ac144a49d57d yugabytedb/yb-sample-apps "/usr/bin/java -jar …" 17 seconds ago Up 16 seconds                                                                                                            jovial_morse
-  ```
-
-- Stop the container by executing the following command:
-
-  ```shell
-  user@yugaware-1:~$ sudo docker container stop <container_id>
-  ```
-
-  <br>Expect the following output:
-
-  ```output
-  <container_id>
-  ```
-
-  <br>For example, for a container with ID ac144a49d57d, you would need to execute the following command:
-
-  ```shell
-  user@yugaware-1:~$ sudo docker container stop ac144a49d57d
-  ```
-
-  <br>You would see the following output:
-
-  ```output
-  ac144a49d57d
-  ```
-
-<!--
-
-### RedisKeyValue workload
-
-To start the RedisKeyValue workload, execute the following command.
-
-```sh
-$ java -jar /home/yugabyte/tserver/java/yb-sample-apps.jar \
-            --workload RedisKeyValue \
-            --nodes $YEDIS_ENDPOINTS \
-            --num_threads_write 2 \
-            --num_threads_read 32 \
-            --value_size 128 \
-            --num_unique_keys 10000000 \
-            --nouuid
-```
-
-The sample application produces output similar to the following and reports some statistics in the steady state:
-
-```output
-Read: 50069.15 ops/sec (0.64 ms/op), 657550 total ops  | Write: 1470.87 ops/sec (1.36 ms/op), 18849 total ops
-Read: 50209.09 ops/sec (0.64 ms/op), 908653 total ops  | Write: 1454.87 ops/sec (1.37 ms/op), 26125 total ops
-Read: 50016.18 ops/sec (0.64 ms/op), 1158794 total ops | Write: 1463.26 ops/sec (1.37 ms/op), 33443 total ops
-```
-
-If you open the **Metrics** tab of the universe, you should see the metrics graphs, as shown in the following illustration:
-
-![YEDIS Load Metrics Per Node](/images/ee/multi-zone-universe-yedis-load-metrics.png)
-
-Note that these server-side metrics tally with the client-side metrics reported by the load tester.
-
-You should stop the sample application.
-
--->
-
-## Examine data
-
-You can connect to the YCQL service by executing the following command:
-
-```sh
-/home/yugabyte/tserver/bin/ycqlsh <ip_address_of_the_node>
-```
-
-You can view the table schema and the data, as follows:
-
-```sql
-ycqlsh> DESCRIBE ybdemo_keyspace.cassandrakeyvalue;
-
-CREATE TABLE ybdemo_keyspace.cassandrakeyvalue (
-  k text PRIMARY KEY,
-  v blob
-) WITH default_time_to_live = 0;
-```
-
-```sql
-ycqlsh> SELECT * FROM ybdemo_keyspace.cassandrakeyvalue LIMIT 5;
-```
-
-```output
- k          | v
-------------+-----------------------------------------
- key:101323 | 0x4276616c3a3130313332336be1dd6597e2...
- key:159968 | 0x4276616c3a3135393936381ed99587c08f...
-  key:24879 | 0x4276616c3a3234383739054071b34c3fb6...
- key:294799 | 0x4276616c3a3239343739398b312748e80e...
- key:297045 | 0x4276616c3a32393730343525764eedee94...
-
-(5 rows)
-```
-
-You can connect to the YEDIS service by executing the following command:
-
-```sh
-/home/yugabyte/tserver/bin/redis-cli -h <ip_address_of_the_node>
-```
-
-You can view the data by running the following commands:
-
-```sh
-10.138.0.4:6379> GET key:0
-"Bval:0\x1b\x942\xea\xf0Q\xd1O\xdb\xf8...=V"
-10.138.0.4:6379> GET key:1
-"Bval:1\t\x1e\xa0=\xb66\x8b\x8eV\x82...,c"
-10.138.0.4:6379>
-```

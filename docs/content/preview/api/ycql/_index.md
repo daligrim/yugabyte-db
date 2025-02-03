@@ -1,22 +1,21 @@
 ---
-title: Yugabyte Cloud Query Language (YCQL)
-headerTitle: Yugabyte Cloud Query Language (YCQL)
+title: YCQL API reference
+headerTitle: YCQL API reference
 linkTitle: YCQL
 description: YCQL is a semi-relational API that is best fit for internet-scale OLTP & HTAP applications.
 summary: Reference for the YCQL API
-image: /images/section_icons/api/ycql.png
-headcontent:
-menu:
-  preview:
-    identifier: api-cassandra
-    parent: api
-    weight: 3000
-aliases:
-  - /preview/api/ycql/
-  - /preview/api/cassandra/
+headcontent: Cassandra-compatible API
+showRightNav: true
 type: indexpage
 ---
-
+<!--menu:
+  preview_api:
+    parent: api
+    identifier: api-cassandra
+    weight: 10
+    params:
+      classes: separator
+-->
 ## Introduction
 
 Yugabyte Cloud Query Language (YCQL) is a semi-relational SQL API that is best fit for internet-scale OLTP and HTAP applications needing massive data ingestion and blazing-fast queries. It supports strongly consistent secondary indexes, a native JSON column type, and distributed transactions. It has its roots in the [Cassandra Query Language (CQL)](http://cassandra.apache.org/doc/latest/cql/index.html).
@@ -27,10 +26,6 @@ This page covers the following YCQL features.
 - Data manipulation language (DML) statements.
 - Builtin functions and Expression operators.
 - Primitive user-defined data types.
-
-## Quick Start
-
-You can explore the basics of the YCQL API using the [Quick start](quick-start/) steps.
 
 ## DDL statements
 
@@ -57,10 +52,10 @@ Statement | Description |
 
 Security statements are instructions for managing and restricting operations on the database objects.
 
-This feature is enabled by setting the YB-TServer configuration flag [`--use_cassandra_authentication`](../../reference/configuration/yb-tserver/#use-cassandra-authentication) to `true`.
-
 - Create, grant, and revoke users and roles
 - Grant, and revoke permissions on database objects
+
+This feature is enabled by setting the YB-TServer configuration flag [`--use_cassandra_authentication`](../../reference/configuration/yb-tserver/#use-cassandra-authentication) to `true`.
 
 Statement | Description |
 ----------|-------------|
@@ -71,13 +66,6 @@ Statement | Description |
 [`REVOKE PERMISSION`](ddl_revoke_permission) | Revoke a permission on an object from a role |
 [`GRANT ROLE`](ddl_grant_role) | Grant a role to another role |
 [`REVOKE ROLE`](ddl_revoke_role) | Revoke a role from another role |
-
-- The following table lists all security statements that are not yet implemented.
-
-Primitive Type |
----------------|
-`LIST ROLES` |
-`LIST PERMISSIONS` |
 
 ## DML statements
 
@@ -113,7 +101,7 @@ Expression | Description |
 
 ## Data types
 
-- The following table lists all supported primitive types.
+The following table lists all supported primitive types.
 
 Primitive Type | Allowed in Key | Type Parameters | Description |
 ---------------|----------------|-----------------|-------------|
@@ -141,10 +129,9 @@ Primitive Type | Allowed in Key | Type Parameters | Description |
 [`VARINT`](type_int) | Yes | - | Arbitrary-precision integer |
 [`JSONB`](type_jsonb) | No | - | JSON data type similar to PostgreSQL jsonb |
 
-- [User-defined data types](ddl_create_type) are also supported.
+[User-defined data types](ddl_create_type) are also supported.
 
-- The following table lists all YCQL primitive types that are not yet implemented.
+## Learn more
 
-Primitive Type |
----------------|
-`TUPLE` |
+- [Advantages of YCQL over Cassandra](/preview/faq/comparisons/cassandra)
+- [YCQL - Cassandra 3.4 compatibility](../../explore/ycql-language/cassandra-feature-support)

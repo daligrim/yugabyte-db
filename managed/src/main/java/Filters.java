@@ -5,6 +5,7 @@ import play.filters.cors.CORSFilter;
 import play.filters.csrf.CSRFFilter;
 import play.http.DefaultHttpFilters;
 
+// TODO(sbapat): Get rid of this class and switch to config mechanism to enable filters
 public class Filters extends DefaultHttpFilters {
 
   @Inject
@@ -12,7 +13,19 @@ public class Filters extends DefaultHttpFilters {
       CSRFFilter csrfFilter,
       CORSFilter corsFilter,
       RequestLoggingFilter requestLoggingFilter,
-      RequestHeaderFilter requestHeaderFilter) {
-    super(csrfFilter, corsFilter, requestLoggingFilter, requestHeaderFilter);
+      RequestHeaderFilter requestHeaderFilter,
+      HSTSFilter hstsFilter,
+      HAApiFilter haApiFilter,
+      CustomHTTPHeader customHTTPHeader,
+      BlockAllRequestsFilter blockAllRequestsFilter) {
+    super(
+        corsFilter,
+        csrfFilter,
+        requestLoggingFilter,
+        requestHeaderFilter,
+        hstsFilter,
+        haApiFilter,
+        customHTTPHeader,
+        blockAllRequestsFilter);
   }
 }

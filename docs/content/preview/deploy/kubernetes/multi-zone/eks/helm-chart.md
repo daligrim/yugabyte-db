@@ -1,5 +1,5 @@
 ---
-title: Deploy on Amazon Elastic Kubernetes Service (EKS) using Helm Chart
+title: Deploy multi zone on EKS using Helm Chart
 headerTitle: Amazon Elastic Kubernetes Service (EKS)
 linkTitle: Amazon Elastic Kubernetes Service (EKS)
 description: Deploy a multi-zone YugabyteDB cluster on Amazon Elastic Kubernetes Service (EKS) using Helm Chart.
@@ -17,7 +17,7 @@ type: docs
 <ul class="nav nav-tabs-alt nav-tabs-yb">
   <li >
     <a href="../helm-chart/" class="nav-link active">
-      <i class="fas fa-cubes" aria-hidden="true"></i>
+      <i class="fa-regular fa-dharmachakra" aria-hidden="true"></i>
       Helm chart
     </a>
   </li>
@@ -32,7 +32,7 @@ The YugabyteDB Helm chart has been tested with the following software versions:
 - Amazon EKS running Kubernetes 1.18 (or later) with nodes such that a total of 12 CPU cores and 45 GB RAM can be allocated to YugabyteDB. This can be three nodes with 4 CPU core and 15 GB RAM allocated to YugabyteDB. `m5.2xlarge` is the minimum AWS EC2 instance type that meets these criteria.
 - Helm 3.4 or later
 - YugabyteDB docker image (yugabytedb/yugabyte) 2.1.0 or later
-- For optimal performance, ensure you've set the appropriate [system limits using `ulimit`](../../../../manual-deployment/system-config/#ulimits) on each node in your Kubernetes cluster.
+- For optimal performance, ensure you've set the appropriate [system limits using `ulimit`](../../../../manual-deployment/system-config/#set-ulimits) on each node in your Kubernetes cluster.
 
 The following steps show how to meet these prerequisites.
 
@@ -40,7 +40,7 @@ The following steps show how to meet these prerequisites.
 
 - Install [`eksctl`](https://eksctl.io/)
 
-`eksctl` is a simple command line utility for creating and managing Amazon EKS clusters. Detailed instructions for installing eksctl based on the OS of your choice are available at [Getting Started with eksctl](https://docs.aws.amazon.com/eks/latest/userguide/getting-started-eksctl.html). The following instructions apply to macOS.
+`eksctl` is a basic command line utility for creating and managing Amazon EKS clusters. Detailed instructions for installing eksctl based on the OS of your choice are available at [Getting Started with eksctl](https://docs.aws.amazon.com/eks/latest/userguide/getting-started-eksctl.html). The following instructions apply to macOS.
 
 ```sh
 $ brew tap weaveworks/tap
@@ -95,7 +95,7 @@ As stated in the Prerequisites section, the default configuration in the Yugabyt
 
 ### Create a storage class
 
-We need to specify `WaitForFirstConsumer` mode for the volumeBindingMode so that volumes will be provisioned according to pods' zone affinities. 
+We need to specify `WaitForFirstConsumer` mode for the volumeBindingMode so that volumes will be provisioned according to pods' zone affinities.
 
 Copy the contents below to a file named `storage.yaml`.
 
@@ -309,7 +309,7 @@ yb-demo-us-east-1c   yb-tserver-service   LoadBalancer   10.100.119.40    a6cd62
 yb-demo-us-east-1c   yb-tservers          ClusterIP      None             <none>                                                                    7100/TCP,9000/TCP,6379/TCP,9042/TCP,5433/TCP   55s
 ```
 
-Access the yb-master Admin UI for the cluster at `http://<external-ip>:7000` where `external-ip` refers to one of the `yb-master-ui` services. Note that you can use any of the above three services for this purpose since all of them will show the same cluster metadata.
+Access the yb-master Admin UI for the cluster at `http://<external-ip>:7000` where `external-ip` refers to one of the `yb-master-ui` services. Note that you can use any of the above three services for this purpose as all of them will show the same cluster metadata.
 
 ![mz-ybmaster](/images/deploy/kubernetes/aws-multizone-ybmaster.png)
 
@@ -332,29 +332,27 @@ To see the new configuration, go to `http://<external-ip>:7000/cluster-config`.
 
 ## 5. Connect using YugabyteDB shells
 
-To connect and use the YSQL Shell (`ysqlsh`), run the following command.
-
-us-east-1a,us-east-1b,us-east-1c \
+To connect and use the YSQL Shell (ysqlsh), run the following command:
 
 ```sh
 $ kubectl exec -n yb-demo-us-east-1a -it yb-tserver-0 -- ysqlsh \
   -h yb-tserver-0.yb-tservers.yb-demo-us-east-1a
 ```
 
-To connect and use the YCQL Shell (`ycqlsh`), run the following command:
+To connect and use the YCQL Shell (ycqlsh), run the following command:
 
 ```sh
 $ kubectl exec -n yb-demo-us-east-1a -it yb-tserver-0 -- ycqlsh \
 yb-tserver-0.yb-tservers.yb-demo-us-east-1a
 ```
 
-You can follow the [Explore YSQL](../../../../../quick-start/explore/ysql/) tutorial and then go to the `http://<external-ip>:7000/tablet-servers` page of the yb-master Admin UI to confirm that tablet peers and their leaders are placed evenly across all three zones for both user data and system data.
+You can follow the [Explore YSQL](/preview/tutorials/quick-start/explore/ysql/) tutorial and then go to the `http://<external-ip>:7000/tablet-servers` page of the yb-master Admin UI to confirm that tablet peers and their leaders are placed evenly across all three zones for both user data and system data.
 
 ![mz-ybtserver](/images/deploy/kubernetes/aws-multizone-ybtserver.png)
 
 ## 6. Connect using external clients
 
-To connect an external program, get the load balancer `EXTERNAL-IP` address of one of the `yb-tserver-service` service and connect to the 5433 / 9042 ports for YSQL / YCQL services respectively.
+To connect an external program, get the load balancer `EXTERNAL-IP` address of the `yb-tserver-service` service and connect using port 5433 for YSQL or port 9042 for YCQL, as follows:
 
 ```sh
 $ kubectl get services --namespace yb-demo

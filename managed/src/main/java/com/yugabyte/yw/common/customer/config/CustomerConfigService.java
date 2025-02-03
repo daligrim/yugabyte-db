@@ -14,11 +14,13 @@ import static play.mvc.Http.Status.BAD_REQUEST;
 import com.yugabyte.yw.common.PlatformServiceException;
 import com.yugabyte.yw.common.Util.UniverseDetailSubset;
 import com.yugabyte.yw.models.Backup;
+import com.yugabyte.yw.models.DrConfig;
 import com.yugabyte.yw.models.Schedule;
 import com.yugabyte.yw.models.Universe;
 import com.yugabyte.yw.models.configs.CustomerConfig;
 import com.yugabyte.yw.models.configs.CustomerConfig.ConfigType;
 import com.yugabyte.yw.models.helpers.CustomerConfigValidator;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
@@ -31,7 +33,7 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import javax.inject.Inject;
 import javax.inject.Singleton;
-import org.apache.commons.collections.CollectionUtils;
+import org.apache.commons.collections4.CollectionUtils;
 
 @Singleton
 public class CustomerConfigService {
@@ -77,53 +79,63 @@ public class CustomerConfigService {
   private List<CustomerConfigUI> enrichConfigsForUI(
       UUID customerUUID, List<CustomerConfig> rawConfigs) {
     List<CustomerConfigUI> configs =
-        rawConfigs
-            .stream()
+        rawConfigs.stream()
             .map(config -> config.setData(config.getMaskedData()))
             .map(config -> new CustomerConfigUI().setCustomerConfig(config))
             .collect(Collectors.toList());
 
     List<CustomerConfigUI> storageConfigs =
-        configs
-            .stream()
+        configs.stream()
             .filter(config -> config.getCustomerConfig().getType() == ConfigType.STORAGE)
             .collect(Collectors.toList());
     Set<UUID> storageConfigUuids =
-        storageConfigs
-            .stream()
+        storageConfigs.stream()
             .map(CustomerConfigUI::getCustomerConfig)
             .map(CustomerConfig::getConfigUUID)
             .collect(Collectors.toSet());
 
     Map<UUID, List<Backup>> backupsByConfigUuid =
-        Backup.getInProgressAndCompleted(customerUUID)
-            .stream()
+        Backup.getInProgressAndCompleted(customerUUID).stream()
             .filter(backup -> storageConfigUuids.contains(getStorageConfigUuid(backup)))
             .collect(Collectors.groupingBy(this::getStorageConfigUuid, Collectors.toList()));
 
     Map<UUID, List<Schedule>> schedulesByConfigUuid =
-        Schedule.getActiveBackupSchedules(customerUUID)
-            .stream()
+        Schedule.getActiveBackupSchedules(customerUUID).stream()
             .filter(schedule -> storageConfigUuids.contains(getStorageConfigUuid(schedule)))
             .collect(Collectors.groupingBy(this::getStorageConfigUuid, Collectors.toList()));
 
+    Map<UUID, List<DrConfig>> drConfigsByConfigUuid =
+        DrConfig.getAll().stream()
+            .filter(DrConfig::hasActiveXClusterConfig)
+            .collect(Collectors.groupingBy(DrConfig::getStorageConfigUuid, Collectors.toList()));
+
     Set<UUID> universeUuids =
-        Stream.concat(
-                backupsByConfigUuid
-                    .values()
-                    .stream()
+        Stream.of(
+                backupsByConfigUuid.values().stream()
                     .flatMap(Collection::stream)
                     .map(this::getUniverseUuid),
-                schedulesByConfigUuid
-                    .values()
-                    .stream()
+                schedulesByConfigUuid.values().stream()
                     .flatMap(Collection::stream)
-                    .map(this::getUniverseUuid))
+                    .map(this::getUniverseUuid),
+                drConfigsByConfigUuid.values().stream()
+                    .flatMap(Collection::stream)
+                    .map(
+                        drConfig -> {
+                          List<UUID> uuids = new ArrayList<>();
+                          if (drConfig.getActiveXClusterConfig().getTargetUniverseUUID() != null) {
+                            uuids.add(drConfig.getActiveXClusterConfig().getTargetUniverseUUID());
+                          }
+                          if (drConfig.getActiveXClusterConfig().getSourceUniverseUUID() != null) {
+                            uuids.add(drConfig.getActiveXClusterConfig().getSourceUniverseUUID());
+                          }
+                          return uuids;
+                        })
+                    .flatMap(Collection::stream))
+            .flatMap(Function.identity())
             .collect(Collectors.toSet());
 
     Map<UUID, UniverseDetailSubset> universeMap =
-        Universe.getAllWithoutResources(universeUuids)
-            .stream()
+        Universe.getAllWithoutResources(universeUuids).stream()
             .map(UniverseDetailSubset::new)
             .collect(Collectors.toMap(UniverseDetailSubset::getUuid, Function.identity()));
 
@@ -131,19 +143,30 @@ public class CustomerConfigService {
       UUID storageUUID = configUI.getCustomerConfig().getConfigUUID();
 
       Set<UUID> storageUniverseUuids =
-          Stream.concat(
-                  backupsByConfigUuid
-                      .getOrDefault(storageUUID, Collections.emptyList())
-                      .stream()
+          Stream.of(
+                  backupsByConfigUuid.getOrDefault(storageUUID, Collections.emptyList()).stream()
                       .map(this::getUniverseUuid),
-                  schedulesByConfigUuid
-                      .getOrDefault(storageUUID, Collections.emptyList())
-                      .stream()
-                      .map(this::getUniverseUuid))
+                  schedulesByConfigUuid.getOrDefault(storageUUID, Collections.emptyList()).stream()
+                      .map(this::getUniverseUuid),
+                  drConfigsByConfigUuid.getOrDefault(storageUUID, Collections.emptyList()).stream()
+                      .map(
+                          drConfig -> {
+                            List<UUID> uuids = new ArrayList<>();
+                            if (drConfig.getActiveXClusterConfig().getTargetUniverseUUID()
+                                != null) {
+                              uuids.add(drConfig.getActiveXClusterConfig().getTargetUniverseUUID());
+                            }
+                            if (drConfig.getActiveXClusterConfig().getSourceUniverseUUID()
+                                != null) {
+                              uuids.add(drConfig.getActiveXClusterConfig().getSourceUniverseUUID());
+                            }
+                            return uuids;
+                          })
+                      .flatMap(Collection::stream))
+              .flatMap(Function.identity())
               .collect(Collectors.toSet());
       configUI.setUniverseDetails(
-          storageUniverseUuids
-              .stream()
+          storageUniverseUuids.stream()
               .map(universeMap::get)
               .filter(Objects::nonNull)
               .collect(Collectors.toList()));
@@ -163,7 +186,7 @@ public class CustomerConfigService {
   }
 
   private UUID getUniverseUuid(Backup backup) {
-    return backup.getBackupInfo().universeUUID;
+    return backup.getBackupInfo().getUniverseUUID();
   }
 
   private UUID getUniverseUuid(Schedule schedule) {

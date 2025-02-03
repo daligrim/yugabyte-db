@@ -15,39 +15,57 @@
 
 #include "yb/yql/pggate/pg_tabledesc.h"
 
-#include "yb/common/partition.h"
+#include "yb/dockv/partition.h"
 #include "yb/common/pg_system_attr.h"
+#include "yb/common/schema_pbutil.h"
 #include "yb/common/schema.h"
-#include "yb/common/wire_protocol.h"
 
-#include "yb/docdb/doc_key.h"
+#include "yb/dockv/doc_key.h"
 
 #include "yb/gutil/casts.h"
 
 #include "yb/util/result.h"
 #include "yb/util/status_format.h"
 
+#include "yb/yql/pggate/pg_client.h"
+
+using std::string;
+
 namespace yb {
 namespace pggate {
 
 PgTableDesc::PgTableDesc(
-    const PgObjectId& id, const master::GetTableSchemaResponsePB& resp,
-    std::shared_ptr<client::VersionedTablePartitionList> partitions)
-    : id_(id), resp_(resp),  table_partitions_(std::move(partitions)) {
+    const PgObjectId& relfilenode_id, const master::GetTableSchemaResponsePB& resp,
+    client::VersionedTablePartitionList partition_list)
+    : relfilenode_id_(relfilenode_id), resp_(resp),
+      table_partition_list_(std::move(partition_list)),
+      latest_known_table_partition_list_version_(table_partition_list_.version) {
   table_name_.GetFromTableIdentifierPB(resp.identifier());
 }
 
 Status PgTableDesc::Init() {
   RETURN_NOT_OK(SchemaFromPB(resp_.schema(), &schema_));
+  schema_packing_.emplace(TableType::PGSQL_TABLE_TYPE, schema_);
   size_t idx = 0;
   for (const auto& column : schema().columns()) {
-    attr_num_map_.emplace(column.order(), idx++);
+    attr_num_map_.emplace_back(column.order(), idx++);
   }
+  std::sort(attr_num_map_.begin(), attr_num_map_.end());
   if (resp_.has_tablegroup_id()) {
     tablegroup_oid_ = VERIFY_RESULT(GetPgsqlTablegroupOid(resp_.tablegroup_id()));
   }
-  return PartitionSchema::FromPB(resp_.partition_schema(), schema_, &partition_schema_);
+  if (resp_.has_pg_table_id() && !resp_.pg_table_id().empty()) {
+    pg_table_id_ = VERIFY_RESULT(GetPgsqlTableOid(resp_.pg_table_id()));
+  }
+  return dockv::PartitionSchema::FromPB(resp_.partition_schema(), schema_, &partition_schema_);
 }
+
+struct CmpAttrNum {
+  template <class P>
+  bool operator()(const P& lhs, int rhs) const {
+    return lhs.first < rhs;
+  }
+};
 
 Result<size_t> PgTableDesc::FindColumn(int attr_num) const {
   // Find virtual columns.
@@ -56,21 +74,28 @@ Result<size_t> PgTableDesc::FindColumn(int attr_num) const {
   }
 
   // Find physical column.
-  const auto itr = attr_num_map_.find(attr_num);
-  if (itr != attr_num_map_.end()) {
+  const auto itr = std::lower_bound(
+      attr_num_map_.begin(), attr_num_map_.end(), attr_num, CmpAttrNum());
+  if (itr != attr_num_map_.end() && itr->first == attr_num) {
     return itr->second;
   }
+
+  // Special case: if kYBIdxBaseTupleId is not in the attr_num_map_, treat it as
+  // kYBTupleId. This allows us to easily request ybctids on secondary indexes.
+  if (attr_num == static_cast<int>(PgSystemAttrNum::kYBIdxBaseTupleId))
+    return num_columns();
 
   return STATUS_FORMAT(InvalidArgument, "Invalid column number $0", attr_num);
 }
 
-Result<YBCPgColumnInfo> PgTableDesc::GetColumnInfo(int16_t attr_number) const {
-  YBCPgColumnInfo column_info {
+Result<YbcPgColumnInfo> PgTableDesc::GetColumnInfo(int attr_number) const {
+  YbcPgColumnInfo column_info {
     .is_primary = false,
     .is_hash = false
   };
-  const auto itr = attr_num_map_.find(attr_number);
-  if (itr != attr_num_map_.end()) {
+  const auto itr = std::lower_bound(
+      attr_num_map_.begin(), attr_num_map_.end(), attr_number, CmpAttrNum());
+  if (itr != attr_num_map_.end() && itr->first == attr_number) {
     column_info.is_primary = itr->second < schema().num_key_columns();
     column_info.is_hash = itr->second < schema().num_hash_key_columns();
   }
@@ -81,11 +106,11 @@ bool PgTableDesc::IsColocated() const {
   return resp_.colocated();
 }
 
-YBCPgOid PgTableDesc::GetColocationId() const {
+YbcPgOid PgTableDesc::GetColocationId() const {
   return schema().has_colocation_id() ? schema().colocation_id() : kColocationIdNotSet;
 }
 
-YBCPgOid PgTableDesc::GetTablegroupOid() const {
+YbcPgOid PgTableDesc::GetTablegroupOid() const {
   return tablegroup_oid_;
 }
 
@@ -97,16 +122,44 @@ bool PgTableDesc::IsRangePartitioned() const {
   return schema().num_hash_key_columns() == 0;
 }
 
-const std::vector<std::string>& PgTableDesc::GetPartitions() const {
-  return table_partitions_->keys;
+const client::TablePartitionList& PgTableDesc::GetPartitionList() const {
+  return table_partition_list_.keys;
 }
 
-const std::string& PgTableDesc::LastPartition() const {
-  return table_partitions_->keys.back();
+size_t PgTableDesc::GetPartitionListSize() const {
+  return table_partition_list_.keys.size();
 }
 
-size_t PgTableDesc::GetPartitionCount() const {
-  return table_partitions_->keys.size();
+client::PartitionListVersion PgTableDesc::GetPartitionListVersion() const {
+  return table_partition_list_.version;
+}
+
+void PgTableDesc::SetLatestKnownPartitionListVersion(client::PartitionListVersion version) {
+  DCHECK(version >= latest_known_table_partition_list_version_);
+  if (version > latest_known_table_partition_list_version_) {
+    latest_known_table_partition_list_version_ = version;
+  }
+}
+
+Status PgTableDesc::EnsurePartitionListIsUpToDate(PgClient* client) {
+  if (table_partition_list_.version == latest_known_table_partition_list_version_) {
+    return Status::OK();
+  }
+  DCHECK(table_partition_list_.version < latest_known_table_partition_list_version_);
+
+  auto partition_list = VERIFY_RESULT(client->GetTablePartitionList(relfilenode_id()));
+  VLOG(1) << Format(
+      "Received partition list for table \"$0\", "
+      "new version: $1, old version: $2, latest known version: $3.",
+      table_name(), partition_list.version, table_partition_list_.version,
+      latest_known_table_partition_list_version_);
+
+  RSTATUS_DCHECK(latest_known_table_partition_list_version_ <= partition_list.version, IllegalState,
+      "Unexpected version of received partition list.");
+
+  table_partition_list_ = std::move(partition_list);
+  SetLatestKnownPartitionListVersion(table_partition_list_.version);
+  return Status::OK();
 }
 
 Result<string> PgTableDesc::DecodeYbctid(const Slice& ybctid) const {
@@ -124,8 +177,8 @@ Result<string> PgTableDesc::DecodeYbctid(const Slice& ybctid) const {
 
   // Decoding using hash partitioning method.
   // Do not check with predicate IsHashPartitioning() for now to use existing behavior by default.
-  uint16 hash_code = VERIFY_RESULT(docdb::DocKey::DecodeHash(ybctid));
-  return PartitionSchema::EncodeMultiColumnHashValue(hash_code);
+  uint16 hash_code = VERIFY_RESULT(dockv::DocKey::DecodeHash(ybctid));
+  return dockv::PartitionSchema::EncodeMultiColumnHashValue(hash_code);
 }
 
 Result<size_t> PgTableDesc::FindPartitionIndex(const Slice& ybctid) const {
@@ -133,27 +186,49 @@ Result<size_t> PgTableDesc::FindPartitionIndex(const Slice& ybctid) const {
   // - Hash Partition: ybctid -> hashcode -> key -> partition index.
   // - Range Partition: ybctid == key -> partition index.
   string partition_key = VERIFY_RESULT(DecodeYbctid(ybctid));
-  return client::FindPartitionStartIndex(table_partitions_->keys, partition_key);
+  return client::FindPartitionStartIndex(table_partition_list_.keys, partition_key);
 }
 
-Status PgTableDesc::SetScanBoundary(LWPgsqlReadRequestPB *req,
-                                    const string& partition_lower_bound,
-                                    bool lower_bound_is_inclusive,
-                                    const string& partition_upper_bound,
-                                    bool upper_bound_is_inclusive) {
-  // Setup lower boundary.
+Result<bool> PgTableDesc::CheckScanBoundary(LWPgsqlReadRequestPB* req) {
+  if (req->has_lower_bound() && req->has_upper_bound() &&
+      ((req->lower_bound().key() > req->upper_bound().key()) ||
+       (req->lower_bound().key() == req->upper_bound().key() &&
+          !(req->lower_bound().is_inclusive() && req->upper_bound().is_inclusive())))) {
+    return false;
+  }
+  return true;
+}
+
+Result<bool> PgTableDesc::SetScanBoundary(LWPgsqlReadRequestPB* req,
+                                          const std::string& partition_lower_bound,
+                                          bool lower_bound_is_inclusive,
+                                          const std::string& partition_upper_bound,
+                                          bool upper_bound_is_inclusive) {
+  // Update lower boundary if necessary.
   if (!partition_lower_bound.empty()) {
-    req->mutable_lower_bound()->dup_key(partition_lower_bound);
-    req->mutable_lower_bound()->set_is_inclusive(lower_bound_is_inclusive);
+    if (!req->has_lower_bound() ||
+        req->lower_bound().key() < partition_lower_bound) {
+      req->mutable_lower_bound()->dup_key(partition_lower_bound);
+      req->mutable_lower_bound()->set_is_inclusive(lower_bound_is_inclusive);
+    } else if (req->lower_bound().key() == partition_lower_bound &&
+               req->lower_bound().is_inclusive() && !lower_bound_is_inclusive) {
+      req->mutable_lower_bound()->set_is_inclusive(false);
+    }
   }
 
-  // Setup upper boundary.
+  // Update upper boundary if necessary.
   if (!partition_upper_bound.empty()) {
-    req->mutable_upper_bound()->dup_key(partition_upper_bound);
-    req->mutable_upper_bound()->set_is_inclusive(upper_bound_is_inclusive);
+    if (!req->has_upper_bound() ||
+        req->upper_bound().key() > partition_upper_bound) {
+      req->mutable_upper_bound()->dup_key(partition_upper_bound);
+      req->mutable_upper_bound()->set_is_inclusive(upper_bound_is_inclusive);
+    } else if (req->upper_bound().key() == partition_upper_bound &&
+               req->upper_bound().is_inclusive() && !upper_bound_is_inclusive) {
+      req->mutable_upper_bound()->set_is_inclusive(false);
+    }
   }
 
-  return Status::OK();
+  return CheckScanBoundary(req);
 }
 
 const client::YBTableName& PgTableDesc::table_name() const {
@@ -180,7 +255,7 @@ size_t PgTableDesc::num_columns() const {
   return schema().num_columns();
 }
 
-const PartitionSchema& PgTableDesc::partition_schema() const {
+const dockv::PartitionSchema& PgTableDesc::partition_schema() const {
   return partition_schema_;
 }
 

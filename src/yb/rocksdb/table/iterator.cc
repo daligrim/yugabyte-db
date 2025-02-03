@@ -70,23 +70,97 @@ Status Iterator::GetProperty(std::string prop_name, std::string* prop) {
   return STATUS(InvalidArgument, "Undentified property.");
 }
 
-namespace {
-class EmptyIterator : public Iterator {
+class Iterator::Empty : public Iterator {
  public:
-  explicit EmptyIterator(const Status& s) : status_(s) { }
-  bool Valid() const override { return false; }
-  void Seek(const Slice& target) override {}
-  void SeekToFirst() override {}
-  void SeekToLast() override {}
-  void Next() override { assert(false); }
-  void Prev() override { assert(false); }
-  Slice key() const override {
-    assert(false);
-    return Slice();
+  explicit Empty(const Status& s) : status_(s) { }
+  const KeyValueEntry& Entry() const override {
+    return KeyValueEntry::Invalid();
   }
-  Slice value() const override {
+
+  const KeyValueEntry& Seek(Slice target) override {
+    return Entry();
+  }
+
+  const KeyValueEntry& SeekToFirst() override {
+    return Entry();
+  }
+
+  const KeyValueEntry& SeekToLast() override {
+    return Entry();
+  }
+
+  const KeyValueEntry& Next() override {
     assert(false);
-    return Slice();
+    return Entry();
+  }
+
+  const KeyValueEntry& Prev() override {
+    assert(false);
+    return Entry();
+  }
+
+  Status status() const override { return status_; }
+
+ private:
+  Status status_;
+};
+
+class DataBlockAwareIndexIterator::Empty : public DataBlockAwareIndexIterator {
+ public:
+  explicit Empty(const Status& s) : status_(s) {}
+
+  const KeyValueEntry& Entry() const override {
+    return KeyValueEntry::Invalid();
+  }
+
+  const KeyValueEntry& Seek(Slice target) override {
+    return Entry();
+  }
+
+  const KeyValueEntry& SeekToFirst() override {
+    return Entry();
+  }
+
+  const KeyValueEntry& SeekToLast() override {
+    return Entry();
+  }
+
+  const KeyValueEntry& Next() override {
+    DCHECK(false) << "DataBlockAwareIndexIterator::Empty::Next()";
+    return Entry();
+  }
+
+  const KeyValueEntry& Prev() override {
+    DCHECK(false) << "DataBlockAwareIndexIterator::Empty::Prev()";
+    return Entry();
+  }
+
+  yb::Result<std::pair<std::string, std::string>> GetCurrentDataBlockBounds() const override {
+    DCHECK(false) << "DataBlockAwareIndexIterator::Empty::GetCurrentDataBlockBounds()";
+    return status_;
+  };
+
+  Status status() const override { return status_; }
+
+ private:
+  Status status_;
+};
+
+class InternalIterator::Empty : public InternalIterator {
+ public:
+  explicit Empty(const Status& s) : status_(s) {}
+
+  const KeyValueEntry& Entry() const override { return KeyValueEntry::Invalid(); }
+  const KeyValueEntry& Seek(Slice target) override { return Entry(); }
+  const KeyValueEntry& SeekToFirst() override { return Entry(); }
+  const KeyValueEntry& SeekToLast() override { return Entry(); }
+  const KeyValueEntry& Next() override {
+    DCHECK(false) << "InternalIterator::Empty::Next()";
+    return Entry();
+  }
+  const KeyValueEntry& Prev() override {
+    DCHECK(false) << "InternalIterator::Empty::Prev()";
+    return Entry();
   }
   Status status() const override { return status_; }
 
@@ -94,62 +168,68 @@ class EmptyIterator : public Iterator {
   Status status_;
 };
 
-class EmptyInternalIterator : public InternalIterator {
+class DataBlockAwareIndexInternalIterator::Empty : public DataBlockAwareIndexInternalIterator {
  public:
-  explicit EmptyInternalIterator(const Status& s) : status_(s) {}
-  bool Valid() const override { return false; }
-  void Seek(const Slice& target) override {}
-  void SeekToFirst() override {}
-  void SeekToLast() override {}
-  void Next() override { assert(false); }
-  void Prev() override { assert(false); }
-  Slice key() const override {
-    assert(false);
-    return Slice();
+  explicit Empty(const Status& s) : status_(s) {}
+
+  const KeyValueEntry& Entry() const override { return KeyValueEntry::Invalid(); }
+  const KeyValueEntry& Seek(Slice target) override { return Entry(); }
+  const KeyValueEntry& SeekToFirst() override { return Entry(); }
+  const KeyValueEntry& SeekToLast() override { return Entry(); }
+  const KeyValueEntry& Next() override {
+    DCHECK(false) << "DataBlockAwareIndexInternalIterator::Empty::Next()";
+    return Entry();
   }
-  Slice value() const override {
-    assert(false);
-    return Slice();
+  const KeyValueEntry& Prev() override {
+    DCHECK(false) << "DataBlockAwareIndexInternalIterator::Empty::Prev()";
+    return Entry();
   }
+  yb::Result<std::pair<std::string, std::string>> GetCurrentDataBlockBounds() const override {
+    DCHECK(false) << "DataBlockAwareIndexInternalIterator::Empty::GetCurrentDataBlockBounds()";
+    return status_;
+  };
   Status status() const override { return status_; }
 
  private:
   Status status_;
 };
-}  // namespace
 
 Iterator* NewEmptyIterator() {
-  return new EmptyIterator(Status::OK());
+  return new Iterator::Empty(Status::OK());
 }
 
 Iterator* NewErrorIterator(const Status& status) {
-  return new EmptyIterator(status);
-}
-
-InternalIterator* NewEmptyInternalIterator() {
-  return new EmptyInternalIterator(Status::OK());
+  return new Iterator::Empty(status);
 }
 
 InternalIterator* NewEmptyInternalIterator(Arena* arena) {
   if (arena == nullptr) {
-    return NewEmptyInternalIterator();
+    return new InternalIterator::Empty(Status::OK());
   } else {
-    auto mem = arena->AllocateAligned(sizeof(EmptyIterator));
-    return new (mem) EmptyInternalIterator(Status::OK());
+    auto mem = arena->AllocateAligned(sizeof(InternalIterator::Empty));
+    return new (mem) InternalIterator::Empty(Status::OK());
   }
 }
 
-InternalIterator* NewErrorInternalIterator(const Status& status) {
-  return new EmptyInternalIterator(status);
+template <class IteratorType>
+IteratorType* NewErrorIterator(const Status& status, Arena* arena) {
+  if (arena == nullptr) {
+    return new typename IteratorType::Empty(status);
+  } else {
+    auto mem = arena->AllocateAligned(sizeof(typename IteratorType::Empty));
+    return new (mem) typename IteratorType::Empty(status);
+  }
 }
+
+template Iterator* NewErrorIterator<Iterator>(const Status& status, Arena* arena);
+template DataBlockAwareIndexIterator* NewErrorIterator<DataBlockAwareIndexIterator>(
+    const Status& status, Arena* arena);
+template InternalIterator* NewErrorIterator<InternalIterator>(const Status& status, Arena* arena);
+template DataBlockAwareIndexInternalIterator* NewErrorIterator<DataBlockAwareIndexInternalIterator>(
+    const Status& status, Arena* arena);
 
 InternalIterator* NewErrorInternalIterator(const Status& status, Arena* arena) {
-  if (arena == nullptr) {
-    return NewErrorInternalIterator(status);
-  } else {
-    auto mem = arena->AllocateAligned(sizeof(EmptyIterator));
-    return new (mem) EmptyInternalIterator(status);
-  }
+  return NewErrorIterator<InternalIterator>(status, arena);
 }
 
 }  // namespace rocksdb

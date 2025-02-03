@@ -29,14 +29,12 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_SERVER_SERVER_BASE_OPTIONS_H
-#define YB_SERVER_SERVER_BASE_OPTIONS_H
+#pragma once
 
 #include <string>
 #include <vector>
 #include <mutex>
 
-#include "yb/common/common_fwd.h"
 #include "yb/fs/fs_manager.h"
 #include "yb/server/webserver_options.h"
 #include "yb/server/rpc_server.h"
@@ -44,6 +42,7 @@
 
 namespace yb {
 
+class CloudInfoPB;
 class Env;
 
 namespace server {
@@ -103,7 +102,7 @@ class ServerBaseOptions {
 
   WebserverOptions& CompleteWebserverOptions();
 
-  std::string HostsString();
+  std::string HostsString() const;
 
  protected:
   explicit ServerBaseOptions(int default_port);
@@ -134,9 +133,5 @@ std::string MasterAddressesToString(const MasterAddresses& addresses);
 
 Result<std::vector<Endpoint>> ResolveMasterAddresses(const MasterAddresses& master_addresses);
 
-CloudInfoPB GetPlacementFromGFlags();
-
 } // namespace server
 } // namespace yb
-
-#endif /* YB_SERVER_SERVER_BASE_OPTIONS_H */

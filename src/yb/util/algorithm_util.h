@@ -11,8 +11,7 @@
 // under the License.
 //
 
-#ifndef YB_UTIL_ALGORITHM_UTIL_H
-#define YB_UTIL_ALGORITHM_UTIL_H
+#pragma once
 
 #include <algorithm>
 #include <bitset>
@@ -77,26 +76,38 @@ bool IsMonotonic(const Col& collection, const Extractor& extractor) {
 // Returns small vector of key and index pairs, sorted by extracted key.
 template <class Col, class Extractor>
 auto StableSorted(const Col& collection, const Extractor& extractor) {
-  struct KeyAndIndex {
+  struct Entry {
     decltype(extractor(*collection.begin())) key;
     decltype(collection.size()) original_index;
+    const std::remove_reference_t<decltype(*collection.begin())>* pointer;
   };
 
-  boost::container::small_vector<KeyAndIndex, 0x10> order;
+  boost::container::small_vector<Entry, 0x10> order;
   order.reserve(collection.size());
   decltype(collection.size()) index = 0;
   for (const auto& value : collection) {
-    order.push_back(KeyAndIndex {
+    order.push_back(Entry {
       .key = extractor(value),
       .original_index = index++,
+      .pointer = &value,
     });
   }
-  std::sort(order.begin(), order.end(), [](const KeyAndIndex& lhs, const KeyAndIndex& rhs) {
+  std::sort(order.begin(), order.end(), [](const auto& lhs, const auto& rhs) {
     return lhs.key < rhs.key || (lhs.key == rhs.key && lhs.original_index < rhs.original_index);
   });
   return order;
 }
 
-};  // namespace yb
+// Erases elements from container until predicate is satisfied.
+template<typename Container, typename Predicate>
+size_t EraseElementsUntil(Container& container, const Predicate& predicate) {
+  size_t erased = 0;
+  auto itr = container.begin();
+  while (itr != container.end() && !predicate(*itr)) {
+    itr = container.erase(itr);
+    ++erased;
+  }
+  return erased;
+}
 
-#endif  // YB_UTIL_ALGORITHM_UTIL_H
+};  // namespace yb

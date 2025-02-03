@@ -10,18 +10,23 @@
 package com.yugabyte.yw.common.alerts;
 
 import static com.yugabyte.yw.common.Util.doubleToString;
+import static com.yugabyte.yw.common.ha.PlatformReplicationHelper.REPLICATION_FREQUENCY_KEY;
 import static com.yugabyte.yw.models.AlertConfiguration.createQueryByFilter;
 import static com.yugabyte.yw.models.helpers.CommonUtils.nowWithoutMillis;
 import static com.yugabyte.yw.models.helpers.CommonUtils.performPagedQuery;
 import static com.yugabyte.yw.models.helpers.EntityOperation.CREATE;
 import static com.yugabyte.yw.models.helpers.EntityOperation.DELETE;
 import static com.yugabyte.yw.models.helpers.EntityOperation.UPDATE;
+import static io.ebean.DB.beginTransaction;
 import static play.mvc.Http.Status.BAD_REQUEST;
 
+import com.cronutils.utils.StringUtils;
 import com.google.common.collect.ImmutableSet;
 import com.yugabyte.yw.common.AlertTemplate;
 import com.yugabyte.yw.common.BeanValidator;
 import com.yugabyte.yw.common.PlatformServiceException;
+import com.yugabyte.yw.common.alerts.impl.AlertTemplateService;
+import com.yugabyte.yw.common.alerts.impl.AlertTemplateService.AlertTemplateDescription;
 import com.yugabyte.yw.common.concurrent.MultiKeyLock;
 import com.yugabyte.yw.common.config.RuntimeConfigFactory;
 import com.yugabyte.yw.common.metrics.MetricLabelsBuilder;
@@ -32,6 +37,7 @@ import com.yugabyte.yw.models.AlertConfigurationTarget;
 import com.yugabyte.yw.models.AlertConfigurationThreshold;
 import com.yugabyte.yw.models.AlertDefinition;
 import com.yugabyte.yw.models.AlertDestination;
+import com.yugabyte.yw.models.AlertTemplateVariable;
 import com.yugabyte.yw.models.Customer;
 import com.yugabyte.yw.models.MaintenanceWindow;
 import com.yugabyte.yw.models.Universe;
@@ -44,6 +50,7 @@ import com.yugabyte.yw.models.helpers.KnownAlertLabels;
 import com.yugabyte.yw.models.paging.AlertConfigurationPagedQuery;
 import com.yugabyte.yw.models.paging.AlertConfigurationPagedResponse;
 import com.yugabyte.yw.models.paging.PagedQuery.SortDirection;
+import io.ebean.DB;
 import io.ebean.Query;
 import io.ebean.annotation.Transactional;
 import java.util.ArrayList;
@@ -64,13 +71,14 @@ import java.util.stream.Stream;
 import javax.inject.Inject;
 import javax.inject.Singleton;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.commons.collections.CollectionUtils;
+import org.apache.commons.collections4.CollectionUtils;
 
 @Singleton
 @Slf4j
 public class AlertConfigurationService {
 
   private final BeanValidator beanValidator;
+  private final AlertTemplateService alertTemplateService;
   private final AlertDefinitionService alertDefinitionService;
   private final MaintenanceService maintenanceService;
   private final RuntimeConfigFactory runtimeConfigFactory;
@@ -80,89 +88,98 @@ public class AlertConfigurationService {
   @Inject
   public AlertConfigurationService(
       BeanValidator beanValidator,
+      AlertTemplateService alertTemplateService,
       AlertDefinitionService alertDefinitionService,
       MaintenanceService maintenanceService,
       RuntimeConfigFactory runtimeConfigFactory) {
     this.beanValidator = beanValidator;
+    this.alertTemplateService = alertTemplateService;
     this.alertDefinitionService = alertDefinitionService;
     this.maintenanceService = maintenanceService;
     this.runtimeConfigFactory = runtimeConfigFactory;
   }
 
-  @Transactional
-  public List<AlertConfiguration> save(List<AlertConfiguration> configurations) {
+  public List<AlertConfiguration> save(UUID customerUuid, List<AlertConfiguration> configurations) {
     if (CollectionUtils.isEmpty(configurations)) {
       return configurations;
     }
 
-    List<AlertConfiguration> beforeConfigurations = Collections.emptyList();
-    Set<UUID> configurationUuids =
-        configurations
-            .stream()
-            .filter(configuration -> !configuration.isNew())
-            .map(AlertConfiguration::getUuid)
-            .collect(Collectors.toSet());
-    if (!configurationUuids.isEmpty()) {
-      AlertConfigurationFilter filter =
-          AlertConfigurationFilter.builder().uuids(configurationUuids).build();
-      beforeConfigurations = list(filter);
-    }
-    Map<UUID, AlertConfiguration> beforeConfigMap =
-        beforeConfigurations
-            .stream()
-            .collect(Collectors.toMap(AlertConfiguration::getUuid, Function.identity()));
-
-    Map<EntityOperation, List<AlertConfiguration>> toCreateAndUpdate =
-        configurations
-            .stream()
-            .peek(
-                configuration ->
-                    prepareForSave(configuration, beforeConfigMap.get(configuration.getUuid())))
-            .peek(
-                configuration ->
-                    validate(configuration, beforeConfigMap.get(configuration.getUuid())))
-            .collect(
-                Collectors.groupingBy(configuration -> configuration.isNew() ? CREATE : UPDATE));
-
-    List<AlertConfiguration> toCreate =
-        toCreateAndUpdate.getOrDefault(CREATE, Collections.emptyList());
-    toCreate.forEach(configuration -> configuration.setCreateTime(nowWithoutMillis()));
-    toCreate.forEach(AlertConfiguration::generateUUID);
-
-    List<AlertConfiguration> toUpdate =
-        toCreateAndUpdate.getOrDefault(UPDATE, Collections.emptyList());
-
-    Set<UUID> toUpdateUuids =
-        toUpdate.stream().map(AlertConfiguration::getUuid).collect(Collectors.toSet());
+    beginTransaction();
     try {
-      configUuidLock.acquireLocks(toUpdateUuids);
-      if (!CollectionUtils.isEmpty(toCreate)) {
-        AlertConfiguration.db().saveAll(toCreate);
+      List<AlertConfiguration> beforeConfigurations = Collections.emptyList();
+      Set<UUID> configurationUuids =
+          configurations.stream()
+              .filter(configuration -> !configuration.isNew())
+              .map(AlertConfiguration::getUuid)
+              .collect(Collectors.toSet());
+      if (!configurationUuids.isEmpty()) {
+        AlertConfigurationFilter filter =
+            AlertConfigurationFilter.builder().uuids(configurationUuids).build();
+        beforeConfigurations = list(filter);
       }
-      if (!CollectionUtils.isEmpty(toUpdate)) {
-        AlertConfiguration.db().updateAll(toUpdate);
+      Map<UUID, AlertConfiguration> beforeConfigMap =
+          beforeConfigurations.stream()
+              .collect(Collectors.toMap(AlertConfiguration::getUuid, Function.identity()));
+
+      Map<String, Set<String>> validLabels =
+          AlertTemplateVariable.list(customerUuid).stream()
+              .collect(
+                  Collectors.toMap(
+                      AlertTemplateVariable::getName, AlertTemplateVariable::getPossibleValues));
+      Map<EntityOperation, List<AlertConfiguration>> toCreateAndUpdate =
+          configurations.stream()
+              .map(
+                  configuration ->
+                      prepareForSave(configuration, beforeConfigMap.get(configuration.getUuid())))
+              .map(
+                  configuration ->
+                      validate(
+                          configuration, beforeConfigMap.get(configuration.getUuid()), validLabels))
+              .collect(
+                  Collectors.groupingBy(configuration -> configuration.isNew() ? CREATE : UPDATE));
+
+      List<AlertConfiguration> toCreate =
+          toCreateAndUpdate.getOrDefault(CREATE, Collections.emptyList());
+      toCreate.forEach(configuration -> configuration.setCreateTime(nowWithoutMillis()));
+      toCreate.forEach(AlertConfiguration::generateUUID);
+
+      List<AlertConfiguration> toUpdate =
+          toCreateAndUpdate.getOrDefault(UPDATE, Collections.emptyList());
+
+      Set<UUID> toUpdateUuids =
+          toUpdate.stream().map(AlertConfiguration::getUuid).collect(Collectors.toSet());
+      try {
+        configUuidLock.acquireLocks(toUpdateUuids);
+        if (!CollectionUtils.isEmpty(toCreate)) {
+          DB.getDefault().saveAll(toCreate);
+        }
+        if (!CollectionUtils.isEmpty(toUpdate)) {
+          DB.getDefault().updateAll(toUpdate);
+        }
+
+        manageDefinitions(configurations, beforeConfigurations);
+
+        log.debug("{} alert configurations saved", configurations.size());
+        DB.commitTransaction();
+        return configurations;
+      } finally {
+        configUuidLock.releaseLocks(toUpdateUuids);
       }
-
-      manageDefinitions(configurations, beforeConfigurations);
-
-      log.debug("{} alert configurations saved", configurations.size());
-      return configurations;
     } finally {
-      configUuidLock.releaseLocks(toUpdateUuids);
+      DB.endTransaction();
     }
   }
 
   @Transactional
-  public AlertConfiguration save(AlertConfiguration definition) {
-    return save(Collections.singletonList(definition)).get(0);
+  public AlertConfiguration save(AlertConfiguration configuration) {
+    return save(configuration.getCustomerUUID(), Collections.singletonList(configuration)).get(0);
   }
 
   public AlertConfiguration get(UUID uuid) {
     if (uuid == null) {
       throw new PlatformServiceException(BAD_REQUEST, "Can't get Alert Configuration by null uuid");
     }
-    return list(AlertConfigurationFilter.builder().uuid(uuid).build())
-        .stream()
+    return list(AlertConfigurationFilter.builder().uuid(uuid).build()).stream()
         .findFirst()
         .orElse(null);
   }
@@ -173,6 +190,14 @@ public class AlertConfigurationService {
     }
     AlertConfiguration configuration = get(uuid);
     if (configuration == null) {
+      throw new PlatformServiceException(BAD_REQUEST, "Invalid Alert Configuration UUID: " + uuid);
+    }
+    return configuration;
+  }
+
+  public AlertConfiguration getOrBadRequest(UUID customerUuid, UUID uuid) {
+    AlertConfiguration configuration = getOrBadRequest(uuid);
+    if (!(configuration.getCustomerUUID().equals(customerUuid))) {
       throw new PlatformServiceException(BAD_REQUEST, "Invalid Alert Configuration UUID: " + uuid);
     }
     return configuration;
@@ -219,8 +244,7 @@ public class AlertConfigurationService {
     AlertConfigurationFilter filter =
         AlertConfigurationFilter.builder()
             .uuids(
-                configurations
-                    .stream()
+                configurations.stream()
                     .map(AlertConfiguration::getUuid)
                     .collect(Collectors.toSet()))
             .build();
@@ -243,15 +267,20 @@ public class AlertConfigurationService {
     }
   }
 
-  private void prepareForSave(AlertConfiguration configuration, AlertConfiguration before) {
+  private AlertConfiguration prepareForSave(
+      AlertConfiguration configuration, AlertConfiguration before) {
     if (before != null) {
       configuration.setCreateTime(before.getCreateTime());
     } else {
       configuration.setCreateTime(nowWithoutMillis());
     }
+    return configuration;
   }
 
-  private void validate(AlertConfiguration configuration, AlertConfiguration before) {
+  private AlertConfiguration validate(
+      AlertConfiguration configuration,
+      AlertConfiguration before,
+      Map<String, Set<String>> validLabels) {
     beanValidator.validate(configuration);
     AlertConfigurationTarget target = configuration.getTarget();
     if (target.isAll() != CollectionUtils.isEmpty(target.getUuids())) {
@@ -281,8 +310,7 @@ public class AlertConfigurationService {
                 .forField(
                     "target.uuids",
                     "universe(s) missing: "
-                        + missingUuids
-                            .stream()
+                        + missingUuids.stream()
                             .map(UUID::toString)
                             .collect(Collectors.joining(", ")))
                 .throwError();
@@ -297,7 +325,9 @@ public class AlertConfigurationService {
               .throwError();
       }
     }
-    if (configuration.getTemplate().getTargetType() != configuration.getTargetType()) {
+    AlertTemplateDescription templateDescription =
+        alertTemplateService.getTemplateDescription(configuration.getTemplate());
+    if (templateDescription.getTargetType() != configuration.getTargetType()) {
       beanValidator.error().global("target type should be consistent with template").throwError();
     }
     if (configuration.getDestinationUUID() != null) {
@@ -317,7 +347,7 @@ public class AlertConfigurationService {
             .throwError();
       }
     }
-    if (configuration.getThresholdUnit() != configuration.getTemplate().getDefaultThresholdUnit()) {
+    if (configuration.getThresholdUnit() != templateDescription.getDefaultThresholdUnit()) {
       beanValidator
           .error()
           .forField("thresholdUnit", "incompatible with alert definition template")
@@ -327,23 +357,39 @@ public class AlertConfigurationService {
         .getThresholds()
         .forEach(
             (severity, threshold) -> {
-              if (threshold.getThreshold() < configuration.getTemplate().getThresholdMinValue()) {
+              if (threshold.getThreshold() < templateDescription.getThresholdMinValue()) {
                 beanValidator
                     .error()
                     .forField(
                         "thresholds[" + severity.name() + "].threshold",
                         "can't be less than "
-                            + doubleToString(configuration.getTemplate().getThresholdMinValue()))
+                            + doubleToString(templateDescription.getThresholdMinValue()))
                     .throwError();
               }
-              if (threshold.getThreshold() > configuration.getTemplate().getThresholdMaxValue()) {
+              if (threshold.getThreshold() > templateDescription.getThresholdMaxValue()) {
                 beanValidator
                     .error()
                     .forField(
                         "thresholds[" + severity.name() + "].threshold",
                         "can't be greater than "
-                            + doubleToString(configuration.getTemplate().getThresholdMaxValue()))
+                            + doubleToString(templateDescription.getThresholdMaxValue()))
                     .throwError();
+              }
+              if (configuration.getTemplate() == AlertTemplate.HA_STANDBY_SYNC) {
+                long replicationFrequency =
+                    runtimeConfigFactory
+                        .globalRuntimeConf()
+                        .getDuration(REPLICATION_FREQUENCY_KEY)
+                        .toMillis();
+                // threshold in minutes RF in milliseconds
+                if ((threshold.getThreshold() * 60.0) < (2.0 * replicationFrequency / 1000.0)) {
+                  beanValidator
+                      .error()
+                      .forField(
+                          "HA Standby Sync[" + severity.name() + "].threshold",
+                          "can't be less than twice replication frequency")
+                      .throwError();
+                }
               }
             });
     if (before != null) {
@@ -374,6 +420,27 @@ public class AlertConfigurationService {
           .forField("", "can't update missing configuration '" + configuration.getName() + "'")
           .throwError();
     }
+    if (configuration.getLabels() != null) {
+      configuration
+          .getLabels()
+          .forEach(
+              (name, value) -> {
+                if (!validLabels.containsKey(name)) {
+                  beanValidator
+                      .error()
+                      .forField("labels", "variable '" + name + "' does not exist")
+                      .throwError();
+                }
+                if (!validLabels.get(name).contains(value)) {
+                  beanValidator
+                      .error()
+                      .forField(
+                          "labels", "variable '" + name + "' does not have value '" + value + "'")
+                      .throwError();
+                }
+              });
+    }
+    return configuration;
   }
 
   @Transactional
@@ -386,8 +453,7 @@ public class AlertConfigurationService {
             .build();
 
     List<AlertConfiguration> configurations =
-        list(filter)
-            .stream()
+        list(filter).stream()
             .filter(
                 configuration ->
                     configuration.getTarget().isAll()
@@ -395,8 +461,7 @@ public class AlertConfigurationService {
             .collect(Collectors.toList());
 
     Map<EntityOperation, List<AlertConfiguration>> toUpdateAndDelete =
-        configurations
-            .stream()
+        configurations.stream()
             .collect(
                 Collectors.groupingBy(
                     configuration ->
@@ -406,7 +471,7 @@ public class AlertConfigurationService {
                             : DELETE));
 
     // Just need to save - service will delete definition itself.
-    save(toUpdateAndDelete.get(UPDATE));
+    save(customerUuid, toUpdateAndDelete.get(UPDATE));
     delete(toUpdateAndDelete.get(DELETE));
   }
 
@@ -435,37 +500,30 @@ public class AlertConfigurationService {
     AlertDefinitionFilter filter =
         AlertDefinitionFilter.builder().configurationUuids(configurationUUIDs).build();
     Map<UUID, List<AlertDefinition>> definitionsByConfiguration =
-        alertDefinitionService
-            .list(filter)
-            .stream()
+        alertDefinitionService.list(filter).stream()
             .collect(
                 Collectors.groupingBy(AlertDefinition::getConfigurationUUID, Collectors.toList()));
 
     // Read existing maintenance windows, associated with saved configurations.
     Set<UUID> maintenanceWindowUuids =
-        configurations
-            .stream()
+        configurations.stream()
             .flatMap(configuration -> configuration.getMaintenanceWindowUuidsSet().stream())
             .filter(Objects::nonNull)
             .collect(Collectors.toSet());
     MaintenanceWindowFilter maintenanceWindowFilter =
         MaintenanceWindowFilter.builder().uuids(maintenanceWindowUuids).build();
     Map<UUID, MaintenanceWindow> maintenanceWindowMap =
-        maintenanceService
-            .list(maintenanceWindowFilter)
-            .stream()
+        maintenanceService.list(maintenanceWindowFilter).stream()
             .collect(Collectors.toMap(MaintenanceWindow::getUuid, Function.identity()));
 
     List<AlertDefinition> toSave = new ArrayList<>();
     List<AlertDefinition> toRemove = new ArrayList<>();
 
     Map<UUID, AlertConfiguration> configurationsMap =
-        configurations
-            .stream()
+        configurations.stream()
             .collect(Collectors.toMap(AlertConfiguration::getUuid, Function.identity()));
     Map<UUID, AlertConfiguration> beforeMap =
-        beforeList
-            .stream()
+        beforeList.stream()
             .collect(Collectors.toMap(AlertConfiguration::getUuid, Function.identity()));
 
     for (UUID uuid : configurationUUIDs) {
@@ -479,6 +537,8 @@ public class AlertConfigurationService {
         // If configuration was deleted - remove all the associated definitions.
         toRemove.addAll(currentDefinitions);
       } else {
+        AlertTemplateDescription templateDescription =
+            alertTemplateService.getTemplateDescription(configuration.getTemplate());
         boolean configurationChanged = before != null && !before.equals(configuration);
         Customer customer = Customer.getOrBadRequest(configuration.getCustomerUUID());
         AlertConfigurationTarget target = configuration.getTarget();
@@ -499,8 +559,7 @@ public class AlertConfigurationService {
               definition = currentDefinitions.get(0);
             }
             definition.setConfigWritten(false);
-            definition.setQuery(configuration.getTemplate().buildTemplate(customer));
-            if (!configuration.getTemplate().isSkipTargetLabels()) {
+            if (!templateDescription.isSkipSourceLabels()) {
               definition.setLabels(
                   MetricLabelsBuilder.create()
                       .appendCustomer(customer)
@@ -541,12 +600,10 @@ public class AlertConfigurationService {
               universes = Universe.getAllWithoutResources(universeUUIDs);
             }
             Map<UUID, Universe> universeMap =
-                universes
-                    .stream()
+                universes.stream()
                     .collect(Collectors.toMap(Universe::getUniverseUUID, Function.identity()));
             Map<UUID, List<AlertDefinition>> definitionsByUniverseUuid =
-                currentDefinitions
-                    .stream()
+                currentDefinitions.stream()
                     .collect(Collectors.groupingBy(AlertDefinition::getUniverseUUID));
             for (UUID universeUuid : universeUUIDs) {
               Universe universe = universeMap.get(universeUuid);
@@ -579,9 +636,7 @@ public class AlertConfigurationService {
                   }
                 }
                 universeDefinition.setConfigWritten(false);
-                universeDefinition.setQuery(
-                    configuration.getTemplate().buildTemplate(customer, universe));
-                if (!configuration.getTemplate().isSkipTargetLabels()) {
+                if (!templateDescription.isSkipSourceLabels()) {
                   universeDefinition.setLabels(
                       MetricLabelsBuilder.create()
                           .appendCustomer(customer)
@@ -591,9 +646,7 @@ public class AlertConfigurationService {
                 Set<UUID> appliedMaintenanceWindows = new HashSet<>();
                 if (!configuration.getMaintenanceWindowUuidsSet().isEmpty()) {
                   List<MaintenanceWindow> activeWindows =
-                      configuration
-                          .getMaintenanceWindowUuidsSet()
-                          .stream()
+                      configuration.getMaintenanceWindowUuidsSet().stream()
                           .map(maintenanceWindowMap::get)
                           .filter(Objects::nonNull)
                           .collect(Collectors.toList());
@@ -630,8 +683,7 @@ public class AlertConfigurationService {
   }
 
   private Set<UUID> filterMaintenanceWindows(List<MaintenanceWindow> windows, UUID targetUuid) {
-    return windows
-        .stream()
+    return windows.stream()
         .filter(
             window -> {
               AlertConfigurationTarget target = window.getAlertConfigurationFilter().getTarget();
@@ -652,52 +704,54 @@ public class AlertConfigurationService {
 
   public AlertConfigurationTemplate createConfigurationTemplate(
       Customer customer, AlertTemplate template) {
+    AlertTemplateDescription templateDescription =
+        alertTemplateService.getTemplateDescription(template);
     AlertConfiguration configuration =
         new AlertConfiguration()
             .setCustomerUUID(customer.getUuid())
-            .setName(template.getName())
-            .setDescription(template.getDescription())
-            .setTargetType(template.getTargetType())
+            .setName(templateDescription.getName())
+            .setDescription(templateDescription.getDescription())
+            .setTargetType(templateDescription.getTargetType())
             .setTarget(new AlertConfigurationTarget().setAll(true))
             .setThresholds(
-                template
-                    .getDefaultThresholdMap()
-                    .entrySet()
-                    .stream()
+                templateDescription.getDefaultThresholdMap().entrySet().stream()
                     .collect(
                         Collectors.toMap(
                             Map.Entry::getKey,
                             e ->
                                 new AlertConfigurationThreshold()
-                                    .setCondition(template.getDefaultThresholdCondition())
+                                    .setCondition(
+                                        templateDescription.getDefaultThresholdCondition())
                                     .setThreshold(
-                                        e.getValue().isParamName()
+                                        !StringUtils.isEmpty(e.getValue().getParamName())
                                             ? runtimeConfigFactory
                                                 .globalRuntimeConf()
                                                 .getDouble(e.getValue().getParamName())
                                             : e.getValue().getThreshold()))))
-            .setThresholdUnit(template.getDefaultThresholdUnit())
+            .setThresholdUnit(templateDescription.getDefaultThresholdUnit())
             .setTemplate(template)
-            .setDurationSec(template.getDefaultDurationSec())
+            .setDurationSec(templateDescription.getDefaultDurationSec())
             .setDefaultDestination(true);
     return new AlertConfigurationTemplate()
         .setDefaultConfiguration(configuration)
-        .setThresholdMinValue(template.getThresholdMinValue())
-        .setThresholdMaxValue(template.getThresholdMaxValue())
-        .setThresholdInteger(template.getDefaultThresholdUnit().isInteger())
-        .setThresholdReadOnly(template.isThresholdReadOnly())
-        .setThresholdConditionReadOnly(template.isThresholdConditionReadOnly())
-        .setThresholdUnitName(template.getThresholdUnitName());
+        .setThresholdMinValue(templateDescription.getThresholdMinValue())
+        .setThresholdMaxValue(templateDescription.getThresholdMaxValue())
+        .setThresholdInteger(templateDescription.getDefaultThresholdUnit().isInteger())
+        .setThresholdReadOnly(templateDescription.isThresholdReadOnly())
+        .setThresholdConditionReadOnly(templateDescription.isThresholdConditionReadOnly())
+        .setThresholdUnitName(templateDescription.getThresholdUnitName());
   }
 
   public void createDefaultConfigs(Customer customer) {
     List<AlertConfiguration> alertConfigurations =
         Arrays.stream(AlertTemplate.values())
-            .filter(AlertTemplate::isCreateForNewCustomer)
+            .filter(
+                template ->
+                    alertTemplateService.getTemplateDescription(template).isCreateForNewCustomer())
             .map(template -> createConfigurationTemplate(customer, template))
             .map(AlertConfigurationTemplate::getDefaultConfiguration)
             .collect(Collectors.toList());
-    save(alertConfigurations);
+    save(customer.getUuid(), alertConfigurations);
   }
 
   private AlertDefinition createEmptyDefinition(AlertConfiguration configuration) {

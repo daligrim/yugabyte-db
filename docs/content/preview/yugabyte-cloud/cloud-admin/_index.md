@@ -1,10 +1,9 @@
 ---
-title: Administration and billing
-headerTitle: Administration and billing
-linkTitle: Administration and billing
-description: Administration and billing.
-image: /images/section_icons/explore/administer.png
-headcontent: Manage account users and billing and payment methods
+title: Plan, billing, and invoicing
+headerTitle: Billing
+linkTitle: Billing
+description: Manage plans, billing, and invoicing.
+headcontent: Manage your plan and payment, and review invoices and usage
 menu:
   preview_yugabyte-cloud:
     parent: yugabytedb-managed
@@ -13,62 +12,24 @@ menu:
 type: indexpage
 ---
 
-Before you can add Dedicated clusters, you need to create a billing profile and add a payment method. You manage your billing profile and payment methods from the **Admin** page. You can also audit activity, view your monthly invoices, and invite team members so that they can create, manage, authorize network access, and connect to clusters.
+There are no set-up charges or commitments to begin using YugabyteDB Aeon. At the end of the month, you are automatically charged for that month's usage.
 
-{{< note title="Note" >}}
+Review your usage and plan details, manage your billing information, and review invoices from the **Usage & Billing** page.
 
-You must be signed in as an Admin user to perform Admin tasks. Developer users cannot invite other users or view the billing profile.
+For information on available plans and their features, refer to [YugabyteDB Pricing](https://www.yugabyte.com/pricing/).
 
-{{< /note >}}
+{{<index/block>}}
 
-<div class="row">
+  {{<index/item
+    title="Manage billing"
+    body="Manage your billing profile and payment methods, view usage, and view invoices."
+    href="cloud-billing-profile/"
+    icon="fa-thin fa-file-invoice-dollar">}}
 
-  <div class="col-12 col-md-6 col-lg-12 col-xl-6">
-    <a class="section-link icon-offset" href="manage-access/">
-      <div class="head">
-        <img class="icon" src="/images/section_icons/secure/create-roles.png" aria-hidden="true" />
-        <div class="title">Manage account access</div>
-      </div>
-      <div class="body">
-        Invite other users to your account so that they can manage and connect to clusters.
-      </div>
-    </a>
-  </div>
+  {{<index/item
+    title="Cluster costs"
+    body="Learn how cluster configurations are costed."
+    href="cloud-billing-costs/"
+    icon="fa-thin fa-file-invoice-dollar">}}
 
-  <div class="col-12 col-md-6 col-lg-12 col-xl-6">
-    <a class="section-link icon-offset" href="cloud-admin-apikeys/">
-      <div class="head">
-        <img class="icon" src="/images/section_icons/secure/checklist.png" aria-hidden="true" />
-        <div class="title">Manage API keys</div>
-      </div>
-      <div class="body">
-        Create and revoke API keys for accessing the YugabyteDB Managed API.
-      </div>
-    </a>
-  </div>
-
-  <div class="col-12 col-md-6 col-lg-12 col-xl-6">
-    <a class="section-link icon-offset" href="cloud-billing-profile/">
-      <div class="head">
-        <div class="icon"><i class="fas fa-file-invoice-dollar"></i></div>
-        <div class="title">Manage billing</div>
-      </div>
-      <div class="body">
-        Manage your billing profile and payment methods, as well as view your running costs and past invoices.
-      </div>
-    </a>
-  </div>
-
-  <div class="col-12 col-md-6 col-lg-12 col-xl-6">
-    <a class="section-link icon-offset" href="cloud-billing-costs/">
-      <div class="head">
-        <div class="icon"><i class="fas fa-file-invoice-dollar"></i></div>
-        <div class="title">Cluster costs</div>
-      </div>
-      <div class="body">
-        Learn how cluster configurations are costed.
-      </div>
-    </a>
-  </div>
-
-</div>
+{{</index/block>}}

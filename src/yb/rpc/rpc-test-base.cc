@@ -22,12 +22,14 @@
 #include "yb/rpc/yb_rpc.h"
 
 #include "yb/util/debug-util.h"
-#include "yb/util/flag_tags.h"
+#include "yb/util/flags.h"
 #include "yb/util/net/net_util.h"
 #include "yb/util/random_util.h"
 #include "yb/util/result.h"
 #include "yb/util/status_log.h"
 #include "yb/util/test_macros.h"
+
+using std::string;
 
 using namespace std::chrono_literals;
 
@@ -46,6 +48,8 @@ using yb::rpc_test::AddRequestPB;
 using yb::rpc_test::AddResponsePB;
 using yb::rpc_test::EchoRequestPB;
 using yb::rpc_test::EchoResponsePB;
+using yb::rpc_test::RepeatedEchoRequestPB;
+using yb::rpc_test::RepeatedEchoResponsePB;
 using yb::rpc_test::ForwardRequestPB;
 using yb::rpc_test::ForwardResponsePB;
 using yb::rpc_test::PanicRequestPB;
@@ -68,10 +72,10 @@ namespace {
 
 constexpr size_t kQueueLength = 1000;
 
-Slice GetSidecarPointer(const RpcController& controller, int idx, size_t expected_size) {
-  Slice sidecar = CHECK_RESULT(controller.GetSidecar(idx));
-  CHECK_EQ(expected_size, sidecar.size());
-  return sidecar;
+void GetSidecar(
+    const RpcController& controller, int idx, size_t expected_size, std::string* buffer) {
+  CHECK_RESULT(controller.ExtractSidecar(idx)).AsSlice().AssignTo(buffer);
+  CHECK_EQ(expected_size, buffer->size());
 }
 
 MessengerBuilder CreateMessengerBuilder(const std::string& name,
@@ -165,24 +169,33 @@ void GenericCalculatorService::DoSendStrings(InboundCall* incoming) {
   for (auto size : req.sizes()) {
     auto sidecar = RefCntBuffer(size);
     RandomString(sidecar.udata(), size, &r);
-    resp.add_sidecars(narrow_cast<uint32_t>(yb_call->AddRpcSidecar(sidecar.as_slice())));
+    yb_call->sidecars().Start().Append(sidecar.as_slice());
+    resp.add_sidecars(narrow_cast<uint32_t>(yb_call->sidecars().Complete()));
   }
 
   down_cast<YBInboundCall*>(incoming)->RespondSuccess(AnyMessageConstPtr(&resp));
 }
 
 void GenericCalculatorService::DoSleep(InboundCall* incoming) {
-  Slice param(incoming->serialized_request());
   SleepRequestPB req;
-  if (!req.ParseFromArray(param.data(), narrow_cast<int>(param.size()))) {
-    incoming->RespondFailure(ErrorStatusPB::ERROR_INVALID_REQUEST,
-        STATUS(InvalidArgument, "Couldn't parse pb",
-            req.InitializationErrorString()));
-    return;
+  if (incoming->IsLocalCall()) {
+    auto* local = down_cast<LocalYBInboundCall*>(incoming);
+    if (auto outbound_call = local->outbound_call()) {
+      req = yb::down_cast<const SleepRequestPB&>(*outbound_call->request().protobuf());
+    }
+  } else {
+    Slice param(incoming->serialized_request());
+    if (!req.ParseFromArray(param.data(), narrow_cast<int>(param.size()))) {
+      incoming->RespondFailure(
+          ErrorStatusPB::ERROR_INVALID_REQUEST,
+          STATUS(InvalidArgument, "Couldn't parse pb", req.InitializationErrorString()));
+      return;
+    }
   }
 
   LOG(INFO) << "got call: " << req.ShortDebugString();
   SleepFor(MonoDelta::FromMicroseconds(req.sleep_micros()));
+  LOG(INFO) << "done sleeping";
   SleepResponsePB resp;
   down_cast<YBInboundCall*>(incoming)->RespondSuccess(AnyMessageConstPtr(&resp));
 }
@@ -199,6 +212,21 @@ void GenericCalculatorService::DoEcho(InboundCall* incoming) {
 
   EchoResponsePB resp;
   resp.set_data(std::move(*req.mutable_data()));
+  down_cast<YBInboundCall*>(incoming)->RespondSuccess(AnyMessageConstPtr(&resp));
+}
+
+void GenericCalculatorService::DoRepeatedEcho(InboundCall* incoming) {
+  Slice param(incoming->serialized_request());
+  RepeatedEchoRequestPB req;
+  if (!req.ParseFromArray(param.data(), narrow_cast<int>(param.size()))) {
+    incoming->RespondFailure(
+        ErrorStatusPB::ERROR_INVALID_REQUEST,
+        STATUS(InvalidArgument, "Couldn't parse pb", req.InitializationErrorString()));
+    return;
+  }
+
+  RepeatedEchoResponsePB resp;
+  resp.set_data(std::string(req.count(), static_cast<char>(req.character())));
   down_cast<YBInboundCall*>(incoming)->RespondSuccess(AnyMessageConstPtr(&resp));
 }
 
@@ -256,6 +284,12 @@ class CalculatorService: public CalculatorServiceIf {
   void Echo(const EchoRequestPB* req, EchoResponsePB* resp, RpcContext context) override {
     TEST_PAUSE_IF_FLAG(TEST_pause_calculator_echo_request);
     resp->set_data(req->data());
+    context.RespondSuccess();
+  }
+
+  void RepeatedEcho(const RepeatedEchoRequestPB* req, RepeatedEchoResponsePB* resp,
+                    RpcContext context) override {
+    resp->set_data(std::string(req->count(), static_cast<char>(req->character())));
     context.RespondSuccess();
   }
 
@@ -349,7 +383,7 @@ class CalculatorService: public CalculatorServiceIf {
       resp->mutable_repeated_messages()->push_back_ref(&*it);
     }
     for (const auto& msg : req->repeated_messages()) {
-      auto temp = CopySharedMessage<rpc_test::LWLightweightSubMessagePB>(msg.ToGoogleProtobuf());
+      auto temp = CopySharedMessage(msg.ToGoogleProtobuf());
       resp->mutable_repeated_messages_copy()->emplace_back(*temp);
     }
 
@@ -390,6 +424,18 @@ class CalculatorService: public CalculatorServiceIf {
     return resp;
   }
 
+  void Sidecar(
+      const rpc_test::SidecarRequestPB* req, rpc_test::SidecarResponsePB* resp,
+      RpcContext context) override {
+    auto num_sidecars = req->num_sidecars();
+    for (size_t i = 0; i != num_sidecars; ++i) {
+      auto& buffer = context.sidecars().Start();
+      buffer.Append(CHECK_RESULT(context.ExtractSidecar(num_sidecars - i - 1)).AsSlice());
+    }
+    resp->set_num_sidecars(num_sidecars);
+    context.RespondSuccess();
+  }
+
  private:
   void DoSleep(const SleepRequestPB* req, RpcContext context) {
     SleepFor(MonoDelta::FromMicroseconds(req->sleep_micros()));
@@ -423,8 +469,10 @@ class AbacusService: public rpc_test::AbacusServiceIf {
 TestServer::TestServer(std::unique_ptr<Messenger>&& messenger,
                        const TestServerOptions& options)
     : messenger_(std::move(messenger)),
-      thread_pool_(std::make_unique<ThreadPool>(
-          "rpc-test", kQueueLength, options.n_worker_threads)) {
+      thread_pool_(std::make_unique<ThreadPool>(ThreadPoolOptions {
+        .name = "rpc-test",
+        .max_workers = options.n_worker_threads,
+      })) {
 
   EXPECT_OK(messenger_->ListenAddress(
       rpc::CreateConnectionContextFactory<rpc::YBInboundConnectionContext>(),
@@ -515,13 +563,14 @@ void RpcTestBase::DoTestSidecar(Proxy* proxy,
   }
 
   Random rng(kSeed);
-  faststring expected;
+  std::string expected;
+  std::string buffer;
   for (size_t i = 0; i != sizes.size(); ++i) {
     size_t size = sizes[i];
+    GetSidecar(controller, resp.sidecars(narrow_cast<uint32_t>(i)), size, &buffer);
     expected.resize(size);
-    Slice sidecar = GetSidecarPointer(controller, resp.sidecars(narrow_cast<uint32_t>(i)), size);
     RandomString(expected.data(), size, &rng);
-    ASSERT_EQ(0, sidecar.compare(expected)) << "Invalid sidecar at " << i << " position";
+    ASSERT_EQ(buffer, expected) << "Invalid sidecar at " << i << " position";
   }
 }
 

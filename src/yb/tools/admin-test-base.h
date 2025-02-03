@@ -11,10 +11,11 @@
 // under the License.
 //
 
-#ifndef YB_TOOLS_ADMIN_TEST_BASE_H
-#define YB_TOOLS_ADMIN_TEST_BASE_H
+#pragma once
 
 #include <rapidjson/document.h>
+
+#include "yb/common/json_util.h"
 
 #include "yb/integration-tests/ts_itest-base.h"
 
@@ -47,19 +48,14 @@ class AdminTestBase : public tserver::TabletServerIntegrationTestBase {
 
   template <class... Args>
   Result<rapidjson::Document> CallJsonAdmin(Args&&... args) {
-    return ParseJson(VERIFY_RESULT(CallAdmin(std::forward<Args>(args)...)));
+    return common::ParseJson(VERIFY_RESULT(CallAdmin(std::forward<Args>(args)...)));
   }
-
-  Result<rapidjson::Document> ParseJson(const std::string& raw);
 
   Result<CassandraSession> CqlConnect(const std::string& db_name = std::string());
 
  private:
   std::unique_ptr<CppCassandraDriver> cql_driver_;
 };
-
-Result<const rapidjson::Value&> Get(const rapidjson::Value& value, const char* name);
-Result<rapidjson::Value&> Get(rapidjson::Value* value, const char* name);
 
 // Run a yb-admin command and return the output.
 template <class... Args>
@@ -76,5 +72,3 @@ Result<std::string> RunAdminToolCommand(const std::string& master_addresses, Arg
 
 }  // namespace tools
 }  // namespace yb
-
-#endif  // YB_TOOLS_ADMIN_TEST_BASE_H

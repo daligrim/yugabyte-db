@@ -1,25 +1,36 @@
 ---
-title: Connect an application
+title: YugabyteDB Psycopg2 Smart Driver for YSQL
+headerTitle: Connect an application
 linkTitle: Connect an app
-description: Python drivers for YSQL
-image: /images/section_icons/sample-data/s_s1-sampledata-3x.png
+description: Connect a Python application using YugabyteDB Psycopg2 Smart Driver for YSQL
 menu:
   preview:
     identifier: yugabyte-psycopg2-driver
     parent: python-drivers
-    weight: 400
+    weight: 500
 type: docs
 ---
 
 <ul class="nav nav-tabs-alt nav-tabs-yb">
+  <li class="active">
+    <a href="../yugabyte-psycopg2/" class="nav-link">
+      YSQL
+    </a>
+  </li>
+  <li>
+    <a href="../ycql/" class="nav-link">
+      YCQL
+    </a>
+  </li>
+</ul>
 
+<ul class="nav nav-tabs-alt nav-tabs-yb">
   <li >
     <a href="../yugabyte-psycopg2" class="nav-link active">
-      <i class="icon-java-bold" aria-hidden="true"></i>
+      <i class="icon-postgres" aria-hidden="true"></i>
       YugabyteDB Psycopg2 Smart Driver
     </a>
   </li>
-
   <li >
     <a href="../postgres-psycopg2" class="nav-link">
       <i class="icon-postgres" aria-hidden="true"></i>
@@ -27,26 +38,60 @@ type: docs
     </a>
   </li>
 
+  <li >
+    <a href="../aiopg" class="nav-link">
+      <i class="icon-postgres" aria-hidden="true"></i>
+      aiopg
+    </a>
+  </li>
+
 </ul>
 
-The [Yugabyte Psycopg2 smart driver](https://github.com/yugabyte/psycopg2) is a distributed Python driver for [YSQL](../../../api/ysql/) built on the [PostgreSQL psycopg2 driver](https://github.com/psycopg/psycopg2), with additional [connection load balancing](../../smart-drivers/) features.
+The [Yugabyte Psycopg2 smart driver](https://github.com/yugabyte/psycopg2) is a Python driver for [YSQL](../../../api/ysql/) built on the [PostgreSQL psycopg2 driver](https://github.com/psycopg/psycopg2), with additional [connection load balancing](../../smart-drivers/) features.
+
+{{< note title="YugabyteDB Aeon" >}}
+
+To use smart driver load balancing features when connecting to clusters in YugabyteDB Aeon, applications must be deployed in a VPC that has been peered with the cluster VPC. For applications that access the cluster from outside the VPC network, use the upstream PostgreSQL driver instead; in this case, the cluster performs the load balancing. Applications that use smart drivers from outside the VPC network fall back to the upstream driver behaviour automatically. For more information, refer to [Using smart drivers with YugabyteDB Aeon](../../smart-drivers/#using-smart-drivers-with-yugabytedb-aeon).
+
+The Yugabyte Psycopg2 smart driver does not support SSL mode verify-full for clusters in YugabyteDB Aeon. Use verify-ca or the upstream psycopg2 driver.
+
+{{< /note >}}
 
 ## CRUD operations
 
-Learn how to establish a connection to YugabyteDB database and begin basic CRUD operations using the steps in [Build an application](../../../develop/build-apps/python/ysql-psycopg2/).
+The following sections demonstrate how to perform common tasks required for Python application development using the YugabyteDB Psycopg2 smart driver.
 
-The following sections break down the example to demonstrate how to perform common tasks required for Python application development using the YugabyteDB Psycopg2 smart driver.
+To start building your application, make sure you have met the [prerequisites](../#prerequisites).
 
 ### Step 1: Add the YugabyteDB driver dependency
 
-Building Psycopg requires a few prerequisites (a C compiler and some development packages). Check the [installation instructions](https://www.psycopg.org/docs/install.html#build-prerequisites) and [the FAQ](https://www.psycopg.org/docs/faq.html#faq-compile) for details.
+Building Psycopg2 requires a few prerequisites (a C compiler and some development packages). Check the [installation instructions](https://www.psycopg.org/docs/install.html#build-prerequisites) and [the FAQ](https://www.psycopg.org/docs/faq.html#faq-compile) for details.
 
-The YugabyteDB Psycopg2 requires PostgreSQL version 11 or above (preferably 14).
+The YugabyteDB Psycopg2 requires PostgreSQL version 12 or later (preferably 14).
 
-After you've installed the prerequisites, install psycopg2-yugabytedb like any other Python package, using pip to download it from [PyPI](https://pypi.org/project/psycopg2-yugabytedb/):
+After you've installed the prerequisites, install psycopg2-yugabytedb like any other Python package, using pip to download it from PyPI.
+
+| PyPI Project | Type | Files |
+| :--- | :--- | :--- |
+| [psycopg2-yugabytedb](https://pypi.org/project/psycopg2-yugabytedb/) | Source | [Download](https://pypi.org/project/psycopg2-yugabytedb/#files) |
+| [psycopg2-yugabytedb-binary](https://pypi.org/project/psycopg2-yugabytedb-binary/) | Binary | [Download](https://pypi.org/project/psycopg2-yugabytedb-binary/#files) |
+
+Install source using pip:
 
 ```sh
 $ pip install psycopg2-yugabytedb
+```
+
+Install binary using pip:
+
+```sh
+$ pip install psycopg2-yugabytedb-binary
+```
+
+If you downloaded the binary locally, install using:
+
+```sh
+$ pip install /path/to/file.whi
 ```
 
 Or, you can use the setup.py script if you've downloaded the source package locally:
@@ -56,45 +101,76 @@ $ python setup.py build
 $ sudo python setup.py install
 ```
 
-Then import the psycopg2 package.
+To verify that the installation was successful:
 
-```python
-import psycopg2
-```
+1. Create a test Python script:
+
+    ```sh
+    echo -e "import psycopg2\nprint(psycopg2.__version__)" > test_psycopg2.py
+    ```
+
+1. Run the test script:
+
+    ```sh
+    python test_psycopg2.py
+    ```
+
+If you see the version number, the installation was successful.
 
 ### Step 2: Set up the database connection
 
-The following table describes the connection parameters required to connect, including smart driver parameters for uniform and topology load balancing.
+The following table describes the connection parameters required to connect, including [smart driver parameters](../../smart-drivers/) for uniform and topology load balancing.
 
 | Parameter | Description | Default |
 | :-------- | :---------- | :------ |
-| host | Hostname of the YugabyteDB instance | localhost |
+| host | Host name of the YugabyteDB instance. You can also enter [multiple addresses](#use-multiple-addresses). | localhost |
 | port | Listen port for YSQL | 5433 |
 | database/dbname | Database name | yugabyte |
 | user | User connecting to the database | yugabyte |
 | password | User password | yugabyte |
-| load_balance | Enables uniform load balancing | false |
-| topology_keys | enables topology-aware load balancing | true
+| load_balance | Enables [uniform load balancing](../../smart-drivers/#cluster-aware-load-balancing) | false |
+| topology_keys | Enables [topology-aware load balancing](../../smart-drivers/#topology-aware-load-balancing). Specify comma-separated geo-locations in the form `cloud.region.zone:priority`. Ignored if `load_balance` is false | Empty |
+| yb_servers_refresh_interval | The interval in seconds to refresh the servers list; ignored if `load_balance` is false | 300 |
+| fallback_to_topology_keys_only | If set to true and `topology_keys` are specified, the driver only tries to connect to nodes specified in `topology_keys` | false |
+| failed_host_ttl_seconds | Time, in seconds, to wait before trying to connect to failed nodes. When the driver is unable to connect to a node, it marks the node as failed using a timestamp, and ignores the node when trying new connections until this time elapses. | 5 |
 
 You can provide the connection details in one of the following ways:
 
 - Connection string:
 
   ```python
-  "dbname=database_name host=hostname port=port user=username  password=password load_balance=true"
+  "dbname=database_name host=hostname port=5433 user=username password=password load_balance=true topology_keys=cloud.region.zone1,cloud.region.zone2"
   ```
 
 - Connection dictionary:
 
   ```python
-  user = 'username', password='xxx', host = 'hostname', port = 'port', dbname = 'database_name', load_balance='True'
+  user = 'username', password='xxx', host = 'hostname', port = '5433', dbname = 'database_name', load_balance='true', topology_keys='cloud.region.zone1,cloud.region.zone2'
   ```
 
-The following is an example connection string for connecting to YugabyteDB.
+The following is an example connection string for connecting to YugabyteDB:
 
 ```python
 conn = psycopg2.connect(dbname='yugabyte',host='localhost',port='5433',user='yugabyte',password='yugabyte',load_balance='true')
 ```
+
+After the driver establishes the initial connection, it fetches the list of available servers from the cluster, and load-balances subsequent connection requests across these servers.
+
+#### Use multiple addresses
+
+You can specify multiple hosts in the connection string to provide alternative options during the initial connection in case the primary address fails.
+
+{{< tip title="Tip">}}
+To obtain a list of available hosts, you can connect to any cluster node and use the `yb_servers()` YSQL function.
+{{< /tip >}}
+
+Delimit the addresses using commas, as follows:
+
+```python
+conn = psycopg2.connect(dbname='yugabyte',host='host1,host2,host3',port='5433',user='yugabyte',password='yugabyte',load_balance='true')
+```
+
+The hosts are only used during the initial connection attempt. If the first host is down when the driver is connecting, the driver attempts to connect to the next host in the string, and so on.
 
 #### Use SSL
 
@@ -108,10 +184,10 @@ The following table describes the connection parameters required to connect usin
 The following is an example for connecting to a YugabyteDB cluster with SSL enabled:
 
 ```python
-conn = psycopg2.connect("host=<hostname> port=5433 dbname=yugabyte user=<username> password=<password> load_balance=true sslmode=verify-full sslrootcert=/Users/my-user/Downloads/root.crt")
+conn = psycopg2.connect("host=<hostname> port=5433 dbname=yugabyte user=<username> password=<password> load_balance=true sslmode=verify-full sslrootcert=/path/to/root.crt")
 ```
 
-If you created a cluster on [YugabyteDB Managed](https://www.yugabyte.com/cloud/), use the cluster credentials and [download the SSL Root certificate](../../../yugabyte-cloud/cloud-connect/connect-applications/).
+The Yugabyte Psycopg2 smart driver does not support SSL mode verify-full for clusters in YugabyteDB Aeon. Use verify-ca or the upstream psycopg2 driver. If your cluster is on YugabyteDB Aeon, use the cluster credentials for user and password, and [download the SSL Root certificate](/preview/yugabyte-cloud/cloud-secure-clusters/cloud-authentication/#download-your-cluster-certificate).
 
 ### Step 3: Write your application
 
@@ -124,7 +200,7 @@ import psycopg2
 
 # Create the database connection.
 
-connString = "host=127.0.0.1 port=5433 dbname=yugabyte user=yugabyte password=yugabyte     load_balance=True"
+connString = "host=127.0.0.1 port=5433 dbname=yugabyte user=yugabyte password=yugabyte load_balance=True"
 
 conn = psycopg2.connect(connString)
 
@@ -175,7 +251,15 @@ cur.close()
 conn.close()
 ```
 
-When you run the `QuickStartApp.py` project, you should see output similar to the following:
+## Run the application
+
+Run the project `QuickStartApp.py` using the following command:
+
+```python
+python3 QuickStartApp.py
+```
+
+You should see output similar to the following:
 
 ```text
 Created table employee
@@ -185,9 +269,10 @@ Query returned: John, 35, Python
 
 If there is no output or you get an error, verify the parameters included in the connection string.
 
+## Limitations
+
+Currently, [PostgreSQL psycopg2 driver](https://github.com/psycopg/psycopg2) and [Yugabyte Psycopg2 smart driver](https://github.com/yugabyte/psycopg2) _cannot_ be used in the same environment.
+
 ## Learn more
 
-- Build Python applications using [Django](../../../drivers-orms/python/django/)
-- Build Python applications using [SQLAlchemy](../../../drivers-orms/python/sqlalchemy/)
-- [Python driver reference](../../../reference/drivers/python/yugabyte-psycopg2-reference/#fundamentals)
-- [YugabyteDB smart drivers for YSQL](../../smart-drivers/)
+[YugabyteDB smart drivers for YSQL](../../smart-drivers/)

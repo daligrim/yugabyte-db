@@ -29,8 +29,7 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_UTIL_BLOCKING_QUEUE_H
-#define YB_UTIL_BLOCKING_QUEUE_H
+#pragma once
 
 #include <unistd.h>
 
@@ -39,6 +38,7 @@
 #include <type_traits>
 #include <vector>
 
+#include "yb/util/callsite_profiling.h"
 #include "yb/util/condition_variable.h"
 #include "yb/util/mutex.h"
 
@@ -91,7 +91,7 @@ class BlockingQueue {
         *out = list_.front();
         list_.pop_front();
         decrement_size_unlocked(*out);
-        not_full_.Signal();
+        YB_PROFILE(not_full_.Signal());
         return true;
       }
       if (shutdown_) {
@@ -129,7 +129,7 @@ class BlockingQueue {
           decrement_size_unlocked(elt);
         }
         list_.clear();
-        not_full_.Signal();
+        YB_PROFILE(not_full_.Signal());
         return true;
       }
       if (shutdown_) {
@@ -157,7 +157,7 @@ class BlockingQueue {
     list_.push_back(val);
     increment_size_unlocked(val);
     l.Unlock();
-    not_empty_.Signal();
+    YB_PROFILE(not_empty_.Signal());
     return QUEUE_SUCCESS;
   }
 
@@ -173,7 +173,7 @@ class BlockingQueue {
 
   // Gets an element for the queue; if the queue is full, blocks until
   // space becomes available. Returns false if we were shutdown prior
-  // to enqueueing the element.
+  // to enqueuing the element.
   bool BlockingPut(const T& val) {
     MutexLock l(lock_);
     while (true) {
@@ -184,7 +184,7 @@ class BlockingQueue {
         list_.push_back(val);
         increment_size_unlocked(val);
         l.Unlock();
-        not_empty_.Signal();
+        YB_PROFILE(not_empty_.Signal());
         return true;
       }
       not_full_.Wait();
@@ -209,8 +209,8 @@ class BlockingQueue {
   void Shutdown() {
     MutexLock l(lock_);
     shutdown_ = true;
-    not_full_.Broadcast();
-    not_empty_.Broadcast();
+    YB_PROFILE(not_full_.Broadcast());
+    YB_PROFILE(not_empty_.Broadcast());
   }
 
   bool empty() const {
@@ -255,5 +255,3 @@ class BlockingQueue {
 };
 
 } // namespace yb
-
-#endif  // YB_UTIL_BLOCKING_QUEUE_H

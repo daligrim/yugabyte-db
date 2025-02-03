@@ -18,33 +18,18 @@
 // under the License.
 //
 
-#if !(defined GFLAGS) || defined(ROCKSDB_LITE)
-
-#include <cstdio>
-int main() {
-#ifndef GFLAGS
-  fprintf(stderr, "Please install gflags to run rocksdb tools\n");
-#endif
-#ifdef ROCKSDB_LITE
-  fprintf(stderr, "DbDumpTool is not supported in ROCKSDB_LITE\n");
-#endif
-  return 1;
-}
-
-#else
-
-#include <gflags/gflags.h>
+#include "yb/util/flags.h"
 #include "yb/docdb/docdb_rocksdb_util.h"
 #include "yb/rocksdb/convenience.h"
 #include "yb/rocksdb/db_dump_tool.h"
 #include "yb/tablet/tablet_options.h"
 
-DEFINE_string(db_path, "", "Path to the db that will be dumped");
-DEFINE_string(dump_location, "", "Path to where the dump file location");
-DEFINE_bool(anonymous, false,
-            "Remove information like db path, creation time from dumped file");
-DEFINE_string(db_options, "",
-              "Options string used to open the database that will be dumped");
+DEFINE_NON_RUNTIME_string(db_path, "", "Path to the db that will be dumped");
+DEFINE_NON_RUNTIME_string(dump_location, "", "Path to where the dump file location");
+DEFINE_NON_RUNTIME_bool(anonymous, false,
+    "Remove information like db path, creation time from dumped file");
+DEFINE_NON_RUNTIME_string(db_options, "",
+    "Options string used to open the database that will be dumped");
 
 int main(int argc, char** argv) {
   GFLAGS::ParseCommandLineFlags(&argc, &argv, true);
@@ -73,7 +58,7 @@ int main(int argc, char** argv) {
 
   yb::tablet::TabletOptions t_options;
   yb::docdb::InitRocksDBOptions(
-      &db_options, "" /* log_prefix */, nullptr /* statistics */, t_options);
+      &db_options, "" /* log_prefix */, "" /* tablet_id */, nullptr /* statistics */, t_options);
 
   rocksdb::DbDumpTool tool;
   if (!tool.Run(dump_options, db_options)) {
@@ -81,4 +66,3 @@ int main(int argc, char** argv) {
   }
   return 0;
 }
-#endif  // !(defined GFLAGS) || defined(ROCKSDB_LITE)

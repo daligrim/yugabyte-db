@@ -13,6 +13,7 @@
 
 #include "yb/util/stack_trace.h"
 
+#include <execinfo.h>
 #include <signal.h>
 
 #ifdef __linux__
@@ -20,21 +21,44 @@
 #include <sys/syscall.h>
 #endif
 
+#include <algorithm>
 #include <mutex>
 
 #include "yb/gutil/casts.h"
+#include "yb/gutil/hash/city.h"
 #include "yb/gutil/linux_syscall_support.h"
 
+#include "yb/util/callsite_profiling.h"
+#include "yb/util/flags.h"
+#include "yb/util/libbacktrace_util.h"
 #include "yb/util/lockfree.h"
 #include "yb/util/monotime.h"
 #include "yb/util/result.h"
+#include "yb/util/scope_exit.h"
+#include "yb/util/symbolize.h"
 #include "yb/util/thread.h"
+#include "yb/util/tsan_util.h"
+
+#if YB_GOOGLE_TCMALLOC
+#include <tcmalloc/malloc_extension.h>
+#endif
+
+using std::string;
 
 using namespace std::literals;
 
 #if defined(__APPLE__)
 typedef sig_t sighandler_t;
 #endif
+
+DEFINE_test_flag(bool, disable_thread_stack_collection_wait, false,
+    "When set to true, ThreadStacks() will not wait for threads to respond");
+
+// A hack to grab a function from glog.
+// For source see e.g. https://github.com/yugabyte/glog/blob/v0.4.0-yb-5/src/stacktrace.h#L57
+namespace google {
+extern int GetStackTrace(void** result, int max_depth, int skip_count);
+}  // namespace google
 
 namespace yb {
 
@@ -142,16 +166,28 @@ struct ThreadStackHelper {
     // a few iterations of the loop, so this timeout is very conservative.
     //
     // The main reason that a thread would not respond is that it has blocked signals. For
-    // example, glibc's timer_thread doesn't respond to our signal, so we always time out
-    // on that one.
-    if (left_to_collect.load(std::memory_order_acquire) > 0) {
-      completion_flag.TimedWait(1s);
+    // example, we may be creating a new thread, or glibc's timer_thread doesn't respond to our
+    // signal.
+    if (left_to_collect.load(std::memory_order_acquire) > 0 &&
+        !FLAGS_TEST_disable_thread_stack_collection_wait) {
+      completion_flag.TimedWait(1s * kTimeMultiplier);
     }
 
     while (auto entry = collected.Pop()) {
       auto it = std::lower_bound(tids.begin(), tids.end(), entry->tid);
       if (it != tids.end() && *it == entry->tid) {
-        (*out)[it - tids.begin()] = entry->stack;
+        auto& entry_out = (*out)[it - tids.begin()];
+
+        if (entry->stack) {
+          entry_out = entry->stack;
+        } else {
+          // If the thread is in the middle of collecting stack trace for any other reason then it
+          // will return an empty output.
+          static const Status status = STATUS(
+              TryAgain,
+              "Thread did not respond: maybe it was in the middle of a stack trace collection");
+          entry_out = status;
+        }
       }
       allocated.Push(entry);
     }
@@ -159,15 +195,16 @@ struct ThreadStackHelper {
 
   void RecordStackTrace(const StackTrace& stack_trace) {
     auto* entry = allocated.Pop();
+    // If entry is nullptr, that means there are not enough allocated entries. In that case, don't
+    // write a log message since we are in a signal handler.
     if (entry) {
-      // Not enough allocated entries, don't write log since we are in signal handler.
       entry->tid = Thread::CurrentThreadIdForStack();
       entry->stack = stack_trace;
       collected.Push(entry);
     }
 
     if (left_to_collect.fetch_sub(1, std::memory_order_acq_rel) - 1 <= 0) {
-      completion_flag.Signal();
+      YB_PROFILE(completion_flag.Signal());
     }
   }
 };
@@ -180,6 +217,14 @@ ThreadStackHelper thread_stack_helper;
 void HandleStackTraceSignal(int signum) {
   int old_errno = errno;
   StackTrace stack_trace;
+#if YB_GOOGLE_TCMALLOC
+  // TODO(#17889): retry in this case. For now, just produce an empty stack trace.
+  if (tcmalloc::MallocExtension::IsCurThreadInAllocDealloc()) {
+    thread_stack_helper.RecordStackTrace(stack_trace);
+    errno = old_errno;
+    return;
+  }
+#endif
   stack_trace.Collect(2);
 
   thread_stack_helper.RecordStackTrace(stack_trace);
@@ -241,16 +286,125 @@ bool InitSignalHandlerUnlocked(int signum) {
 
 } // namespace
 
+// ------------------------------------------------------------------------------------------------
+// StackTrace class
+// ------------------------------------------------------------------------------------------------
+
+void StackTrace::Collect(int skip_frames) {
+  static thread_local bool is_collecting_stack = false;
+
+  if (is_collecting_stack) {
+    // It is unsafe to call backtrace recursively. Return an empty stack trace.
+    // A thread can get here if while it was collecting its own stack, it got interrupted by a
+    // StackTraceSignal request from another thread.
+    return;
+  }
+
+  is_collecting_stack = true;
+  auto se = ScopeExit([]() { is_collecting_stack = false; });
+
+#if THREAD_SANITIZER || ADDRESS_SANITIZER
+  num_frames_ = google::GetStackTrace(frames_, arraysize(frames_), skip_frames);
+#else
+  int max_frames = skip_frames + arraysize(frames_);
+  void** buffer = static_cast<void**>(alloca((max_frames) * sizeof(void*)));
+  num_frames_ = backtrace(buffer, max_frames);
+  if (num_frames_ > skip_frames) {
+    num_frames_ -= skip_frames;
+    memmove(frames_, buffer + skip_frames, num_frames_ * sizeof(void*));
+  } else {
+    num_frames_ = 0;
+  }
+#endif
+}
+
+void StackTrace::StringifyToHex(char* buf, size_t size, int flags) const {
+  char* dst = buf;
+
+  // Reserve kHexEntryLength for the first iteration of the loop, 1 byte for a
+  // space (which we may not need if there's just one frame), and 1 for a nul
+  // terminator.
+  char* limit = dst + size - kHexEntryLength - 2;
+  for (int i = 0; i < num_frames_ && dst < limit; i++) {
+    if (i != 0) {
+      *dst++ = ' ';
+    }
+    // See note in Symbolize() below about why we subtract 1 from each address here.
+    uintptr_t addr = reinterpret_cast<uintptr_t>(frames_[i]);
+    if (!(flags & NO_FIX_CALLER_ADDRESSES)) {
+      addr--;
+    }
+    FastHex64ToBuffer(addr, dst);
+    dst += kHexEntryLength;
+  }
+  *dst = '\0';
+}
+
+std::string StackTrace::ToHexString(int flags) const {
+  // Each frame requires kHexEntryLength, plus a space
+  // We also need one more byte at the end for '\0'
+  char buf[kMaxFrames * (kHexEntryLength + 1) + 1];
+  StringifyToHex(buf, arraysize(buf), flags);
+  return std::string(buf);
+}
+
+// Symbolization function borrowed from glog and modified to use libbacktrace on Linux.
+std::string StackTrace::Symbolize(
+    const StackTraceLineFormat stack_trace_line_format, StackTraceGroup* group) const {
+  std::string buf;
+  auto* global_backtrace_state = libbacktrace::GetGlobalBacktraceState();
+
+  if (group) {
+    *group = StackTraceGroup::kActive;
+  }
+
+  for (int i = 0; i < num_frames_; i++) {
+    void* const pc = frames_[i];
+
+    SymbolizeAddress(stack_trace_line_format, pc, &buf, group, global_backtrace_state);
+  }
+
+  return buf;
+}
+
+string StackTrace::ToLogFormatHexString() const {
+  string buf;
+  for (int i = 0; i < num_frames_; i++) {
+    void* pc = frames_[i];
+    StringAppendF(&buf, "    @ %*p\n", kPrintfPointerFieldWidth, pc);
+  }
+  return buf;
+}
+
+uint64_t StackTrace::HashCode() const {
+  return util_hash::CityHash64(reinterpret_cast<const char*>(frames_),
+                               sizeof(frames_[0]) * num_frames_);
+}
+
+Result<StackTrace> StackTrace::MakeStackTrace(std::string_view frames) {
+  SCHECK_EQ(frames.size() % sizeof(void *), 0,
+            InvalidArgument, "frames should contain an array of pointers");
+  SCHECK(frames.size() / sizeof(void *) <= kMaxFrames, InvalidArgument, "too many frames");
+
+  StackTrace s;
+  s.num_frames_ = narrow_cast<int>(frames.size() / sizeof(void *));
+  std::memcpy(s.frames_, frames.data(), s.num_frames_ * sizeof(void *));
+  return s;
+}
+
+
+// ------------------------------------------------------------------------------------------------
+
 Result<StackTrace> ThreadStack(ThreadIdForStack tid) {
   return ThreadStacks({tid}).front();
 }
 
 std::vector<Result<StackTrace>> ThreadStacks(const std::vector<ThreadIdForStack>& tids) {
-  static const Status status = STATUS(
+  static const Status default_status = STATUS(
       RuntimeError, "Thread did not respond: maybe it is blocking signals");
 
-  std::vector<Result<StackTrace>> result(tids.size(), status);
-  std::lock_guard<std::mutex> execution_lock(thread_stack_helper.mutex);
+  std::vector<Result<StackTrace>> result(tids.size(), default_status);
+  std::lock_guard execution_lock(thread_stack_helper.mutex);
 
   // Ensure that our signal handler is installed. We don't need any fancy GoogleOnce here
   // because of the mutex above.
@@ -266,17 +420,8 @@ std::vector<Result<StackTrace>> ThreadStacks(const std::vector<ThreadIdForStack>
   thread_stack_helper.completion_flag.Reset();
 
   for (size_t i = 0; i != tids.size(); ++i) {
-    // We use the raw syscall here instead of kill() to ensure that we don't accidentally
-    // send a signal to some other process in the case that the thread has exited and
-    // the TID been recycled.
-#if defined(__linux__)
-    int res = narrow_cast<int>(syscall(SYS_tgkill, getpid(), tids[i], g_stack_trace_signum));
-#else
-    int res = pthread_kill(tids[i], g_stack_trace_signum);
-#endif
-    if (res != 0) {
-      static const Status status = STATUS(
-          RuntimeError, "Unable to deliver signal: process may have exited");
+    auto status = Thread::SendSignal(tids[i], g_stack_trace_signum);
+    if (!status.ok()) {
       result[i] = status;
       thread_stack_helper.left_to_collect.fetch_sub(1, std::memory_order_acq_rel);
     }
@@ -296,11 +441,16 @@ std::string DumpThreadStack(ThreadIdForStack tid) {
 }
 
 Status SetStackTraceSignal(int signum) {
-  std::lock_guard<decltype(thread_stack_helper.mutex)> lock(thread_stack_helper.mutex);
+  std::lock_guard lock(thread_stack_helper.mutex);
   if (!InitSignalHandlerUnlocked(signum)) {
     return STATUS(InvalidArgument, "Unable to install signal handler");
   }
   return Status::OK();
+}
+
+int GetStackTraceSignal() {
+  // Only tests modify this value when multiple threads run, so this is safe.
+  return ANNOTATE_UNPROTECTED_READ(g_stack_trace_signum);
 }
 
 }  // namespace yb

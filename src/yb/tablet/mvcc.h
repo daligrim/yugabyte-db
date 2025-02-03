@@ -29,12 +29,13 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_TABLET_MVCC_H_
-#define YB_TABLET_MVCC_H_
+#pragma once
 
 #include <condition_variable>
 #include <deque>
 #include <vector>
+
+#include "yb/common/opid.h"
 
 #include "yb/gutil/thread_annotations.h"
 
@@ -42,7 +43,6 @@
 
 #include "yb/util/enums.h"
 #include "yb/util/math_util.h"
-#include "yb/util/opid.h"
 
 namespace yb {
 namespace tablet {
@@ -217,5 +217,3 @@ class MvccManager {
 
 }  // namespace tablet
 }  // namespace yb
-
-#endif  // YB_TABLET_MVCC_H_

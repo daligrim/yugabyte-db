@@ -1,8 +1,10 @@
 ---
 title: TTL for data expiration in YCQL
 headerTitle: TTL for data expiration
-linkTitle: 9. TTL for data expiration
+linkTitle: TTL for data expiration
 description: Learn how to use TTL for data expiration in YCQL.
+tags:
+  other: ycql
 menu:
   preview:
     identifier: ttl-data-expiration-ycql
@@ -11,23 +13,9 @@ menu:
 type: docs
 ---
 
-<ul class="nav nav-tabs-alt nav-tabs-yb">
-
-  <li >
-    <a href="../ttl-data-expiration-ysql/" class="nav-link">
-      <i class="icon-postgres" aria-hidden="true"></i>
-      YSQL
-    </a>
-  </li>
-
-  <li >
-    <a href="../ttl-data-expiration-ycql/" class="nav-link active">
-      <i class="icon-cassandra" aria-hidden="true"></i>
-      YCQL
-    </a>
-  </li>
-
-</ul>
+{{<note>}}
+TTL is a [YCQL](/{{<version>}}/api/ycql) only feature. It is not supported in the [YSQL](/{{<version>}}/api/ysql)  API.
+{{</note>}}
 
 There are two types of time to live (TTL) in YCQL:
 
@@ -49,7 +37,7 @@ The table-level TTL can be defined using the `default_time_to_live` [property](.
 YCQL allows the TTL property to be specified at the level of each `INSERT` and `UPDATE` operation.
 
 The row-level TTL expires the whole row. The value is specified during an `INSERT` or `UPDATE` operation with the `USING TTL` clause.
-In such cases, the TTL is stored as part of the DocDB value. 
+In such cases, the TTL is stored as part of the DocDB value.
 
 Consider the following query:
 
@@ -78,6 +66,10 @@ SELECT * FROM pageviews;
 
 (0 rows)
 ```
+
+{{<warning>}}
+**Caveat** : Row level TTL cannot be set on a table with a secondary indexes during INSERTS/UPDATES. {{<issue 10992>}}
+{{</warning>}}
 
 ## Column-level TTL
 
@@ -174,4 +166,3 @@ There are several ways to work with TTL:
 4. [`WriteTime` function](../../../api/ycql/expr_fcall/#writetime-function) returns timestamp when a row or column was inserted.
 5. [Update row or column TTL](../../../api/ycql/dml_update/#using-clause) to update the TTL of a row or column.
 6. [YB-TServer flags related to TTL](../../../reference/configuration/yb-tserver/#file-expiration-based-on-ttl-flags) to configure the YB-TServer for file expiration based on TTL.
-

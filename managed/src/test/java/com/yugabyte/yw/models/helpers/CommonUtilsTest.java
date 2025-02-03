@@ -151,12 +151,22 @@ public class CommonUtilsTest {
 
   @Test
   @Parameters({
-    "1.2.3.4sdfdsf, 1.2.3.4wqerq, true",
+    "1.2.3.4, 1.2.3.4, true",
+    "1.2.3.4, 1.2.3.4wqerq, true",
+    "1.2.3.4-b15, 1.2.3.4, true",
+    "1.2.3.4-b15, 1.2.3.4wqerq, true",
+    "1.2.3.4-b15, 1.2.3.4-b14, false",
+    "1.2.3.4-b15, 1.2.3.4-b15, true",
+    "1.2.3.4-b15, 1.2.3.4-b16, true",
     "1.2.3.3sdfdsf, 1.2.3.4wqerq, true",
     "1.2.3.5sdfdsf, 1.2.3.4wqerq, false",
     "1.2.2.6sdfdsf, 1.2.3.4wqerq, true",
     "1.2.4.1sdfdsf, 1.2.3.4wqerq, false",
     "1.2.4.1sdfdsf, asdfdsaf, true",
+    "1.2.4.1-b1, 2024.1.0.0, true",
+    "2024.1.0.0-b1, 2.21.0.0-b1, false",
+    "2024.1.0.0-b1, 2024.1.0.0-b1, true",
+    "2024.1.0.0-b1, 2024.2.0.0, true",
   })
   public void testReleaseEqualOrAfter(
       String thresholdRelease, String actualRelease, boolean result) {
@@ -165,12 +175,21 @@ public class CommonUtilsTest {
 
   @Test
   @Parameters({
-    "1.2.3.4sdfdsf, 1.2.3.4wqerq, false",
+    "1.2.3.4, 1.2.3.4, false",
+    "1.2.3.4, 1.2.3.4wqerq, false",
+    "1.2.3.4-b15, 1.2.3.4, false",
+    "1.2.3.4-b15, 1.2.3.4wqerq, false",
+    "1.2.3.4-b15, 1.2.3.4-b14, true",
+    "1.2.3.4-b15, 1.2.3.4-b15, false",
+    "1.2.3.4-b15, 1.2.3.4-b16, false",
     "1.2.3.3sdfdsf, 1.2.3.4wqerq, false",
     "1.2.3.5sdfdsf, 1.2.3.4wqerq, true",
     "1.2.2.6sdfdsf, 1.2.3.4wqerq, false",
     "1.2.4.1sdfdsf, 1.2.3.4wqerq, true",
     "1.2.4.1sdfdsf, asdfdsaf, false",
+    "2024.1.0.0-b1, 2.21.0.0-b1, true",
+    "2024.1.0.0-b1, 2024.1.0.0-b1, false",
+    "2024.1.0.0-b1, 2024.2.0.0, false",
   })
   public void testReleaseBefore(String thresholdRelease, String actualRelease, boolean result) {
     assertThat(CommonUtils.isReleaseBefore(thresholdRelease, actualRelease), equalTo(result));
@@ -219,5 +238,28 @@ public class CommonUtilsTest {
     assertFalse(
         CommonUtils.isEqualIgnoringOrder(Arrays.asList("a", "b", "c"), Arrays.asList("a", "b")));
     assertFalse(CommonUtils.isEqualIgnoringOrder(Arrays.asList("a", "b", "c"), null));
+  }
+
+  @Test
+  public void testReplaceBeginningPathChanged() {
+    String pathToModify = "/opt/yugaware/path/to/opt/yugaware/file";
+    String initialRootPath = "/opt/yugaware";
+    String finalRootPath = "/root/data";
+    String expectedModifiedPath = "/root/data/path/to/opt/yugaware/file";
+
+    String modifiedPath =
+        CommonUtils.replaceBeginningPath(pathToModify, initialRootPath, finalRootPath);
+    assertEquals(expectedModifiedPath, modifiedPath);
+  }
+
+  @Test
+  public void testReplaceBeginningPathUnChanged() {
+    String pathToModify = "/opt/yugaware/path/to/opt/path/file";
+    String initialRootPath = "/opt/yugaware";
+    String finalRootPath = "/opt/yugaware";
+
+    String modifiedPath =
+        CommonUtils.replaceBeginningPath(pathToModify, initialRootPath, finalRootPath);
+    assertEquals(pathToModify, modifiedPath);
   }
 }

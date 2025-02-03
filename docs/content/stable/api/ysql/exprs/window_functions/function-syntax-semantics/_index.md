@@ -3,18 +3,15 @@ title: YSQL window functions signature and purpose
 linkTitle: Per function signature and purpose
 headerTitle: Signature and purpose of each window function
 description: This section summarizes the signature and purpose of each of the YSQL window functions and links to their individual accounts.
-image: /images/section_icons/api/ysql.png
+image: /images/section_icons/api/subsection.png
 menu:
-  stable:
+  stable_api:
     identifier: window-function-syntax-semantics
     parent: window-functions
     weight: 30
 type: indexpage
----**On this page**<br>
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;[Aggregate function variants](./#aggregate-function-variants)<br>
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;[`frame_clause` sensitivity](./#frame-clause-sensitivity)<br>
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;[Window functions that return an `int` or `double precision` value as a "classifier" of the position of the row within the window](./#window-functions-that-return-an-int-or-double-precision-value-as-a-classifier-of-the-rank-of-the-row-within-its-window)<br>
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;[Window functions that return columns of another row within the window](./#window-functions-that-return-column-s-of-another-row-within-the-window)
+showRightNav: true
+---
 
 The two tables at the end classify the eleven built-in window functions into two groups according to their general common characteristics.
 
@@ -22,7 +19,7 @@ The two tables at the end classify the eleven built-in window functions into two
 
 ### Aggregate function variants
 
-A few of these also have an aggregate function variant. This can be seen with the `\df` metacommand. For example, `df lag` shows this:
+A few of these also have an aggregate function variant. This can be seen with the `\df` meta-command. For example, `df lag` shows this:
 
 ```
  Result data type |          Argument data types           |  Type

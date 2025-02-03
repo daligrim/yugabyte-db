@@ -55,9 +55,10 @@
 #include <set>
 
 #include <boost/algorithm/string.hpp>
+#include "yb/util/flags/auto_flags_util.h"
 #include "yb/util/string_case.h"
 
-#ifdef TCMALLOC_ENABLED
+#if YB_TCMALLOC_ENABLED
 #include <gperftools/malloc_extension.h>
 #endif
 
@@ -67,12 +68,13 @@
 #include "yb/gutil/strings/human_readable.h"
 #include "yb/gutil/strings/split.h"
 #include "yb/gutil/strings/substitute.h"
+#include "yb/rpc/secure.h"
 #include "yb/rpc/secure_stream.h"
+#include "yb/server/html_print_helper.h"
 #include "yb/server/pprof-path-handlers.h"
 #include "yb/server/server_base.h"
-#include "yb/server/secure.h"
 #include "yb/server/webserver.h"
-#include "yb/util/flag_tags.h"
+#include "yb/util/flags.h"
 #include "yb/util/format.h"
 #include "yb/util/histogram.pb.h"
 #include "yb/util/logging.h"
@@ -82,25 +84,33 @@
 #include "yb/util/jsonwriter.h"
 #include "yb/util/result.h"
 #include "yb/util/status_log.h"
-#include "yb/util/version_info.h"
-#include "yb/util/version_info.pb.h"
+#include "yb/util/stack_trace_tracker.h"
+#include "yb/util/url-coding.h"
+#include "yb/common/version_info.h"
 
-DEFINE_uint64(web_log_bytes, 1024 * 1024,
+DEFINE_RUNTIME_uint64(web_log_bytes, 1024 * 1024,
     "The maximum number of bytes to display on the debug webserver's log page");
-DECLARE_int32(max_tables_metrics_breakdowns);
 TAG_FLAG(web_log_bytes, advanced);
-TAG_FLAG(web_log_bytes, runtime);
 
-DECLARE_bool(TEST_mini_cluster_mode);
+DEFINE_RUNTIME_bool(export_help_and_type_in_prometheus_metrics, true,
+    "Include #TYPE and #HELP in Prometheus metrics output by default");
+
+DEFINE_RUNTIME_uint32(max_prometheus_metric_entries, UINT32_MAX,
+    "The maximum number of Prometheus metric entries returned in each scrape. Note that if "
+    "adding a metric with all its entities would exceed the limit, then we will drop them all."
+    "Thus, the actual number of metric entries returned might be smaller than the limit.");
+
+DECLARE_bool(track_stack_traces);
+DECLARE_bool(TEST_use_custom_varz);
 
 namespace yb {
 
 using boost::replace_all;
-using google::CommandlineFlagsIntoString;
 using std::ifstream;
 using std::string;
 using std::endl;
-using std::shared_ptr;
+using std::map;
+using std::vector;
 using strings::Substitute;
 
 using namespace std::placeholders;
@@ -155,7 +165,7 @@ static void LogsHandler(const Webserver::WebRequest& req, Webserver::WebResponse
   string logfile;
   GetFullLogFilename(google::INFO, &logfile);
   (*output) << tags.header <<"INFO logs" << tags.end_header << endl;
-  (*output) << "Log path is: " << logfile << endl;
+  (*output) << "Log path is: " << EscapeForHtmlToString(logfile) << endl;
 
   struct stat file_stat;
   if (stat(logfile.c_str(), &file_stat) == 0) {
@@ -167,173 +177,116 @@ static void LogsHandler(const Webserver::WebRequest& req, Webserver::WebResponse
     // file is likely to be small, this is unlikely to be an issue in
     // practice.
     log.seekg(seekpos);
-    (*output) << tags.line_break <<"Showing last " << FLAGS_web_log_bytes
+    (*output) << tags.line_break << "Showing last " << FLAGS_web_log_bytes
               << " bytes of log" << endl;
-    (*output) << tags.line_break << tags.pre_tag << log.rdbuf() << tags.end_pre_tag;
+    (*output) << tags.line_break << tags.pre_tag;
+    EscapeForHtml(&log, output);
+    (*output) << tags.end_pre_tag;
 
   } else {
-    (*output) << tags.line_break << "Couldn't open INFO log file: " << logfile;
+    (*output) << tags.line_break << "Couldn't open INFO log file: "
+              << EscapeForHtmlToString(logfile);
   }
 }
 
-std::vector<google::CommandLineFlagInfo> GetAllFlags(const Webserver::WebRequest& req) {
-  std::vector<google::CommandLineFlagInfo> flag_infos;
-  google::GetAllFlags(&flag_infos);
-
-  if (FLAGS_TEST_mini_cluster_mode) {
-    const string* custom_varz_ptr = FindOrNull(req.parsed_args, "TEST_custom_varz");
-    if (custom_varz_ptr != nullptr) {
-      map<string, string> varz;
-      SplitStringToMapUsing(*custom_varz_ptr, "\n", &varz);
-
-      // Replace values for existing flags.
-      for (auto& flag_info : flag_infos) {
-        auto varz_it = varz.find(flag_info.name);
-        if (varz_it != varz.end()) {
-          if (flag_info.current_value != varz_it->second) {
-            flag_info.current_value = varz_it->second;
-            flag_info.is_default = false;
-          }
-          varz.erase(varz_it);
-        }
-      }
-
-      // Add new flags.
-      for (auto const& flag : varz) {
-        google::CommandLineFlagInfo flag_info;
-        flag_info.name = flag.first;
-        flag_info.current_value = flag.second;
-        flag_info.default_value = "";
-        flag_info.is_default = false;
-        flag_infos.push_back(flag_info);
-      }
-    }
-  }
-
-  return flag_infos;
-}
-
-YB_DEFINE_ENUM(FlagType, (kInvalid)(kNodeInfo)(kCustom)(kAuto)(kDefault));
-
-struct FlagInfo {
-  string name;
-  string value;
-  FlagType type;
-};
-
-void ConvertFlagsToJson(const vector<FlagInfo>& flag_infos, std::stringstream* output) {
+void ConvertFlagsToJson(
+    const std::unordered_map<FlagType, std::vector<FlagInfo>>& flag_infos,
+    std::stringstream* output) {
   JsonWriter jw(output, JsonWriter::COMPACT);
   jw.StartObject();
   jw.String("flags");
   jw.StartArray();
 
-  for (const auto& flag_info : flag_infos) {
-    jw.StartObject();
-    jw.String("name");
-    jw.String(flag_info.name);
-    jw.String("value");
-    jw.String(flag_info.value);
-    jw.String("type");
-    // Remove the prefix 'k' from the type name
-    jw.String(ToString(flag_info.type).substr(1));
-    jw.EndObject();
+  for (const auto& [type, flags] : flag_infos) {
+    for (const auto& flag : flags) {
+      jw.StartObject();
+      jw.String("name");
+      jw.String(flag.name);
+      jw.String("value");
+      jw.String(flag.value);
+      jw.String("type");
+      // Remove the prefix 'k' from the type name
+      jw.String(ToString(type).substr(1));
+      jw.EndObject();
+    }
   }
 
   jw.EndArray();
   jw.EndObject();
 }
 
-vector<FlagInfo> GetFlagInfos(const Webserver::WebRequest& req) {
-  const std::set<string> node_info_flags{
-      "log_filename",    "rpc_bind_addresses", "webserver_interface", "webserver_port",
-      "placement_cloud", "placement_region",   "placement_zone"};
-
-  const auto flags = GetAllFlags(req);
-
-  vector<FlagInfo> flag_infos;
-  flag_infos.reserve(flags.size());
-
-  for (const auto& flag : flags) {
-    std::unordered_set<FlagTag> flag_tags;
-    GetFlagTags(flag.name, &flag_tags);
-
-    FlagInfo flag_info;
-    flag_info.name = flag.name;
-    flag_info.type = FlagType::kDefault;
-
-    if (PREDICT_FALSE(ContainsKey(flag_tags, FlagTag::kSensitive_info))) {
-      flag_info.value = "****";
-    } else {
-      flag_info.value = flag.current_value;
+std::unordered_map<FlagType, std::vector<FlagInfo>> GetFlagInfos(
+    const Webserver::WebRequest& req, Webserver* webserver, bool filter_default_flags) {
+  std::map<std::string, std::string> custom_varz;
+  if (FLAGS_TEST_use_custom_varz) {
+    const string* custom_varz_ptr = FindOrNull(req.parsed_args, "TEST_custom_varz");
+    if (custom_varz_ptr != nullptr) {
+      // Note that Split does not ignore empty components so flags with value "" work.
+      custom_varz = strings::Split(*custom_varz_ptr, "\n");
     }
-
-    if (node_info_flags.contains(flag.name)) {
-      flag_info.type = FlagType::kNodeInfo;
-    } else if (flag.current_value != flag.default_value) {
-      flag_info.type = FlagType::kCustom;
-    } else if (flag_tags.contains(FlagTag::kAuto)) {
-      flag_info.type = FlagType::kAuto;
-    }
-
-    flag_infos.push_back(std::move(flag_info));
   }
 
-  // Sort by type, name ascending
-  std::sort(flag_infos.begin(), flag_infos.end(), [](const FlagInfo& lhs, const FlagInfo& rhs) {
-    if (lhs.type == rhs.type) {
-      return ToLowerCase(lhs.name) < ToLowerCase(rhs.name);
-    }
-    return to_underlying(lhs.type) < to_underlying(rhs.type);
-  });
+  std::function<bool(const std::string&)> default_flag_filter = nullptr;
+  if (filter_default_flags) {
+    default_flag_filter = [webserver](const std::string& flag_name) {
+      return webserver->ContainsFlag(flag_name);
+    };
+  }
 
-  return flag_infos;
+  return yb::GetFlagInfos(
+      [webserver](const std::string& flag_name) { return webserver->ContainsAutoFlag(flag_name); },
+      std::move(default_flag_filter), custom_varz);
 }
 
 // Registered to handle "/api/v1/varz", and prints out all command-line flags and their values in
 // JSON format.
-static void GetFlagsJsonHandler(const Webserver::WebRequest& req, Webserver::WebResponse* resp) {
-  const auto flag_infos = GetFlagInfos(req);
+static void GetFlagsJsonHandler(
+    const Webserver::WebRequest& req, Webserver::WebResponse* resp, Webserver* webserver) {
+  const auto flag_infos = GetFlagInfos(req, webserver, /*filter_default_flags=*/false);
   ConvertFlagsToJson(std::move(flag_infos), &resp->output);
 }
 
 // Registered to handle "/varz", and prints out all command-line flags and their values in tabular
 // format. If "raw" argument was passed ("/varz?raw") then prints it in "--name=value" format.
-static void FlagsHandler(const Webserver::WebRequest& req, Webserver::WebResponse* resp) {
+static void FlagsHandler(
+    const Webserver::WebRequest& req, Webserver::WebResponse* resp, Webserver* webserver) {
   std::stringstream& output = resp->output;
-  auto flag_infos = GetFlagInfos(req);
-  if (req.parsed_args.find("raw") != req.parsed_args.end()) {
-    for (const auto& flag_info : flag_infos) {
-      output << "--" << flag_info.name << "=" << flag_info.value << endl;
+  const auto is_raw = req.parsed_args.contains("raw");
+
+  auto flag_infos = GetFlagInfos(req, webserver, /*filter_default_flags=*/!is_raw);
+  if (is_raw) {
+    for (const auto& [_, flags] : flag_infos) {
+      for (const auto& flag : flags) {
+        output << "--" << flag.name << "=" << flag.value << endl;
+      }
     }
     return;
   }
 
   Tags tags(false /* as_text */);
 
-  // List is sorted by type. Convert to HTML table for each type.
-  FlagType previous_type = FlagType::kInvalid;
-  bool first_table = true;
-  for (auto& flag_info : flag_infos) {
-    if (previous_type != flag_info.type) {
-      if (!first_table) {
-        output << tags.end_table;
-      }
-      first_table = false;
-
-      previous_type = flag_info.type;
-
-      string type_str = ToString(flag_info.type).substr(1);
-      output << tags.header << type_str << " Flags" << tags.end_header;
-      output << tags.table << tags.row << tags.table_header << "Name" << tags.end_table_header
-             << tags.table_header << "Value" << tags.end_table_header << tags.end_row;
+  HtmlPrintHelper html_print_helper(output);
+  for (const auto& type : FlagTypeList()) {
+    if (!ContainsKey(flag_infos, type)) {
+      continue;
     }
 
-    output << tags.row << tags.cell << flag_info.name << tags.end_cell;
-    output << tags.cell << flag_info.value << tags.end_cell << tags.end_row;
-  }
+    auto field_set = html_print_helper.CreateFieldset(ToString(type).substr(1) + " Flags");
 
-  if (!first_table) {
-    output << tags.end_table;
+    std::vector<std::string> column_names = {"Name", "Value"};
+    if (type == FlagType::kAuto) {
+      column_names.push_back("State");
+    }
+    auto html_table = html_print_helper.CreateTablePrinter(ToString(type), column_names);
+    for (auto& flag : flag_infos.at(type)) {
+      if (type == FlagType::kAuto) {
+        html_table.AddRow(
+            flag.name, flag.value, (flag.is_auto_flag_promoted ? "PROMOTED" : "NOT PROMOTED"));
+      } else {
+        html_table.AddRow(flag.name, flag.value);
+      }
+    }
+    html_table.Print();
   }
 }
 
@@ -343,43 +296,65 @@ static void StatusHandler(const Webserver::WebRequest& req, Webserver::WebRespon
   (*output) << "{}";
 }
 
-// Registered to handle "/memz", and prints out memory allocation statistics.
-static void MemUsageHandler(const Webserver::WebRequest& req, Webserver::WebResponse* resp) {
-  std::stringstream *output = &resp->output;
-  bool as_text = (req.parsed_args.find("raw") != req.parsed_args.end());
-  Tags tags(as_text);
+static void JsonOutputMemTrackers(const std::vector<MemTrackerData>& trackers,
+                                  std::stringstream *output,
+                                  int max_depth,
+                                  bool use_full_path) {
+  JsonWriter jw(output, JsonWriter::COMPACT);
+  for (auto it = trackers.begin(); it != trackers.end(); it++) {
+    // If the data.depth >= max_depth, skip the info.
+    const auto data = *it;
+    if (data.depth > max_depth) {
+      continue;
+    }
+    const auto& tracker = data.tracker;
+    const std::string tracker_id = use_full_path ? tracker->ToString() : tracker->id();
+    // Output the object
+    jw.StartObject();
+    jw.String("id");
+    jw.String(tracker_id);
+    jw.String("limit_bytes");
+    jw.Int64(tracker->limit());
+    jw.String("current_consumption_bytes");
+    jw.Int64(tracker->consumption());
+    jw.String("peak_consumption_bytes");
+    jw.Int64(tracker->peak_consumption());
 
-  (*output) << tags.pre_tag;
-#ifndef TCMALLOC_ENABLED
-  (*output) << "Memory tracking is not available unless tcmalloc is enabled.";
-#else
-  auto tmp = TcMallocStats();
-  // Replace new lines with <br> for html.
-  replace_all(tmp, "\n", tags.line_break);
-  (*output) << tmp << tags.end_pre_tag;
-#endif
+    // UpdateConsumption returns true if consumption is taken from external source,
+    // for instance tcmalloc stats. So we should show only it in this case.
+    if (data.consumption_excluded_from_ancestors && !data.tracker->UpdateConsumption()) {
+      jw.String("full_consumption_bytes");
+      jw.Int64(tracker->consumption() + data.consumption_excluded_from_ancestors);
+    }
+
+    jw.String("children");
+    jw.StartArray();
+    const auto next_tracker = std::next(it, 1);
+    if (next_tracker == trackers.end()) {
+      for (int i = 0; i < data.depth + 1; ++i) {
+        jw.EndArray();
+        jw.EndObject();
+      }
+    } else if ((*next_tracker).depth <= data.depth) {
+      for (int i = 0; i < data.depth - (*next_tracker).depth + 1; ++i) {
+        jw.EndArray();
+        jw.EndObject();
+      }
+    }
+  }
 }
 
-// Registered to handle "/mem-trackers", and prints out to handle memory tracker information.
-static void MemTrackersHandler(const Webserver::WebRequest& req, Webserver::WebResponse* resp) {
-  std::stringstream *output = &resp->output;
+static void HtmlOutputMemTrackers(const std::vector<MemTrackerData>& trackers,
+                                  std::stringstream *output,
+                                  int max_depth,
+                                  bool use_full_path) {
   *output << "<h1>Memory usage by subsystem</h1>\n";
-  *output << "<table class='table table-striped'>\n";
+  *output << "<table class='table table-striped' id='memtrackerstable'>\n";
   *output << "  <tr><th>Id</th><th>Current Consumption</th>"
       "<th>Peak consumption</th><th>Limit</th></tr>\n";
-
-  int max_depth = INT_MAX;
-  string depth = FindWithDefault(req.parsed_args, "max_depth", "");
-  if (depth != "") {
-    max_depth = std::stoi(depth);
-  }
-  string full_path_arg = FindWithDefault(req.parsed_args, "show_full_path", "true");
-  bool use_full_path = ParseLeadingBoolValue(full_path_arg.c_str(), true);
-
-  std::vector<MemTrackerData> trackers;
-  CollectMemTrackerData(MemTracker::GetRootTracker(), 0, &trackers);
-  for (const auto& data : trackers) {
+  for (auto it = trackers.begin(); it != trackers.end(); it++) {
     // If the data.depth >= max_depth, skip the info.
+    const auto data = *it;
     if (data.depth > max_depth) {
       continue;
     }
@@ -390,9 +365,33 @@ static void MemTrackersHandler(const Webserver::WebRequest& req, Webserver::WebR
         HumanReadableNumBytes::ToString(tracker->consumption());
     const std::string peak_consumption_str =
         HumanReadableNumBytes::ToString(tracker->peak_consumption());
-    const std::string tracker_id = use_full_path ? tracker->ToString() : tracker->id();
-    *output << Format("  <tr data-depth=\"$0\" class=\"level$0\">\n", data.depth);
-    *output << "    <td>" << tracker_id << "</td>";
+    const std::string tracker_id =
+        EscapeForHtmlToString(use_full_path ? tracker->ToString() : tracker->id());
+    // GetPeakRootConsumption() in client-stress-test.cc depends on the HTML formatting.
+    // Update the test, in case this changes in future.
+    if (data.depth < 2) {
+      *output << Format(
+        "  <tr data-depth=\"$0\" class=\"level$0 collapse\" style=\"display: table-row;\">\n",
+        data.depth);
+    } else if (data.depth == 2) {
+      *output << Format(
+        "  <tr data-depth=\"$0\" class=\"level$0 expand\" style=\"display: table-row;\">\n",
+        data.depth);
+    } else {
+      *output << Format(
+        "  <tr data-depth=\"$0\" class=\"level$0 expand\" style=\"display: none;\">\n",
+        data.depth);
+    }
+    const auto next_tracker = std::next(it, 1);
+    if (next_tracker != trackers.end() && (*next_tracker).depth > data.depth && data.depth != 0) {
+      *output << "    <td><span class=\"toggle\"></span>" << tracker_id << "</td>";
+    } else if (next_tracker != trackers.end() && (*next_tracker).depth > data.depth
+               && data.depth == 0) {
+      *output << "    <td><span class=\"toggle collapse\"></span>" << tracker_id << "</td>";
+    } else {
+      *output << "    <td>" << tracker_id << "</td>";
+    }
+
     // UpdateConsumption returns true if consumption is taken from external source,
     // for instance tcmalloc stats. So we should show only it in this case.
     if (!data.consumption_excluded_from_ancestors || data.tracker->UpdateConsumption()) {
@@ -407,6 +406,30 @@ static void MemTrackersHandler(const Webserver::WebRequest& req, Webserver::WebR
   }
 
   *output << "</table>\n";
+}
+
+// Registered to handle "/mem-trackers", and prints out to handle memory tracker information.
+static void MemTrackersHandler(const Webserver::WebRequest& req,
+                               Webserver::WebResponse* resp,
+                               bool isJson) {
+  std::stringstream *output = &resp->output;
+
+  int max_depth = INT_MAX;
+  string depth = FindWithDefault(req.parsed_args, "max_depth", "");
+  if (!depth.empty()) {
+    max_depth = std::stoi(depth);
+  }
+  string full_path_arg = FindWithDefault(req.parsed_args, "show_full_path", "true");
+  bool use_full_path = ParseLeadingBoolValue(full_path_arg.c_str(), true);
+
+  std::vector<MemTrackerData> trackers;
+  CollectMemTrackerData(MemTracker::GetRootTracker(), 0, &trackers);
+
+  if (isJson) {
+    JsonOutputMemTrackers(trackers, output, max_depth, use_full_path);
+  } else {
+    HtmlOutputMemTrackers(trackers, output, max_depth, use_full_path);
+  }
 }
 
 static Result<MetricLevel> MetricLevelFromName(const std::string& level) {
@@ -429,103 +452,33 @@ void SetParsedValue(Value* v, const Result<Value>& result) {
   }
 }
 
-bool ParseEntityOptions(const std::string& entity_prefix,
-                        const Webserver::WebRequest& req,
-                        MetricEntityOptions *metric_entity_options) {
-  bool found = false;
-  auto regex_p = FindOrNull(req.parsed_args, entity_prefix + "priority_regex");
-  if (regex_p != nullptr) {
-    found = true;
-    metric_entity_options->priority_regex = *regex_p;
-  }
-  const string* metrics_p = FindOrNull(req.parsed_args, entity_prefix + "metrics");
-  if (metrics_p != nullptr) {
-    found = true;
-    SplitStringUsing(*metrics_p, ",", &metric_entity_options->metrics);
-  } else {
-    metric_entity_options->metrics.push_back("*");
-  }
-  const string* exclude_metrics_p = FindOrNull(req.parsed_args, entity_prefix + "exclude_metrics");
-  if (exclude_metrics_p != nullptr) {
-    found = true;
-    SplitStringUsing(*exclude_metrics_p, ",", &metric_entity_options->exclude_metrics);
-  }
-  return found;
-}
-
-static void ParseRequestOptions(const Webserver::WebRequest& req,
-                                MeticEntitiesOptions *entities_options,
-                                MetricPrometheusOptions *promethus_opts,
-                                MetricJsonOptions *json_opts = nullptr,
-                                JsonWriter::Mode *json_mode = nullptr) {
-  if (entities_options) {
-    MetricEntityOptions default_options;
-    if (ParseEntityOptions("", req, &default_options)) {
-      (*entities_options)[AggregationMetricLevel::kTable] = default_options;
-    }
-    MetricEntityOptions server_options;
-    if (ParseEntityOptions("server_", req, &server_options)) {
-      (*entities_options)[AggregationMetricLevel::kServer] = server_options;
-    }
-  }
-  string arg;
-  if (json_opts) {
-    arg = FindWithDefault(req.parsed_args, "include_raw_histograms", "false");
-    json_opts->include_raw_histograms = ParseLeadingBoolValue(arg.c_str(), false);
-
-    arg = FindWithDefault(req.parsed_args, "include_schema", "false");
-    json_opts->include_schema_info = ParseLeadingBoolValue(arg.c_str(), false);
-
-    arg = FindWithDefault(req.parsed_args, "level", "debug");
-    SetParsedValue(&json_opts->level, MetricLevelFromName(arg));
-  }
-
-  if (promethus_opts) {
-    SetParsedValue(&promethus_opts->level,
-                   MetricLevelFromName(FindWithDefault(req.parsed_args, "level", "debug")));
-    promethus_opts->max_tables_metrics_breakdowns = std::stoi(FindWithDefault(req.parsed_args,
-      "max_tables_metrics_breakdowns", std::to_string(FLAGS_max_tables_metrics_breakdowns)));
-  }
-
-  if (json_mode) {
-    arg = FindWithDefault(req.parsed_args, "compact", "false");
-    *json_mode =
-        ParseLeadingBoolValue(arg.c_str(), false) ? JsonWriter::COMPACT : JsonWriter::PRETTY;
-  }
-}
-
 static void WriteMetricsAsJson(const MetricRegistry* const metrics,
                                const Webserver::WebRequest& req, Webserver::WebResponse* resp) {
-  MeticEntitiesOptions entities_opts;
   MetricJsonOptions opts;
   JsonWriter::Mode json_mode;
-  ParseRequestOptions(req, &entities_opts, /* prometheus opts */ nullptr, &opts, &json_mode);
-  if (entities_opts.empty()) {
-    entities_opts[AggregationMetricLevel::kTable].metrics.push_back("*");
-  }
+  ParseRequestOptions(req, /* prometheus opts */ nullptr, &opts, &json_mode);
   std::stringstream* output = &resp->output;
   JsonWriter writer(output, json_mode);
 
-  WARN_NOT_OK(metrics->WriteAsJson(&writer,
-                                   entities_opts[AggregationMetricLevel::kTable], opts),
-              "Couldn't write JSON metrics over HTTP");
+  WARN_NOT_OK(metrics->WriteAsJson(&writer, opts), "Couldn't write JSON metrics over HTTP");
 }
 
 static void WriteMetricsForPrometheus(const MetricRegistry* const metrics,
-                               const Webserver::WebRequest& req, Webserver::WebResponse* resp) {
+                                      const Webserver::WebRequest& req,
+                                      Webserver::WebResponse* resp) {
   MetricPrometheusOptions opts;
-  MeticEntitiesOptions entities_opts;
-  ParseRequestOptions(req, &entities_opts, &opts);
+  opts.export_help_and_type = ExportHelpAndType(FLAGS_export_help_and_type_in_prometheus_metrics);
+  opts.max_metric_entries = GetAtomicFlag(&FLAGS_max_prometheus_metric_entries);
+  ParseRequestOptions(req, &opts);
 
-  std::stringstream *output = &resp->output;
-  if (entities_opts.empty()) {
-    entities_opts[AggregationMetricLevel::kTable].metrics.push_back("*");
-  }
-  for (const auto& entity_options : entities_opts) {
-    PrometheusWriter writer(output, entity_options.first);
-    WARN_NOT_OK(metrics->WriteForPrometheus(&writer, entity_options.second, opts),
-                "Couldn't write text metrics for Prometheus");
-  }
+  std::stringstream* output = &resp->output;
+
+  std::set<std::string> prototypes;
+  metrics->get_all_prototypes(prototypes);
+
+  PrometheusWriter writer(output, opts);
+  WARN_NOT_OK(metrics->WriteForPrometheus(&writer, opts),
+      "Couldn't write text metrics for Prometheus");
 }
 
 static void HandleGetVersionInfo(
@@ -558,18 +511,219 @@ static void HandleGetVersionInfo(
   jw.EndObject();
 }
 
+template<typename WeightFormatter = std::identity>
+static void StackTraceTrackerHandler(
+    const Webserver::WebRequest& req,
+    Webserver::WebResponse* resp,
+    std::string_view title,
+    const std::unordered_map<StackTraceTrackingGroup, std::string>& groups,
+    std::string_view weight_header,
+    WeightFormatter format_weight = {}) {
+  std::stringstream& output = resp->output;
+
+  if (!GetAtomicFlag(&FLAGS_track_stack_traces)) {
+    output << "track_stack_traces must be turned on to use this page.";
+    return;
+  }
+
+  Tags tags(false /* as_text */);
+  HtmlPrintHelper html_print_helper(output);
+
+  auto traces = GetTrackedStackTraces();
+  std::sort(traces.begin(), traces.end(),
+            [](const auto& left, const auto& right) { return left.weight > right.weight; });
+
+  output << tags.header << title << tags.end_header;
+
+  auto tracking_start = GetLastStackTraceTrackerResetTime();
+  auto tracking_end = MonoTime::Now();
+  output << "Tracking Period: "
+         << tracking_start.ToFormattedString() << " to " << tracking_end.ToFormattedString()
+         << " (" << (tracking_end - tracking_start).ToString() << ")" << tags.line_break;
+  output << "<a href=\"/reset-stack-traces\">Reset Tracking</a>" << tags.line_break;
+
+  std::vector<std::string> column_names;
+  if (groups.size() > 1) {
+    column_names.emplace_back("Type");
+  }
+  column_names.emplace_back("Count");
+  column_names.emplace_back(weight_header);
+  column_names.emplace_back("Stack Trace");
+
+  auto stack_traces = html_print_helper.CreateTablePrinter("stack_traces", column_names);
+
+  for (const auto& entry : traces) {
+    auto group_itr = groups.find(entry.group);
+    if (entry.count == 0 || group_itr == groups.end()) {
+      continue;
+    }
+
+    auto count = entry.count;
+    auto weight = format_weight(entry.weight);
+    auto stack = tags.pre_tag + EscapeForHtmlToString(entry.symbolized_trace) + tags.end_pre_tag;
+
+    if (groups.size() > 1) {
+      stack_traces.AddRow(group_itr->second, count, weight, stack);
+    } else {
+      stack_traces.AddRow(count, weight, stack);
+    }
+  }
+
+  stack_traces.Print();
+}
+
+static void IOStackTraceHandler(const Webserver::WebRequest& req, Webserver::WebResponse* resp) {
+  StackTraceTrackerHandler(
+      req, resp, "I/O stack traces",
+      {{StackTraceTrackingGroup::kReadIO, "Read"}, {StackTraceTrackingGroup::kWriteIO, "Write"}},
+      "Bytes", &HumanReadableNumBytes::ToString);
+}
+
+static void DebugStackTraceHandler(const Webserver::WebRequest& req, Webserver::WebResponse* resp) {
+  StackTraceTrackerHandler(
+      req, resp, "Tracked stack traces",
+      {{StackTraceTrackingGroup::kDebugging, "Debugging"}},
+      "Weight");
+}
+
+static void ResetStackTraceHandler(const Webserver::WebRequest& req, Webserver::WebResponse* resp) {
+  ResetTrackedStackTraces();
+
+  Tags tags(false /* as_text */);
+  resp->output << "Tracked stack traces reset." << tags.line_break
+               << "<a href=\"javascript:window.location=document.referrer\">Back</a>";
+}
+
 } // anonymous namespace
+
+void ParseRequestOptions(
+    const Webserver::WebRequest& req, MetricPrometheusOptions* prometheus_opts,
+    MetricJsonOptions* json_opts, JsonWriter::Mode* json_mode) {
+  auto ParseMetricOptions = [](const Webserver::WebRequest& req, MetricOptions* metric_opts) {
+    if (const string* metrics_p = FindOrNull(req.parsed_args, "metrics")) {
+      metric_opts->general_metrics_allowlist = SplitStringUsing(*metrics_p, ",");
+    }
+
+    string arg = FindWithDefault(req.parsed_args, "reset_histograms", "true");
+    metric_opts->reset_histograms = ParseLeadingBoolValue(arg.c_str(), true);
+
+    arg = FindWithDefault(req.parsed_args, "level", "debug");
+    SetParsedValue(&metric_opts->level, MetricLevelFromName(arg));
+  };
+
+  string arg;
+  if (json_opts) {
+    ParseMetricOptions(req, json_opts);
+
+    arg = FindWithDefault(req.parsed_args, "include_raw_histograms", "false");
+    json_opts->include_raw_histograms = ParseLeadingBoolValue(arg.c_str(), false);
+
+    arg = FindWithDefault(req.parsed_args, "include_schema", "false");
+    json_opts->include_schema_info = ParseLeadingBoolValue(arg.c_str(), false);
+  }
+
+  if (prometheus_opts) {
+    ParseMetricOptions(req, prometheus_opts);
+
+    if (const std::string* arg_p = FindOrNull(req.parsed_args, "show_help")) {
+      prometheus_opts->export_help_and_type =
+          ExportHelpAndType(ParseLeadingBoolValue(arg_p->c_str(), false));
+    }
+
+    if (const std::string* arg_p = FindOrNull(req.parsed_args, "max_metric_entries")) {
+      try {
+        if (arg_p->starts_with('-')) {
+          throw std::invalid_argument("Input value is negative");
+        }
+        prometheus_opts->max_metric_entries = static_cast<uint32_t>(std::stoul(*arg_p));
+      } catch (const std::exception& e) {
+        LOG(WARNING) << "Prometheus metric endpoint URL parameter max_metric_entries=" << *arg_p
+                     << ". Failed to convert its value to unsigned 32 bits integer: " << e.what();
+      }
+    }
+
+    prometheus_opts->version = FindWithDefault(req.parsed_args, "version", kFilterVersionOne);
+
+    if (prometheus_opts->version == kFilterVersionTwo) {
+      // Set it to accept all metrics, because we ignore metrics URL parameter when using v2.
+      prometheus_opts->general_metrics_allowlist = std::nullopt;
+
+      auto FindHandlingAllOrNone = [&](const std::string& arg,
+                                       const std::string& default_value) -> std::string {
+        std::string regex_string = FindWithDefault(req.parsed_args, arg, default_value);
+        if (regex_string == "ALL") {
+          return ".*";
+        } else if (regex_string == "NONE") {
+          return "";
+        }
+        return regex_string;
+      };
+
+      prometheus_opts->table_allowlist_string = FindHandlingAllOrNone("table_allowlist", "ALL");
+
+      prometheus_opts->table_blocklist_string = FindHandlingAllOrNone("table_blocklist", "NONE");
+
+      prometheus_opts->server_allowlist_string = FindHandlingAllOrNone("server_allowlist", "ALL");
+
+      prometheus_opts->server_blocklist_string = FindHandlingAllOrNone("server_blocklist", "NONE");
+    } else {
+      prometheus_opts->priority_regex_string =
+          FindWithDefault(req.parsed_args, "priority_regex", ".*");
+      LOG_IF(WARNING, prometheus_opts->version != kFilterVersionOne)
+          << "Prometheus endpoint URL parameter version=" << prometheus_opts->version
+          << " is not recognized. Only v1 or v2 can be accepted.";
+    }
+  }
+
+  if (json_mode) {
+    arg = FindWithDefault(req.parsed_args, "compact", "false");
+    *json_mode =
+        ParseLeadingBoolValue(arg.c_str(), false) ? JsonWriter::COMPACT : JsonWriter::PRETTY;
+  }
+}
+
+// Registered to handle "/memz", and prints out memory allocation statistics.
+void MemUsageHandler(const Webserver::WebRequest& req, Webserver::WebResponse* resp) {
+  std::stringstream *output = &resp->output;
+  bool as_text = (req.parsed_args.find("raw") != req.parsed_args.end());
+  Tags tags(as_text);
+
+  (*output) << tags.pre_tag;
+#ifndef YB_TCMALLOC_ENABLED
+  (*output) << "Memory tracking is not available unless tcmalloc is enabled.";
+#else
+  auto tmp = TcMallocStats();
+  if (!as_text) {
+    tmp = EscapeForHtmlToString(tmp);
+  }
+  // Replace new lines with <br> for html.
+  replace_all(tmp, "\n", tags.line_break);
+  (*output) << tmp << tags.end_pre_tag;
+#endif
+}
 
 void AddDefaultPathHandlers(Webserver* webserver) {
   webserver->RegisterPathHandler("/logs", "Logs", LogsHandler, true, false);
-  webserver->RegisterPathHandler("/varz", "Flags", FlagsHandler, true, false);
+  webserver->RegisterPathHandler(
+      "/varz", "Flags", std::bind(&FlagsHandler, _1, _2, webserver), true, false);
   webserver->RegisterPathHandler("/status", "Status", StatusHandler, false, false);
   webserver->RegisterPathHandler("/memz", "Memory (total)", MemUsageHandler, true, false);
   webserver->RegisterPathHandler("/mem-trackers", "Memory (detail)",
-                                 MemTrackersHandler, true, false);
-  webserver->RegisterPathHandler("/api/v1/varz", "Flags", GetFlagsJsonHandler, false, false);
+                                 std::bind(&MemTrackersHandler, _1, _2, false /* isJson */),
+                                 true, false);
+  webserver->RegisterPathHandler("/api/v1/mem-trackers", "Memory (detail) JSON",
+                                 std::bind(&MemTrackersHandler, _1, _2, true /* isJson */),
+                                 false, false);
+  webserver->RegisterPathHandler(
+      "/api/v1/varz", "Flags", std::bind(&GetFlagsJsonHandler, _1, _2, webserver), false, false);
   webserver->RegisterPathHandler("/api/v1/version-info", "Build Version Info",
                                  HandleGetVersionInfo, false, false);
+  webserver->RegisterPathHandler("/io-stack-traces", "I/O Stack Traces",
+                                 IOStackTraceHandler, true, false);
+  webserver->RegisterPathHandler("/debug-stack-traces", "Debugging Stack Traces",
+                                 DebugStackTraceHandler, true, false);
+  webserver->RegisterPathHandler("/reset-stack-traces", "Reset Stack Traces",
+                                 ResetStackTraceHandler, true, false);
 
   AddPprofPathHandlers(webserver);
 }
@@ -606,13 +760,14 @@ static void PathUsageHandler(FsManager* fsmanager,
     if (!stats.ok()) {
       LOG(WARNING) << stats.status();
       *output << Format("  <tr><td>$0</td><td colspan=\"2\">$1</td></tr>\n",
-                        path, stats.status().message());
+                        EscapeForHtmlToString(path),
+                        EscapeForHtmlToString(stats.status().message().ToString()));
       continue;
     }
     const std::string used_space_str = HumanReadableNumBytes::ToString(stats->used_space);
     const std::string total_space_str = HumanReadableNumBytes::ToString(stats->total_space);
     *output << Format("  <tr><td>$0</td><td>$1</td><td>$2</td></tr>\n",
-                      path, used_space_str, total_space_str);
+                      EscapeForHtmlToString(path), used_space_str, total_space_str);
   }
   *output << "</table>\n";
 }
@@ -634,10 +789,10 @@ static void CertificateHandler(server::RpcServerBase* server,
   (*output) << tags.pre_tag;
 
   (*output) << "Node to node encryption enabled: "
-      << (yb::server::IsNodeToNodeEncryptionEnabled() ? "true" : "false");
+      << (yb::rpc::IsNodeToNodeEncryptionEnabled() ? "true" : "false");
 
   (*output) << tags.line_break << "Client to server encryption enabled: "
-      << (yb::server::IsClientToServerEncryptionEnabled() ? "true" : "false");
+      << (yb::rpc::IsClientToServerEncryptionEnabled() ? "true" : "false");
 
   (*output) << tags.line_break << "Allow insecure connections: "
       << (yb::rpc::AllowInsecureConnections() ? "on" : "off");
@@ -655,7 +810,7 @@ static void CertificateHandler(server::RpcServerBase* server,
   if(!details.empty()) {
     (*output) << tags.header << "Certificate details" << tags.end_header << endl;
 
-    (*output) << tags.pre_tag << details << tags.end_pre_tag << endl;
+    (*output) << tags.pre_tag << EscapeForHtmlToString(details) << tags.end_pre_tag << endl;
   }
 }
 

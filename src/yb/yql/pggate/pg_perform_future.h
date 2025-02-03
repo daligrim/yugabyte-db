@@ -11,41 +11,39 @@
 // under the License.
 //
 
-#ifndef YB_YQL_PGGATE_PG_PERFORM_FUTURE_H_
-#define YB_YQL_PGGATE_PG_PERFORM_FUTURE_H_
-
-#include <future>
+#pragma once
 
 #include "yb/common/common_fwd.h"
+#include "yb/common/hybrid_time.h"
 
 #include "yb/util/status_fwd.h"
 
 #include "yb/yql/pggate/pg_client.h"
 
-namespace yb {
-namespace pggate {
+namespace yb::pggate {
 
 class PgSession;
 
 class PerformFuture {
  public:
+  struct Data {
+    rpc::CallResponsePtr response;
+    HybridTime used_in_txn_limit;
+  };
+
   PerformFuture() = default;
-  PerformFuture(std::future<PerformResult> future, PgSession* session, PgObjectIds&& relations);
+  PerformFuture(PerformResultFuture&& future, PgObjectIds&& relations);
   PerformFuture(PerformFuture&&) = default;
   PerformFuture& operator=(PerformFuture&&) = default;
   ~PerformFuture();
 
   bool Valid() const;
   bool Ready() const;
-  Result<rpc::CallResponsePtr> Get();
+  Result<Data> Get(PgSession& session);
 
  private:
-  std::future<PerformResult> future_;
-  PgSession* session_ = nullptr;
+  PerformResultFuture future_;
   PgObjectIds relations_;
 };
 
-} // namespace pggate
-} // namespace yb
-
-#endif // YB_YQL_PGGATE_PG_PERFORM_FUTURE_H_
+} // namespace yb::pggate

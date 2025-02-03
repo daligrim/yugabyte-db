@@ -1,8 +1,6 @@
 --
 -- Cursor regression tests
--- yb_pg_copy must be scheduled to run before this suite.
 --
-INSERT INTO tenk2 SELECT * FROM tenk1;
 BEGIN;
 DECLARE foo1 SCROLL CURSOR FOR SELECT * FROM tenk1 ORDER BY unique2;
 DECLARE foo2 SCROLL CURSOR FOR SELECT * FROM tenk2 ORDER BY unique2;
@@ -1097,10 +1095,10 @@ ROLLBACK;
 BEGIN;
 EXPLAIN (costs off)
 DECLARE c1 CURSOR FOR SELECT stringu1 FROM onek WHERE stringu1 = 'DZAAAA';
-              QUERY PLAN
----------------------------------------
- Seq Scan on onek
-   Filter: (stringu1 = 'DZAAAA'::name)
+                 QUERY PLAN
+---------------------------------------------
+ Index Only Scan using onek_stringu1 on onek
+   Index Cond: (stringu1 = 'DZAAAA'::name)
 (2 rows)
 
 DECLARE c1 CURSOR FOR SELECT stringu1 FROM onek WHERE stringu1 = 'DZAAAA';
@@ -1159,8 +1157,8 @@ ERROR:  current transaction is aborted, commands ignored until end of transactio
 ROLLBACK;
 -- Make sure snapshot management works okay, per bug report in
 -- 235395b90909301035v7228ce63q392931f15aa74b31@mail.gmail.com
-BEGIN;
-SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;
+-- TODO(#12494): reverse this change
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
 CREATE TABLE cursor (a int);
 INSERT INTO cursor VALUES (1);
 -- DISABLE 'FOR UPDATE' due to github #9915

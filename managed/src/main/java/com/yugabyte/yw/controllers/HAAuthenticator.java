@@ -10,13 +10,15 @@
 
 package com.yugabyte.yw.controllers;
 
+import static play.mvc.Http.Status.FORBIDDEN;
+
+import com.yugabyte.yw.common.PlatformServiceException;
 import com.yugabyte.yw.models.HighAvailabilityConfig;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import play.mvc.Action;
 import play.mvc.Http;
 import play.mvc.Result;
-import play.mvc.Results;
 
 public class HAAuthenticator extends Action.Simple {
   public static final String HA_CLUSTER_KEY_TOKEN_HEADER = "HA-AUTH-TOKEN";
@@ -28,13 +30,14 @@ public class HAAuthenticator extends Action.Simple {
   }
 
   @Override
-  public CompletionStage<Result> call(Http.Context ctx) {
-    return ctx.request()
+  public CompletionStage<Result> call(Http.Request request) {
+    return request
         .header(HA_CLUSTER_KEY_TOKEN_HEADER)
         .filter(this::clusterKeyValid)
-        .map(success -> delegate.call(ctx))
+        .map(success -> delegate.call(request))
         .orElse(
             CompletableFuture.completedFuture(
-                Results.badRequest("Unable to authenticate request")));
+                new PlatformServiceException(FORBIDDEN, "Unable to authenticate request")
+                    .buildResult(request)));
   }
 }

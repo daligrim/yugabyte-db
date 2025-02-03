@@ -13,8 +13,7 @@
 //
 //
 
-#ifndef YB_UTIL_REF_CNT_BUFFER_H
-#define YB_UTIL_REF_CNT_BUFFER_H
+#pragma once
 
 #include <stdlib.h>
 #include <string.h>
@@ -22,6 +21,7 @@
 #include <atomic>
 #include <string>
 
+#include "yb/util/hash_util.h"
 #include "yb/util/slice.h"
 
 namespace yb {
@@ -46,7 +46,7 @@ class RefCntBuffer {
 
   explicit RefCntBuffer(const faststring& str);
 
-  explicit RefCntBuffer(const Slice& slice) :
+  explicit RefCntBuffer(Slice slice) :
       RefCntBuffer(slice.data(), slice.size()) {}
 
   RefCntBuffer(const RefCntBuffer& rhs) noexcept;
@@ -117,6 +117,10 @@ class RefCntBuffer {
     size_reference() = new_size;
   }
 
+  bool unique() const {
+    return counter_reference().load(std::memory_order_acquire) == 1;
+  }
+
  private:
   void DoReset(char* data);
 
@@ -149,7 +153,7 @@ class RefCntPrefix {
   explicit RefCntPrefix(const std::string& str)
       : bytes_(RefCntBuffer(str)), size_(bytes_.size()) {}
 
-  explicit RefCntPrefix(const Slice& slice)
+  explicit RefCntPrefix(Slice slice)
       : bytes_(RefCntBuffer(slice)), size_(bytes_.size()) {}
 
   RefCntPrefix(RefCntBuffer bytes) // NOLINT
@@ -191,7 +195,7 @@ class RefCntPrefix {
     return r;
   }
 
-  std::string ShortDebugString() const;
+  std::string ToString() const;
 
  private:
   RefCntBuffer bytes_;
@@ -212,6 +216,97 @@ struct RefCntPrefixHash {
   }
 };
 
-} // namespace yb
+inline size_t hash_value(const RefCntPrefix& ref_cnt_prefix) noexcept {
+  return ref_cnt_prefix.as_slice().hash();
+}
 
-#endif // YB_UTIL_REF_CNT_BUFFER_H
+class RefCntSlice {
+ public:
+  RefCntSlice() = default;
+
+  explicit RefCntSlice(RefCntBuffer holder)
+      : holder_(std::move(holder)), slice_(holder_.AsSlice()) {}
+
+  RefCntSlice(RefCntBuffer holder, Slice slice)
+      : holder_(std::move(holder)), slice_(slice) {}
+
+  explicit operator bool() const {
+    return static_cast<bool>(holder_);
+  }
+
+  Slice AsSlice() const {
+    return slice_;
+  }
+
+  bool empty() const {
+    return slice_.empty();
+  }
+
+  size_t size() const {
+    return slice_.size();
+  }
+
+  const uint8_t* udata() const {
+    return slice_.data();
+  }
+
+  const char* data() const {
+    return slice_.cdata();
+  }
+
+  uint8_t* data() {
+    return slice_.mutable_data();
+  }
+
+  uint8_t* end() {
+    return slice_.mutable_data() + slice_.size();
+  }
+
+  size_t SpaceAfterSlice() const {
+    return holder_.AsSlice().end() - slice_.end();
+  }
+
+  void Grow(size_t delta) {
+    slice_ = Slice(slice_.data(), slice_.end() + delta);
+  }
+
+  bool unique() const {
+    return holder_.unique();
+  }
+
+  void Resize(size_t new_size) {
+    slice_ = Slice(slice_.mutable_data(), new_size);
+  }
+
+  void Reset() {
+    holder_.Reset();
+  }
+
+  const RefCntBuffer& holder() const {
+    return holder_;
+  }
+
+  size_t DynamicMemoryUsage() const { return holder_.DynamicMemoryUsage(); }
+
+  std::string ToString() const;
+
+ private:
+  RefCntBuffer holder_;
+  Slice slice_;
+
+  friend inline auto operator<=>(const RefCntSlice& lhs, const RefCntSlice& rhs) {
+    return lhs.AsSlice() <=> rhs.AsSlice();
+  }
+
+  friend inline bool operator==(const RefCntSlice& lhs, const RefCntSlice& rhs) {
+    return lhs.AsSlice() == rhs.AsSlice();
+  }
+};
+
+struct RefCntSliceHash {
+  size_t operator()(const RefCntSlice& inp) const {
+    return inp.AsSlice().hash();
+  }
+};
+
+} // namespace yb

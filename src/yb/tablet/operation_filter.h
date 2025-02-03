@@ -11,14 +11,14 @@
 // under the License.
 //
 
-#ifndef YB_TABLET_OPERATION_FILTER_H
-#define YB_TABLET_OPERATION_FILTER_H
+#pragma once
 
 #include <boost/intrusive/list.hpp>
 
+#include "yb/common/opid.h"
+
 #include "yb/consensus/consensus_types.pb.h"
 
-#include "yb/util/opid.h"
 #include "yb/util/status.h"
 
 namespace yb {
@@ -57,5 +57,3 @@ std::unique_ptr<OperationFilter> MakeFunctorOperationFilter(const F& f) {
 
 }  // namespace tablet
 }  // namespace yb
-
-#endif  // YB_TABLET_OPERATION_FILTER_H

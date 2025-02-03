@@ -4,9 +4,9 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"node-agent/app/executor"
-	"node-agent/app/scheduler"
-	"node-agent/app/task"
+	"node-agent/app/session"
 	"node-agent/util"
 	"os"
 	"os/signal"
@@ -22,7 +22,8 @@ var (
 )
 
 func init() {
-	ctx, cancelFunc = context.WithCancel(context.Background())
+	ctx = context.WithValue(context.Background(), util.CorrelationId, util.NewUUID().String())
+	ctx, cancelFunc = context.WithCancel(ctx)
 }
 
 func Context() context.Context {
@@ -35,14 +36,20 @@ func CancelFunc() context.CancelFunc {
 
 // Entry method for service.
 func Start() {
+	defer cancelFunc()
 	sigs = make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	config := util.CurrentConfig()
 	nodeAgentId := config.String(util.NodeAgentIdKey)
 	if nodeAgentId == "" {
-		util.FileLogger().Fatalf("Node Agent ID must be set")
+		util.FileLogger().Fatalf(Context(), "Node Agent ID must be set")
 	}
-	host := config.String(util.NodeIpKey)
+	dump, _ := config.Dump(Context())
+	util.FileLogger().Infof(Context(), "Dumping config %s", dump)
+	executor.Init(Context())
+	session.Init(Context())
+	disableMetricsTLS := config.Bool(util.NodeAgentDisableMetricsTLS)
+	host := config.String(util.NodeBindIpKey)
 	port := config.String(util.NodePortKey)
 
 	// Change the state of node-agent from UPGRADED to LIVE before starting the service.
@@ -51,26 +58,32 @@ loop:
 	for {
 		select {
 		case <-ticker.C:
-			err := task.HandleUpgradedStateAfterRestart(ctx, config)
+			err := HandleRestart(Context(), config)
 			if err == nil {
 				ticker.Stop()
 				break loop
 			}
-			util.FileLogger().Errorf("Error while handling node agent UPGRADED state - %s", err.Error())
+			util.FileLogger().Errorf(Context(), "Error handling restart - %s", err.Error())
 		case <-sigs:
-			cancelFunc()
 			return
 		}
 	}
-	server, err := NewRPCServer(ctx, host, port, true)
-	if err != nil {
-		util.FileLogger().Fatalf("Error in starting RPC server - %s", err.Error())
+	addr := fmt.Sprintf("%s:%s", host, port)
+	serverConfig := &RPCServerConfig{
+		Address:           addr,
+		EnableTLS:         true,
+		EnableMetrics:     true,
+		DisableMetricsTLS: disableMetricsTLS,
 	}
-	pingStateInterval := time.Duration(config.Int(util.NodePingIntervalKey)) * time.Second
-	scheduler.GetInstance(ctx).Schedule(ctx, pingStateInterval, task.HandleAgentState(config))
-	util.ConsoleLogger().Infof("Started Service")
-	<-sigs
+	server, err := NewRPCServer(Context(), serverConfig)
+	if err != nil {
+		util.FileLogger().Fatalf(Context(), "Error in starting RPC server - %s", err.Error())
+	}
+	util.FileLogger().Infof(Context(), "Started RPC service on %s", addr)
+	select {
+	case <-sigs:
+	case <-server.Done():
+	case <-Context().Done():
+	}
 	server.Stop()
-	cancelFunc()
-	executor.GetInstance(ctx).WaitOnShutdown()
 }

@@ -14,7 +14,11 @@ import com.yugabyte.yw.commissioner.BaseTaskDependencies;
 import com.yugabyte.yw.commissioner.tasks.params.NodeTaskParams;
 import com.yugabyte.yw.common.NodeManager;
 import com.yugabyte.yw.models.Universe;
+import com.yugabyte.yw.models.helpers.NodeDetails;
+import com.yugabyte.yw.models.helpers.NodeDetails.MasterState;
+import com.yugabyte.yw.models.helpers.NodeStatus;
 import java.time.Duration;
+import java.util.Optional;
 import javax.inject.Inject;
 import lombok.extern.slf4j.Slf4j;
 
@@ -22,18 +26,20 @@ import lombok.extern.slf4j.Slf4j;
 public class AnsibleClusterServerCtl extends NodeTaskBase {
 
   @Inject
-  protected AnsibleClusterServerCtl(
-      BaseTaskDependencies baseTaskDependencies, NodeManager nodeManager) {
-    super(baseTaskDependencies, nodeManager);
+  protected AnsibleClusterServerCtl(BaseTaskDependencies baseTaskDependencies) {
+    super(baseTaskDependencies);
   }
 
   public static class Params extends NodeTaskParams {
     public String process;
     public String command;
     public int sleepAfterCmdMills = 0;
-    public boolean isForceDelete = false;
-
+    public boolean isIgnoreError = false;
     public boolean checkVolumesAttached = false;
+    // Set it to deconfigure the server like deleting the conf file.
+    public boolean deconfigure = false;
+    // Skip stopping processes if VM is paused.
+    public boolean skipStopForPausedVM = false;
   }
 
   @Override
@@ -56,13 +62,40 @@ public class AnsibleClusterServerCtl extends NodeTaskBase {
   @Override
   public void run() {
     try {
+      NodeDetails nodeDetails = null;
+      Optional<Universe> universeOpt = Universe.maybeGet(taskParams().getUniverseUUID());
+      if (!universeOpt.isPresent()
+          || (nodeDetails = universeOpt.get().getNode(taskParams().nodeName)) == null) {
+        log.warn(
+            "Universe or node {} does not exist. Skipping server control command - {}",
+            taskParams().nodeName,
+            taskParams().command);
+        return;
+      }
+      if (ServerType.MASTER.name().equalsIgnoreCase(taskParams().process)
+          && "start".equalsIgnoreCase(taskParams().command)
+          && nodeDetails.masterState != null) {
+        // Master is fully configured and ready to start. Set this only if masterState was
+        // previously set. Some tasks may just start/stop master without changing master state.
+        // TODO This is not the right place but this comes after AnsibleConfigureServer
+        // which does too many things.
+        setNodeStatus(NodeStatus.builder().masterState(MasterState.Configured).build());
+      }
+      if (nodeDetails.isSoftwareDeleted()) {
+        // This is to ensure that the command is not issued after the software is uninstalled.
+        // This applies mostly for stop process on retry.
+        log.warn(
+            "Software is already removed from {}. Skipping stop {}",
+            taskParams().nodeName,
+            taskParams().command);
+        return;
+      }
       // Execute the ansible command.
-      Universe universe = Universe.getOrBadRequest(taskParams().universeUUID);
       getNodeManager()
           .nodeCommand(NodeManager.NodeCommandType.Control, taskParams())
           .processErrors();
     } catch (Exception e) {
-      if (!taskParams().isForceDelete) {
+      if (!taskParams().isIgnoreError) {
         throw e;
       } else {
         log.debug("Ignoring error: {}", e.getMessage());

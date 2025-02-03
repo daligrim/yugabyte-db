@@ -19,7 +19,7 @@ import org.junit.runner.RunWith;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.yb.util.BuildTypeUtil;
-import org.yb.util.YBTestRunnerNonTsanOnly;
+import org.yb.YBTestRunner;
 
 import java.sql.Connection;
 import java.sql.SQLException;
@@ -30,7 +30,7 @@ import java.util.Set;
 import static org.yb.AssertionWrappers.assertEquals;
 import static org.yb.AssertionWrappers.assertTrue;
 
-@RunWith(value = YBTestRunnerNonTsanOnly.class)
+@RunWith(value = YBTestRunner.class)
 public class TestPgDdlFaultTolerance extends BasePgSQLTest {
   private static final Logger LOG = LoggerFactory.getLogger(TestPgDdlFaultTolerance.class);
 
@@ -156,7 +156,7 @@ public class TestPgDdlFaultTolerance extends BasePgSQLTest {
         // Alter should fail because DocDB cannot add the column.
         runInvalidQuery(statement, alterStmt, "Injected random failure for testing");
 
-        // Enable syscatalog again.
+        // Enable syscatalog writes again.
         setDocDBSysCatalogWriteRejection(masterLeaderAddress, 0);
 
         // Alter should now succeed.
@@ -166,8 +166,8 @@ public class TestPgDdlFaultTolerance extends BasePgSQLTest {
         statement.execute("INSERT INTO ddl_ft_table VALUES (7, '8', 9.0, 10)");
 
         expectedRows.clear();
-        expectedRows.add(new Row(1, "2", 3.0, null));
-        expectedRows.add(new Row(4, "5", 6.0, null));
+        expectedRows.add(new Row(1, "2", 3.0, 99));
+        expectedRows.add(new Row(4, "5", 6.0, 99));
         expectedRows.add(new Row(7, "8", 9.0, 10));
         assertRowSet(statement, selectStmt, expectedRows);
 
@@ -175,18 +175,21 @@ public class TestPgDdlFaultTolerance extends BasePgSQLTest {
         setDocDBSysCatalogWriteRejection(masterLeaderAddress, 100);
 
         String dropStmt = "DROP TABLE ddl_ft_table";
-        // Drop the table -- should succeed with warning.
-        verifyStatementWarning(statement, dropStmt, "Injected random failure for testing");
+        // Drop table with error injection.
+        runInvalidQuery(statement, dropStmt, "Injected random failure for testing");
 
-        // Table should not be usable after drop.
-        runInvalidQuery(statement, String.format(insertSql, 7, 8, 9),
-                        "relation \"ddl_ft_table\" does not exist");
+        // Table should still be usable.
+        statement.execute("INSERT INTO ddl_ft_table VALUES (11, '12', 13.0, 14)");
+        expectedRows.add(new Row(11, "12", 13.0, 14));
+        assertRowSet(statement, selectStmt, expectedRows);
 
-        runInvalidQuery(statement, selectStmt, "relation \"ddl_ft_table\" does not exist");
-
-        // We should be able to create a table with the same name without issues.
+        // Enable syscatalog writes again.
         setDocDBSysCatalogWriteRejection(masterLeaderAddress, 0);
 
+         // Drop table should now succeed.
+        statement.execute(dropStmt);
+        // Wait for cache invalidation if connection manager is enabled.
+        waitForTServerHeartbeatIfConnMgrEnabled();
         // Create table should now succeed.
         statement.execute(createStmt);
 
@@ -264,18 +267,21 @@ public class TestPgDdlFaultTolerance extends BasePgSQLTest {
         // Disable syscatalog writes.
         setDocDBSysCatalogWriteRejection(masterLeaderAddress, 100);
 
-        // Drop index should succeed but with a warning.
-        verifyStatementWarning(statement, "DROP INDEX ddl_ft_indexed_table_idx",
-                               "Injected random failure for testing");
+        // Drop index should fail.
+        String dropStmt = "DROP INDEX ddl_ft_indexed_table_idx";
+        runInvalidQuery(statement, dropStmt, "Injected random failure for testing");
 
-        // Table should only have pkey index.
+        // Table should still have primary index and ddl_ft_indexed_table_idx
         expectedIdxs.clear();
         expectedIdxs.add(new Row("ddl_ft_indexed_table_pkey"));
+        expectedIdxs.add(new Row("ddl_ft_indexed_table_idx"));
         assertRowSet(statement, pgClassQuery, expectedIdxs);
 
         // Enable syscatalog writes.
         setDocDBSysCatalogWriteRejection(masterLeaderAddress, 0);
 
+        // Drop index should succeed.
+        statement.execute(dropStmt);
         // We should be able to create a new index with the same name.
         statement.execute(createIndex);
 
@@ -418,6 +424,8 @@ public class TestPgDdlFaultTolerance extends BasePgSQLTest {
       // Now drop it correctly.
       statement.execute("DROP TABLE t1, t2, t3");
     }
+
+    waitForTServerHeartbeatIfConnMgrEnabled();
 
     // Check everything got cleaned up.
     assertNoRows(statement,"SELECT * FROM pg_class where relname IN ('t1', 't2', 't3')");

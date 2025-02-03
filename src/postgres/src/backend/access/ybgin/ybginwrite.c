@@ -26,14 +26,16 @@
 
 #include "access/genam.h"
 #include "access/sysattr.h"
+#include "access/yb_scan.h"
 #include "access/ybgin_private.h"
 #include "c.h"
 #include "catalog/index.h"
 #include "catalog/pg_type_d.h"
 #include "catalog/yb_type.h"
-#include "executor/ybcModifyTable.h"
+#include "executor/ybModifyTable.h"
 #include "nodes/execnodes.h"
 #include "nodes/parsenodes.h"
+#include "pg_yb_utils.h"
 #include "storage/off.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
@@ -58,55 +60,10 @@ typedef struct
 } YbginBuildState;
 
 /*
- * Utility method to create constant.
- */
-static void
-newConstant(YBCPgStatement stmt,
-			Oid type_id,
-			Oid collation_id,
-			Datum datum,
-			bool is_null,
-			YBCPgExpr *expr)
-{
-	const YBCPgTypeEntity *type_entity;
-
-	if (is_null)
-		type_entity = &YBCGinNullTypeEntity;
-	else
-		type_entity = YbDataTypeFromOidMod(InvalidAttrNumber, type_id);
-
-	YBCPgCollationInfo collation_info;
-	YBGetCollationInfo(collation_id, type_entity, datum, is_null,
-					   &collation_info);
-
-	HandleYBStatus(YBCPgNewConstant(stmt, type_entity,
-									collation_info.collate_is_valid_non_c,
-									collation_info.sortkey,
-									datum, is_null, expr));
-}
-
-/*
- * Utility method to bind const to column.
- */
-static void
-bindColumn(YBCPgStatement stmt,
-		   int attr_num,
-		   Oid type_id,
-		   Oid collation_id,
-		   Datum datum,
-		   bool is_null)
-{
-	YBCPgExpr	expr;
-
-	newConstant(stmt, type_id, collation_id, datum, is_null, &expr);
-	HandleYBStatus(YBCPgDmlBindColumn(stmt, attr_num, expr));
-}
-
-/*
  * Utility method to set binds for index write statement.
  */
 static void
-doBindsForIdxWrite(YBCPgStatement stmt,
+doBindsForIdxWrite(YbcPgStatement stmt,
 				   void *indexstate,
 				   Relation index,
 				   Datum *values,
@@ -115,8 +72,8 @@ doBindsForIdxWrite(YBCPgStatement stmt,
 				   Datum ybbasectid,
 				   bool ybctid_as_value)
 {
-	GinState *ginstate = (GinState *) indexstate;
-	TupleDesc tupdesc = RelationGetDescr(index);
+	GinState   *ginstate = (GinState *) indexstate;
+	TupleDesc	tupdesc = RelationGetDescr(index);
 
 	if (ybbasectid == 0)
 		ereport(ERROR,
@@ -128,22 +85,24 @@ doBindsForIdxWrite(YBCPgStatement stmt,
 		Oid			type_id = GetTypeId(attnum, tupdesc);
 		Oid			collation_id = YBEncodingCollation(stmt, attnum,
 													   ginstate->supportCollation[attnum - 1]);
-		Datum		value   = values[attnum - 1];
+		Datum		value = values[attnum - 1];
 		bool		is_null = isnull[attnum - 1];
 
-		bindColumn(stmt, attnum, type_id, collation_id, value, is_null);
+		YbBindDatumToColumn(stmt, attnum, type_id, collation_id, value,
+							is_null, &YBCGinNullTypeEntity);
 	}
 
 	/* Gin indexes cannot be unique. */
 	Assert(!index->rd_index->indisunique);
 
 	/* Write base ctid column because it is a key column. */
-	bindColumn(stmt,
-			   YBIdxBaseTupleIdAttributeNumber,
-			   BYTEAOID,
-			   InvalidOid,
-			   ybbasectid,
-			   false /* is_null */);
+	YbBindDatumToColumn(stmt,
+						YBIdxBaseTupleIdAttributeNumber,
+						BYTEAOID,
+						InvalidOid,
+						ybbasectid,
+						false /* is_null */ ,
+						NULL /* null type_entity */ );
 }
 
 /*
@@ -153,9 +112,9 @@ doBindsForIdxWrite(YBCPgStatement stmt,
  */
 static int32
 ybginTupleWrite(GinState *ginstate, OffsetNumber attnum,
-				 Relation index, Datum value, bool isNull,
-				 Datum ybctid, uint64_t *backfilltime,
-				 bool isinsert)
+				Relation index, Datum value, bool isNull,
+				Datum ybctid, uint64_t *backfilltime,
+				bool isinsert)
 {
 	Datum	   *entries;
 	GinNullCategory *categories;
@@ -182,7 +141,7 @@ ybginTupleWrite(GinState *ginstate, OffsetNumber attnum,
 		/* Assume single-column index for parameters values and isnull. */
 		if (isinsert)
 			YBCExecuteInsertIndex(index, &entries[i], &isnull, ybctid,
-								  backfilltime /* backfill_write_time */,
+								  backfilltime /* backfill_write_time */ ,
 								  doBindsForIdxWrite, (void *) ginstate);
 		else
 		{
@@ -205,7 +164,7 @@ ybginTupleInsert(GinState *ginstate, OffsetNumber attnum,
 				 Datum ybctid, uint64_t *backfilltime)
 {
 	return ybginTupleWrite(ginstate, attnum, index, value, isNull, ybctid,
-						   backfilltime, true /* isinsert */);
+						   backfilltime, true /* isinsert */ );
 }
 
 /*
@@ -218,7 +177,7 @@ ybginTupleDelete(GinState *ginstate, OffsetNumber attnum,
 				 Datum ybctid)
 {
 	return ybginTupleWrite(ginstate, attnum, index, value, isNull, ybctid,
-						   NULL /* backfilltime */, false /* isinsert */);
+						   NULL /* backfilltime */ , false /* isinsert */ );
 }
 
 /*
@@ -226,7 +185,7 @@ ybginTupleDelete(GinState *ginstate, OffsetNumber attnum,
  * similar ybcinbuildCallback.
  */
 static void
-ybginBuildCallback(Relation index, HeapTuple heapTuple, Datum *values,
+ybginBuildCallback(Relation index, Datum ybctid, Datum *values,
 				   bool *isnull, bool tupleIsAlive, void *state)
 {
 	YbginBuildState *buildstate = (YbginBuildState *) state;
@@ -239,7 +198,7 @@ ybginBuildCallback(Relation index, HeapTuple heapTuple, Datum *values,
 	for (i = 0; i < ginstate->origTupdesc->natts; i++)
 		nentries += ybginTupleInsert(ginstate, (OffsetNumber) (i + 1),
 									 index, values[i], isnull[i],
-									 heapTuple->t_ybctid,
+									 ybctid,
 									 buildstate->backfilltime);
 
 	buildstate->indtuples += nentries;
@@ -255,6 +214,7 @@ ybginBuildCallback(Relation index, HeapTuple heapTuple, Datum *values,
  * - don't deal with postgres storage (e.g. buffers, pages, tmpCtx)
  * - additionally pass through backfill parameters
  * - name memory context Ybgin
+ * - use yb_table_index_build_scan, not table_index_build_scan
  */
 static IndexBuildResult *
 ybginBuildCommon(Relation heap, Relation index, struct IndexInfo *indexInfo,
@@ -262,39 +222,48 @@ ybginBuildCommon(Relation heap, Relation index, struct IndexInfo *indexInfo,
 				 struct YbPgExecOutParam *bfresult)
 {
 	IndexBuildResult *result;
-	double		reltuples;
+	double		reltuples = 0;
 	YbginBuildState buildstate;
 
-	initGinState(&buildstate.ginstate, index);
 	buildstate.indtuples = 0;
-	if (bfinfo)
-		buildstate.backfilltime = &bfinfo->read_time;
-	else
-		buildstate.backfilltime = NULL;
 
 	/*
-	 * create a temporary memory context that is used for calling
-	 * ginExtractEntries(), and can be reset after each tuple
+	 * We don't need to build YB indexes during a major version upgrade, as we
+	 * simply link the old DocDB table on master.
 	 */
-	buildstate.funcCtx = AllocSetContextCreate(GetCurrentMemoryContext(),
-											   "Ybgin build temporary context for user-defined function",
-											   ALLOCSET_DEFAULT_SIZES);
+	if (!IsBinaryUpgrade)
+	{
+		initGinState(&buildstate.ginstate, index);
+		if (bfinfo)
+			buildstate.backfilltime = &bfinfo->read_time;
+		else
+			buildstate.backfilltime = NULL;
 
-	/*
-	 * Do the heap scan.
-	 */
-	if (!bfinfo)
-		reltuples = IndexBuildHeapScan(heap, index, indexInfo, true,
-									   ybginBuildCallback, (void *) &buildstate,
-									   NULL /* HeapScanDesc */);
-	else
-		reltuples = IndexBackfillHeapRangeScan(heap, index, indexInfo,
-											   ybginBuildCallback,
-											   (void *) &buildstate,
-											   bfinfo,
-											   bfresult);
+		/*
+		 * create a temporary memory context that is used for calling
+		 * ginExtractEntries(), and can be reset after each tuple
+		 */
+		buildstate.funcCtx = AllocSetContextCreate(GetCurrentMemoryContext(),
+												   "Ybgin build temporary context for user-defined function",
+												   ALLOCSET_DEFAULT_SIZES);
 
-	MemoryContextDelete(buildstate.funcCtx);
+		/*
+		 * Do the heap scan.
+		 */
+		if (!bfinfo)
+			reltuples = yb_table_index_build_scan(heap, index, indexInfo, true,
+												  ybginBuildCallback,
+												  (void *) &buildstate,
+												  NULL /* HeapScanDesc */ );
+		else
+			reltuples = IndexBackfillHeapRangeScan(heap, index, indexInfo,
+												   ybginBuildCallback,
+												   (void *) &buildstate,
+												   bfinfo,
+												   bfresult);
+
+		MemoryContextDelete(buildstate.funcCtx);
+	}
 
 	/*
 	 * Return statistics
@@ -311,7 +280,7 @@ IndexBuildResult *
 ybginbuild(Relation heap, Relation index, struct IndexInfo *indexInfo)
 {
 	return ybginBuildCommon(heap, index, indexInfo,
-							NULL /* bfinfo */, NULL /* bfresult */);
+							NULL /* bfinfo */ , NULL /* bfresult */ );
 }
 
 void
@@ -376,7 +345,7 @@ ybginWrite(Relation index, Datum *values, bool *isnull, Datum ybctid,
 		if (isinsert)
 			ybginTupleInsert(ginstate, (OffsetNumber) (i + 1),
 							 index, values[i], isnull[i],
-							 ybctid, NULL /* backfilltime */);
+							 ybctid, NULL /* backfilltime */ );
 		else
 			ybginTupleDelete(ginstate, (OffsetNumber) (i + 1),
 							 index, values[i], isnull[i],
@@ -392,8 +361,7 @@ ybgininsert(Relation index, Datum *values, bool *isnull, Datum ybctid,
 			Relation heap, IndexUniqueCheck checkUnique,
 			struct IndexInfo *indexInfo, bool shared_insert)
 {
-	ybginWrite(index, values, isnull, ybctid, heap, indexInfo,
-			   true /* isinsert */);
+	ybginWrite(index, values, isnull, ybctid, heap, indexInfo, true /* isinsert */ );
 
 	/* index cannot be unique */
 	return false;
@@ -404,7 +372,7 @@ ybgindelete(Relation index, Datum *values, bool *isnull, Datum ybctid,
 			Relation heap, struct IndexInfo *indexInfo)
 {
 	ybginWrite(index, values, isnull, ybctid, heap, indexInfo,
-			   false /* isinsert */);
+			   false /* isinsert */ );
 }
 
 IndexBuildResult *

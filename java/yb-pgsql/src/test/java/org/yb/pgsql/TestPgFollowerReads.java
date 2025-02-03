@@ -18,31 +18,21 @@ import org.junit.runner.RunWith;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.yb.minicluster.RocksDBMetrics;
-
 import org.yb.util.BuildTypeUtil;
-import org.yb.util.YBTestRunnerNonTsanOnly;
-import org.yb.util.RegexMatcher;
-import org.yb.util.YBTestRunnerNonTsanOnly;
+import org.yb.YBTestRunner;
 
-import java.math.BigDecimal;
 import java.sql.Connection;
-import java.sql.ResultSet;
-import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Set;
-import java.util.stream.Collectors;
 
 import static org.yb.AssertionWrappers.*;
 
-@RunWith(value=YBTestRunnerNonTsanOnly.class)
+@RunWith(value=YBTestRunner.class)
 public class TestPgFollowerReads extends BasePgSQLTest {
   private static final Logger LOG = LoggerFactory.getLogger(TestPgFollowerReads.class);
   private static int kMaxClockSkewMs = 100;
@@ -67,27 +57,19 @@ public class TestPgFollowerReads extends BasePgSQLTest {
   @Test
   public void testSetIsolationLevelsWithReadFromFollowersSessionVariable() throws Exception {
     try (Statement statement = connection.createStatement()) {
-      // If follower reads are disabled, we should be allowed to set any staleness.
       // Enabling follower reads should fail if staleness is less than 2 * max_clock_skew.
       statement.execute("SET yb_read_from_followers = false");
-      statement.execute("SET yb_follower_read_staleness_ms = " + (2 * kMaxClockSkewMs - 1));
-      runInvalidQuery(statement, "SET yb_read_from_followers = true",
+      runInvalidQuery(statement, "SET yb_follower_read_staleness_ms = " + (2 * kMaxClockSkewMs - 1),
                       "ERROR: cannot enable yb_read_from_followers with a staleness of less than "
                       + "2 * (max_clock_skew");
-      statement.execute("SET yb_follower_read_staleness_ms = " + kMaxClockSkewMs / 2);
-      runInvalidQuery(statement, "SET yb_read_from_followers = true",
+      runInvalidQuery(statement, "SET yb_follower_read_staleness_ms = " + kMaxClockSkewMs / 2,
                       "ERROR: cannot enable yb_read_from_followers with a staleness of less than "
                       + "2 * (max_clock_skew");
-      statement.execute("SET yb_follower_read_staleness_ms = " + 0);
-      runInvalidQuery(statement, "SET yb_read_from_followers = true",
+      runInvalidQuery(statement, "SET yb_follower_read_staleness_ms = " + 0,
                       "ERROR: cannot enable yb_read_from_followers with a staleness of less than "
                       + "2 * (max_clock_skew");
-
       statement.execute("SET yb_follower_read_staleness_ms = " + (2 * kMaxClockSkewMs + 1));
-      statement.execute("SET yb_read_from_followers = true");
 
-      // If follower reads are enabled, we should be allowed to set staleness to any value over
-      // 2 * max_clock_skew, which is 500ms. Any value smaller than that should fail.
       statement.execute("SET yb_read_from_followers = true");
       statement.execute("SET yb_follower_read_staleness_ms = " + 2 * kMaxClockSkewMs);
       runInvalidQuery(statement, "SET yb_follower_read_staleness_ms = " + (2 * kMaxClockSkewMs - 1),
@@ -154,7 +136,7 @@ public class TestPgFollowerReads extends BasePgSQLTest {
       statement.execute(
           "SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL REPEATABLE READ");
 
-      // yb_read_from_followers enabled with SERIALIZABL
+      // yb_read_from_followers enabled with SERIALIZABLE
       statement.execute(
           "SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL SERIALIZABLE");
 
@@ -232,10 +214,9 @@ public class TestPgFollowerReads extends BasePgSQLTest {
       // Sleep for the updates to be visible during follower reads.
       Thread.sleep(kFollowerReadStalenessMs);
 
-      assertOneRow(statement,
-                   "/*+ Set(transaction_read_only on) */ "
-                       + "SELECT * FROM consistentprefix where v = 1",
-                   1, 1);
+      statement.execute("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      assertOneRow(statement, "SELECT * FROM consistentprefix where v = 1", 1, 1);
+      statement.execute("COMMIT");
       // The read will first read the ybctid from the index table, then use it to do a lookup
       // on the indexed table.
       long count_reqs = getCountForTable("consistent_prefix_read_requests", "consistentprefix");
@@ -320,27 +301,20 @@ public class TestPgFollowerReads extends BasePgSQLTest {
   public void doSelect(boolean use_ordered_by, boolean get_count, Statement statement,
                        boolean enable_follower_read, List<Row> rows_list,
                        long expected_num_tablet_requests) throws Exception {
-    String follower_read_setting = (enable_follower_read ? "on" : "off");
     int row_count = rows_list.size();
-    LOG.info("Reading rows with follower reads " + follower_read_setting);
+    LOG.info("Reading rows with enable_follower_read=" + enable_follower_read);
     long old_count_reqs = getCountForTable("consistent_prefix_read_requests", "consistentprefix");
     long old_count_rows = getCountForTable("pgsql_consistent_prefix_read_rows", "consistentprefix");
+    statement.execute("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ " +
+        (enable_follower_read ? "READ ONLY" : ""));
     if (get_count) {
-      assertOneRow(statement,
-                   "/*+ Set(transaction_read_only " + follower_read_setting + ") */ "
-                       + "SELECT count(*) FROM consistentprefix",
-                   row_count);
+      assertOneRow(statement, "SELECT count(*) FROM consistentprefix", row_count);
     } else if (use_ordered_by) {
-      assertRowList(statement,
-                    "/*+ Set(transaction_read_only " + follower_read_setting + ") */ "
-                        + "SELECT * FROM consistentprefix ORDER BY k",
-                    rows_list);
+      assertRowList(statement, "SELECT * FROM consistentprefix ORDER BY k", rows_list);
     } else {
-      assertRowSet(statement,
-                   "/*+ Set(transaction_read_only " + follower_read_setting + ") */ "
-                       + "SELECT * FROM consistentprefix k",
-                   new HashSet(rows_list));
+      assertRowSet(statement, "SELECT * FROM consistentprefix k", new HashSet(rows_list));
     }
+    statement.execute("COMMIT");
     long count_reqs = getCountForTable("consistent_prefix_read_requests", "consistentprefix");
     assertEquals(count_reqs - old_count_reqs,
                  !enable_follower_read ? 0 : expected_num_tablet_requests);
@@ -358,7 +332,6 @@ public class TestPgFollowerReads extends BasePgSQLTest {
       statement.execute("CREATE TABLE consistentprefix(k int primary key)");
 
       final int kNumRowsDeleted = 10;
-      final int kNumRowsUnchanged = kNumRows - kNumRowsDeleted;
       ArrayList<Row> all_rows = new ArrayList<Row>();
       ArrayList<Row> unchanged_rows = new ArrayList<Row>();
       LOG.info("Start writing");
@@ -373,8 +346,6 @@ public class TestPgFollowerReads extends BasePgSQLTest {
       LOG.info("Done writing");
       long doneWriteMs = System.currentTimeMillis();
 
-      Set<Row> expected_rows_set = new HashSet<Row>(all_rows);
-      Set<Row> expected_rows_unchanged_set = new HashSet<Row>(unchanged_rows);
       final int kNumTablets = 3;
       final int kNumRowsPerTablet = (int)Math.ceil(kNumRows / (1.0 * kNumTablets));
       final int kNumTabletRequests = kNumTablets * (int)Math.ceil(kNumRowsPerTablet / 1024.0);
@@ -457,5 +428,27 @@ public class TestPgFollowerReads extends BasePgSQLTest {
   @Test
   public void testSelectConsistentPrefix() throws Exception {
     testConsistentPrefix(7000, /* use_ordered_by */ false, /* get_count */ false);
+  }
+
+  // The test checks that follower reads are not used if sys catalog reads are to be performed.
+  @Test
+  public void testPgSysCatalogNoFollowerReads() throws Exception {
+    try (Statement stmt = connection.createStatement()) {
+      stmt.execute("SET yb_follower_read_staleness_ms = " + (2 * kMaxClockSkewMs + 1));
+      stmt.execute("SET yb_read_from_followers = true");
+      stmt.execute("BEGIN TRANSACTION READ ONLY");
+      long startReadRPCCount = getMasterReadRPCCount();
+      stmt.execute("SELECT EXTRACT(month FROM NOW())");
+      long endReadRPCCount = getMasterReadRPCCount();
+      stmt.execute("COMMIT");
+      assertGreaterThan(endReadRPCCount, startReadRPCCount);
+      long sysCatalogFolowerReads = getMetricCountForTable(
+          getMasterMetricSources(), "consistent_prefix_read_requests", "sys.catalog");
+      assertEquals(0L, sysCatalogFolowerReads);
+    }
+  }
+
+  private long getMasterReadRPCCount() throws Exception {
+    return getReadRPCMetric(getMasterMetricSources()).count;
   }
 }

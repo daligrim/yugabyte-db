@@ -11,7 +11,10 @@
 package com.yugabyte.yw.models;
 
 import com.fasterxml.jackson.annotation.JsonGetter;
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.annotation.JsonPropertyOrder;
+import com.fasterxml.jackson.annotation.JsonSetter;
 import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.ObjectCodec;
@@ -22,19 +25,26 @@ import com.fasterxml.jackson.databind.JsonSerializer;
 import com.fasterxml.jackson.databind.SerializerProvider;
 import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
 import com.fasterxml.jackson.databind.annotation.JsonSerialize;
+import com.yugabyte.yw.common.HaConfigStates.InstanceState;
+import com.yugabyte.yw.common.config.GlobalConfKeys;
+import com.yugabyte.yw.common.config.RuntimeConfGetter;
+import com.yugabyte.yw.common.inject.StaticInjectorHolder;
 import io.ebean.Finder;
 import io.ebean.Model;
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.Id;
+import jakarta.persistence.ManyToOne;
+import jakarta.persistence.Temporal;
+import jakarta.persistence.TemporalType;
+import jakarta.persistence.Transient;
 import java.io.IOException;
-import java.text.SimpleDateFormat;
+import java.time.Duration;
 import java.util.Date;
 import java.util.Optional;
 import java.util.UUID;
-import javax.persistence.Column;
-import javax.persistence.Entity;
-import javax.persistence.Id;
-import javax.persistence.ManyToOne;
-import javax.persistence.Temporal;
-import javax.persistence.TemporalType;
+import lombok.Getter;
+import lombok.Setter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import play.data.validation.Constraints;
@@ -42,6 +52,8 @@ import play.data.validation.Constraints;
 @Entity
 @JsonPropertyOrder({"uuid", "config_uuid", "address", "is_leader", "is_local", "last_backup"})
 @JsonDeserialize(using = PlatformInstance.PlatformInstanceDeserializer.class)
+@Getter
+@Setter
 public class PlatformInstance extends Model {
 
   private static final Finder<UUID, PlatformInstance> find =
@@ -49,8 +61,7 @@ public class PlatformInstance extends Model {
 
   private static final Logger LOG = LoggerFactory.getLogger(PlatformInstance.class);
 
-  private static final SimpleDateFormat TIMESTAMP_FORMAT =
-      new SimpleDateFormat("EEE MMM dd HH:mm:ss zzz yyyy");
+  private static long BACKUP_DISCONNECT_TIME_MILLIS = 15 * (60 * 1000);
 
   @Id
   @Constraints.Required
@@ -65,6 +76,7 @@ public class PlatformInstance extends Model {
 
   @Constraints.Required
   @Temporal(TemporalType.TIMESTAMP)
+  @JsonProperty("last_backup")
   private Date lastBackup;
 
   @Constraints.Required()
@@ -75,39 +87,12 @@ public class PlatformInstance extends Model {
   @Column(unique = true)
   private Boolean isLocal;
 
-  public UUID getUUID() {
-    return this.uuid;
-  }
-
-  public void setUUID(UUID uuid) {
-    this.uuid = uuid;
-  }
-
-  public String getAddress() {
-    return this.address;
-  }
-
-  public void setAddress(String address) {
-    this.address = address;
-  }
+  @Transient private String ybaVersion = null;
 
   @JsonGetter("config_uuid")
   @JsonSerialize(using = HAConfigToUUIDSerializer.class)
   public HighAvailabilityConfig getConfig() {
     return this.config;
-  }
-
-  public void setConfig(HighAvailabilityConfig config) {
-    this.config = config;
-  }
-
-  @JsonGetter("last_backup")
-  public Date getLastBackup() {
-    return this.lastBackup;
-  }
-
-  public void setLastBackup(Date lastBackup) {
-    this.lastBackup = lastBackup;
   }
 
   public boolean updateLastBackup() {
@@ -121,13 +106,20 @@ public class PlatformInstance extends Model {
     return false;
   }
 
+  public boolean updateLastBackup(Date lastBackup) {
+    try {
+      this.lastBackup = lastBackup;
+      this.update();
+      return true;
+    } catch (Exception e) {
+      LOG.warn("DB error saving last backup time", e);
+    }
+    return false;
+  }
+
   @JsonGetter("is_leader")
   public boolean getIsLeader() {
     return this.isLeader != null;
-  }
-
-  public void setIsLeader(Boolean isLeader) {
-    this.isLeader = isLeader ? true : null;
   }
 
   @JsonGetter("is_local")
@@ -135,11 +127,17 @@ public class PlatformInstance extends Model {
     return this.isLocal != null;
   }
 
-  public void setIsLocal(Boolean isLocal) {
+  @JsonSetter("is_leader")
+  public void setIsLeader(boolean isLeader) {
+    this.isLeader = isLeader ? true : null;
+  }
+
+  @JsonSetter("is_local")
+  public void setIsLocal(boolean isLocal) {
     this.isLocal = isLocal ? true : null;
   }
 
-  public void setIsLocalAndUpdate(Boolean isLocal) {
+  public void updateIsLocal(Boolean isLocal) {
     this.setIsLocal(isLocal);
     this.update();
   }
@@ -158,14 +156,45 @@ public class PlatformInstance extends Model {
     }
   }
 
+  @JsonGetter("instance_state")
+  public InstanceState getInstanceState() {
+    if (this.lastBackup == null) {
+      return InstanceState.AwaitingReplicas;
+    }
+    return isBackupOutdated(getReplicationFrequency(), this.lastBackup)
+        ? InstanceState.Disconnected
+        : InstanceState.Connected;
+  }
+
+  @JsonIgnore
+  public boolean isAwaitingReplicas() {
+    return this.lastBackup == null;
+  }
+
+  @JsonIgnore
+  public boolean isConnected() {
+    return !isBackupOutdated(getReplicationFrequency(), this.lastBackup);
+  }
+
+  @JsonIgnore
+  public boolean isDisconnected() {
+    return isBackupOutdated(getReplicationFrequency(), this.lastBackup);
+  }
+
+  private Duration getReplicationFrequency() {
+    RuntimeConfGetter runtimeConfGetter =
+        StaticInjectorHolder.injector().instanceOf(RuntimeConfGetter.class);
+    return runtimeConfGetter.getGlobalConf(GlobalConfKeys.replicationFrequency);
+  }
+
   public static PlatformInstance create(
       HighAvailabilityConfig config, String address, boolean isLeader, boolean isLocal) {
     PlatformInstance model = new PlatformInstance();
     model.uuid = UUID.randomUUID();
     model.config = config;
     model.address = address;
-    model.isLeader = isLeader ? true : null;
-    model.isLocal = isLocal ? true : null;
+    model.setIsLeader(isLeader);
+    model.setIsLocal(isLocal);
     model.save();
 
     return model;
@@ -191,12 +220,22 @@ public class PlatformInstance extends Model {
     find.deleteById(uuid);
   }
 
+  public static boolean isBackupOutdated(Duration replicationFrequency, Date lastBackupTime) {
+    // Means awaiting connection
+    if (lastBackupTime == null) {
+      return false;
+    }
+    long backupAgeMillis = System.currentTimeMillis() - lastBackupTime.getTime();
+    return backupAgeMillis
+        >= Math.max(2 * replicationFrequency.toMillis(), BACKUP_DISCONNECT_TIME_MILLIS);
+  }
+
   private static class HAConfigToUUIDSerializer extends JsonSerializer<HighAvailabilityConfig> {
     @Override
     public void serialize(
         HighAvailabilityConfig value, JsonGenerator gen, SerializerProvider provider)
         throws IOException {
-      gen.writeString(value.getUUID().toString());
+      gen.writeString(value.getUuid().toString());
     }
   }
 
@@ -215,7 +254,7 @@ public class PlatformInstance extends Model {
           PlatformInstance instance = new PlatformInstance();
           instance.uuid = UUID.fromString(json.get("uuid").asText());
           UUID configUUID = UUID.fromString(json.get("config_uuid").asText());
-          instance.config = HighAvailabilityConfig.get(configUUID).orElse(null);
+          instance.config = HighAvailabilityConfig.maybeGet(configUUID).orElse(null);
           instance.address = json.get("address").asText();
           instance.setIsLeader(json.get("is_leader").asBoolean());
           instance.setIsLocal(json.get("is_local").asBoolean());

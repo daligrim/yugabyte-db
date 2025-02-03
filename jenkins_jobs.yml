@@ -2,53 +2,49 @@
 # Default architecture is x86_64
 jobs:
   - os: alma8
-    compiler: clang13
+    compiler: clang17
     build_type: asan
     release_artifact: false
 
-  - os: centos7
-    compiler: clang14
+  - os: alma8
+    compiler: clang17
     build_type: tsan
-    release_artifact: false
-
-  - os: centos7
-    compiler: clang14
-    build_type: debug
-    release_artifact: false
-
-  - os: alma8
-    compiler: clang14
-    build_type: release
-    release_artifact: true
-
-  - os: alma8
-    compiler: clang12
-    build_type: release
-    architecture: aarch64
-    release_artifact: true
-
-  - os: alma8
-    compiler: clang12
-    build_type: debug
-    architecture: aarch64
     release_artifact: false
 
   - os: alma8
     compiler: gcc11
     build_type: fastdebug
+    test_opts: YB_TEST_YB_CONTROLLER=0
     release_artifact: false
 
-  - os: mac11.6
-    compiler: clang
-    build_type: debug
-    release_artifact: false
-
-  - os: mac11.6
-    compiler: clang
+  - os: alma8
+    compiler: clang17
     build_type: release
+    build_opts: YB_LINKING_TYPE=full-lto
     release_artifact: true
 
-  - os: ubuntu20.04
-    compiler: clang14
+  - os: alma8
+    compiler: clang17
+    build_type: release
+    architecture: aarch64
+    release_artifact: true
+
+  - os: mac13
+    compiler: clang
+    build_type: release
+    architecture: arm64
+    test_opts: YB_TEST_YB_CONTROLLER=0
+    release_artifact: true
+
+  - os: mac13
+    compiler: clang
+    build_type: release
+    architecture: x86_64
+    test_opts: YB_COMPILE_ONLY=1
+    release_artifact: true
+
+  - os: ubuntu22.04
+    compiler: clang17
     build_type: debug
     release_artifact: false
+    test_opts: YB_COMPILE_ONLY=1

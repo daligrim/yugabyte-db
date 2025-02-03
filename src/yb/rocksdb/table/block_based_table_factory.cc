@@ -38,6 +38,8 @@
 
 #include "yb/util/logging.h"
 
+using std::unique_ptr;
+
 namespace rocksdb {
 
 BlockBasedTableFactory::BlockBasedTableFactory(
@@ -196,10 +198,6 @@ std::string BlockBasedTableFactory::GetPrintableTableOptions() const {
 
 const BlockBasedTableOptions& BlockBasedTableFactory::table_options() const {
   return table_options_;
-}
-std::shared_ptr<TableAwareReadFileFilter> BlockBasedTableFactory::NewTableAwareReadFileFilter(
-    const ReadOptions &read_options, const Slice &user_key) const {
-  return std::make_shared<BloomFilterAwareFileFilter>(read_options, user_key);
 }
 
 TableFactory* NewBlockBasedTableFactory(

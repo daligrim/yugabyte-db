@@ -3,7 +3,8 @@ title: Troubleshoot performance issues
 headerTitle: Performance issues
 linkTitle: Performance issues
 description: Investigate and troubleshoot performance issues in YugabyteDB clusters
-image: /images/section_icons/architecture/concepts.png
+aliases:
+  - /preview/benchmark/performance-troubleshooting/
 menu:
   preview:
     identifier: performance-troubleshooting
@@ -16,13 +17,13 @@ There is a number of steps you can take to investigate and troubleshoot the perf
 
 ## Files on a YugabyteDB cluster
 
-Learning about the default locations of files on a YugabyteDB cluster can help with troubleshooting the cluster performance issues. 
+Learning about the default locations of files on a YugabyteDB cluster can help with troubleshooting the cluster performance issues.
 
 Note that the following locations are applicable to clusters installed via YugabyteDB Anywhere.
 
 ### YugabyteDB software and binary files
 
-The software packages are symlinked at `/home/yugabyte/{master|tserver}`. 
+The software packages are symlinked at `/home/yugabyte/{master|tserver}`.
 
 Note that YB-Master and YB-TServer may be different versions of the software (for example, this could be a result of rolling software upgrades).
 
@@ -105,7 +106,7 @@ W0325 06:47:13.033341 116514816 inbound_call.cc:208] Trace:
 
 ## yb-ts-cli
 
-You can run various tablet-related commands with `yb-ts-cli` by pointing at the YB-Master, as follows:
+You can run various tablet-related commands with yb-ts-cli by pointing at the YB-Master, as follows:
 
 ```sh
 ./yb-ts-cli list_tablets --server_address=localhost:9000
@@ -114,7 +115,7 @@ You can run various tablet-related commands with `yb-ts-cli` by pointing at the 
 
 ## yb-admin
 
-You can run various commands with `yb-admin`. You need to specify the full set of YB-Master ports `{ip:ports}` with `-master_addresses`, as follows:
+You can run various commands using yb-admin. You need to specify the full set of YB-Master ports `{ip:ports}` with `-master_addresses`, as follows:
 
 ```sh
 # Get all tables
@@ -144,7 +145,6 @@ You can view metrics of various YugabyteDB processes at a particular node (for e
 | :------ | :------ |
 | Master | 127.0.0.1:7000 |
 | TServer | 127.0.0.1:9000 |
-| Yedis | 127.0.0.1:11000 |
 | YCQL | 127.0.0.1:12000 |
 | YSQL | 127.0.0.1:13000 |
 
@@ -163,7 +163,7 @@ To enable tracing, you can set the `enable_tracing` flag, as follows:
 ./yb-ts-cli --server_address=localhost:9100 set_flag enable_tracing 1
 ```
 
-To enable tracing for all RPCs (not just the slow ones) including the `enable_tracing` flag, you may also set the `rpc_dump_all_traces` gflag, as follows:
+To enable tracing for all RPCs (not just the slow ones) including the `enable_tracing` flag, you may also set the `rpc_dump_all_traces` flag, as follows:
 
 ```sh
 ./yb-ts-cli --server_address=localhost:9100 set_flag rpc_dump_all_traces 1
@@ -171,9 +171,9 @@ To enable tracing for all RPCs (not just the slow ones) including the `enable_tr
 
 ## Dynamic settings for gflags
 
-Although setting string gflags dynamically is not recommended as it is not thread-safe, the `yb-ts-cli` utility allows you to do that. 
+Although setting string flags dynamically is not recommended as it is not thread-safe, the yb-ts-cli utility allows you to do that.
 
-Before attempting to set gflags, you need to identify the server using its Remote Procedure Call (RPC) port, as opposed to the HTTP port.
+Before attempting to set flags, you need to identify the server using its Remote Procedure Call (RPC) port, as opposed to the HTTP port.
 
 For example, you can increase the verbose logging level to 2 by executing the following command:
 

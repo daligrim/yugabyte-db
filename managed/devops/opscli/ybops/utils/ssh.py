@@ -9,6 +9,7 @@
 # https://github.com/YugaByte/yugabyte-db/blob/master/licenses/POLYFORM-FREE-TRIAL-LICENSE-1.0.0.txt
 
 import datetime
+import functools
 import logging
 import os
 import paramiko
@@ -20,12 +21,15 @@ import subprocess
 import time
 import tempfile
 
-from Crypto.PublicKey import RSA
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives import serialization
 
-from ybops.common.exceptions import YBOpsRuntimeError
+from scp import SCPClient
+from ybops.common.exceptions import YBOpsRuntimeError, YBOpsRecoverableError
 
 SSH2 = 'ssh2'
 SSH = 'ssh'
+SSHPUB = 'sshpub'
 SSH_RETRY_LIMIT = 60
 SSH_RETRY_LIMIT_PRECHECK = 4
 DEFAULT_SSH_PORT = 22
@@ -43,9 +47,41 @@ CONNECTION_RETRY_DELAY_SEC = 15
 COMMAND_TIMEOUT_SEC = 600
 
 
+def ssh_retry_decorator(fn_to_call, exc_handler=None, retry_delay=None):
+    if fn_to_call is None:
+        return functools.partial(
+            ssh_retry_decorator, exc_handler=exc_handler, retry_delay=retry_delay)
+
+    @functools.wraps(fn_to_call)
+    def wrapper(*args, **kwargs):
+        max_attempts = 3
+
+        for i in range(1, max_attempts + 1):
+            try:
+                return fn_to_call(*args, **kwargs)
+            except Exception as e:
+                if i < max_attempts and exc_handler(e):
+                    time.sleep(retry_delay)
+                    continue
+                raise YBOpsRecoverableError(str(e))
+
+    return wrapper
+
+
+def ssh_exception_handler(e):
+    if isinstance(e, (paramiko.SSHException, socket.error)):
+        logging.warning('Caught SSH error %s, retrying: %s', type(e).__name__, e)
+        return True
+    return False
+
+
+def retry_ssh_errors(fn=None, retry_delay=SSH_RETRY_DELAY):
+    return ssh_retry_decorator(fn, exc_handler=ssh_exception_handler, retry_delay=retry_delay)
+
+
 def parse_private_key(key):
     """Parses the private key file, & returns
-    the underlying format that the key uses.
+    the key format and key data.
     :param key: private key file.
     :return: Private key type(One of SSH2/SSH).
     """
@@ -54,9 +90,20 @@ def parse_private_key(key):
 
     with open(key) as f:
         key_data = f.read()
+        # key maybe SSH encoded public key
         try:
-            RSA.importKey(key_data)
-            return SSH
+            key = serialization.load_ssh_public_key(data=key_data.encode())
+            return SSHPUB, key
+        except Exception:
+            pass
+        try:
+            key = serialization.load_ssh_private_key(data=key_data.encode(), password=None)
+            return SSH, key
+        except Exception:
+            pass
+        try:
+            key = serialization.load_pem_private_key(data=key_data.encode(), password=None)
+            return SSH, key
         except ValueError:
             '''
             SSH2 encrypted keys contains Subject & comment in the generated body.
@@ -66,7 +113,7 @@ def parse_private_key(key):
             '''
             key_val = key_data.split('\n')
             if 'Subject' in key_val[1] and 'Comment' in key_val[2]:
-                return SSH2
+                return SSH2, None
 
     logging.info("[app], specified key format is not supported.")
     raise YBOpsRuntimeError("Specified key format is not supported.")
@@ -79,7 +126,7 @@ def check_ssh2_bin_present():
     try:
         output = run_command(['command', '-v', '/usr/bin/sshg3', '/dev/null'])
         return True if output is not None else False
-    except YBOpsRuntimeError as e:
+    except YBOpsRuntimeError:
         return False
 
 
@@ -93,13 +140,10 @@ def run_command(args, num_retry=1, timeout=1, **kwargs):
 
             output, err = process.communicate()
             if process.returncode != 0:
-                raise YBOpsRuntimeError(err)
+                logging.error("Failed to run command [[ {} ]]: code={} output={}".format(
+                  cmd_as_str, process.returncode, err))
+                raise YBOpsRuntimeError(err.decode('utf-8'))
             return output.decode('utf-8')
-
-        except YBOpsRuntimeError as e:
-            logging.error("Failed to run command [[ {} ]]: code={} output={}".format(
-                cmd_as_str, process.returncode, err))
-            raise e
 
         except Exception as ex:
             logging.error("Failed to run command [[ {} ]]: {}".format(cmd_as_str, ex))
@@ -140,7 +184,7 @@ def can_ssh(host_name, port, username, ssh_key_file, **kwargs):
         if len(stdout) == 1 and (stdout[0] == "test"):
             return True
         return False
-    except (YBOpsRuntimeError, Exception) as e:
+    except Exception as e:
         logging.error("Error Checking the instance, {}".format(e))
         return False
 
@@ -176,10 +220,17 @@ def format_rsa_key(key, public_key=False):
     Returns:
         key (str): Encoded key in OpenSSH or PEM format based on the flag (public key or not).
     """
-    if isinstance(key, RSA.RsaKey):
+    if isinstance(key, rsa.RSAPrivateKey):
         if public_key:
-            return key.publickey().exportKey("OpenSSH").decode('utf-8')
-        return key.exportKey("PEM").decode('utf-8')
+            return key.public_key() \
+                      .public_bytes(encoding=serialization.Encoding.OpenSSH,
+                                    format=serialization.PublicFormat.OpenSSH).decode('utf-8')
+        return key.private_bytes(encoding=serialization.Encoding.PEM,
+                                 format=serialization.PrivateFormat.TraditionalOpenSSL,
+                                 encryption_algorithm=serialization.NoEncryption()).decode('utf-8')
+    elif isinstance(key, rsa.RSAPublicKey):
+        return key.public_bytes(encoding=serialization.Encoding.OpenSSH,
+                                format=serialization.PublicFormat.OpenSSH).decode('utf-8')
     else:
         if public_key:
             run_command(['ssh-keygen-g3', '-D', key])
@@ -200,7 +251,6 @@ def validated_key_file(key_file):
     is incorrect or not found.
     Args:
         key_file (str): Key file name
-        public_key (bool): Denote if the key file is public key or not.
     Returns:
         key (RSA Key): RSA key data
     """
@@ -209,10 +259,9 @@ def validated_key_file(key_file):
         raise YBOpsRuntimeError("Key file {} not found.".format(key_file))
 
     # Check based on key_type not on SSH2 installed or not.
-    ssh_type = parse_private_key(key_file)
-    if ssh_type == SSH:
-        with open(key_file) as f:
-            return RSA.importKey(f.read())
+    ssh_type, key = parse_private_key(key_file)
+    if ssh_type == SSH or ssh_type == SSHPUB:
+        return key
     else:
         return key_file
 
@@ -227,7 +276,7 @@ def generate_rsa_keypair(key_name, destination='/tmp'):
     Returns:
         keys (tuple): Private and Public key files.
     """
-    new_key = RSA.generate(RSA_KEY_LENGTH)
+    new_key = rsa.generate_private_key(public_exponent=65537, key_size=RSA_KEY_LENGTH)
     if not os.path.exists(destination):
         raise YBOpsRuntimeError("Destination folder {} not accessible".format(destination))
 
@@ -250,7 +299,8 @@ def generate_rsa_keypair(key_name, destination='/tmp'):
 
 def scp_to_tmp(filepath, host, user, port, private_key, retries=3,
                retry_delay=SSH_RETRY_DELAY, **kwargs):
-    dest_path = os.path.join("/tmp", os.path.basename(filepath))
+    remote_tmp_dir = kwargs.get("remote_tmp_dir", "/tmp")
+    dest_path = os.path.join(remote_tmp_dir, os.path.basename(filepath))
     logging.info("[app] Copying local '{}' to remote '{}'".format(
         filepath, dest_path))
     ssh2_enabled = kwargs.get('ssh2_enabled', False)
@@ -341,43 +391,39 @@ class SSHClient(object):
         self.key = None
         self.port = ''
         self.client = None
-        self.sftp_client = None
         self.ssh_type = SSH2 if ssh2_enabled and check_ssh2_bin_present() else SSH
 
-    def connect(self, hostname, username, key, port, retry=1, timeout=SSH_TIMEOUT):
+    @retry_ssh_errors(retry_delay=CONNECTION_RETRY_DELAY_SEC)
+    def connect(self, hostname, username, key, port, retry=3, timeout=SSH_TIMEOUT):
         '''
             Initializes the connection or stores the relevant information
             needed for performing native ssh.
         '''
         if self.ssh_type == SSH:
             ssh_key = paramiko.RSAKey.from_private_key_file(key)
-            attempt = 0
-            while attempt < retry:
-                try:
-                    self.client = paramiko.SSHClient()
-                    self.client.set_missing_host_key_policy(paramiko.MissingHostKeyPolicy())
-                    self.client.connect(
-                        hostname=hostname,
-                        username=username,
-                        pkey=ssh_key,
-                        port=port,
-                        timeout=timeout,
-                        banner_timeout=timeout
-                    )
-                    return
-                except socket.error as ex:
-                    logging.info("[app] Failed to establish SSH connection to {}:{} - {}"
-                                 .format(hostname, port, str(ex)))
-                    attempt += 1
-                    if attempt >= retry:
-                        raise YBOpsRuntimeError(ex)
-                    time.sleep(CONNECTION_RETRY_DELAY_SEC)
+
+            try:
+                self.client = paramiko.SSHClient()
+                self.client.set_missing_host_key_policy(paramiko.MissingHostKeyPolicy())
+                self.client.connect(
+                    hostname=hostname,
+                    username=username,
+                    pkey=ssh_key,
+                    port=port,
+                    timeout=timeout,
+                    banner_timeout=timeout
+                )
+            except socket.error as ex:
+                logging.error("[app] Failed to establish SSH connection to {}:{} - {}"
+                              .format(hostname, port, str(ex)))
+                raise ex
         else:
             self.hostname = hostname
             self.username = username
             self.key = key
             self.port = port
 
+    @retry_ssh_errors
     def exec_command(self, cmd, **kwargs):
         '''
             Executes the command on the remote machine.
@@ -397,14 +443,18 @@ class SSHClient(object):
                 logging.info("Executing command {}".format(command))
             _, stdout, stderr = self.client.exec_command(command)
             if not output_only:
-                return stdout.channel.recv_exit_status(), stdout.readlines(), stderr.readlines()
+                output = stdout.readlines()
+                error = stderr.readlines()
+                return stdout.channel.recv_exit_status(), output, error
             else:
+                output = self.read_output(stdout)
+                error = self.read_output(stderr)
+                # We should read output first before we call recv_exit_status()
+                # see https://github.com/paramiko/paramiko/issues/448
                 return_code = stdout.channel.recv_exit_status()
                 if return_code != 0:
-                    error = self.read_output(stderr)
                     raise YBOpsRuntimeError('Command \'{}\' returned error code {}: {}'.format(
                         "" if skip_cmd_logging else command, return_code, error))
-                output = self.read_output(stdout)
                 return output
         else:
             cmd = self.__generate_shell_command(
@@ -425,15 +475,6 @@ class SSHClient(object):
         if self.ssh_type == SSH:
             self.client.close()
 
-    def get_sftp_client(self):
-        '''
-            Returns the ftp client for openssh connection
-            having initialized the paramiko client.
-        '''
-        if self.ssh_type == SSH:
-            self.sftp_client = self.client.open_sftp()
-            return self.sftp_client
-
     def read_output(self, stream):
         '''
         We saw this script hang. The only place which can hang in theory is ssh command execution
@@ -449,6 +490,7 @@ class SSHClient(object):
             break
         return stream.read().decode()
 
+    @retry_ssh_errors
     def exec_script(self, local_script_name, params):
         '''
         Function to execute a local bash script on the remote ssh server.
@@ -468,6 +510,7 @@ class SSHClient(object):
 
         return stdout
 
+    @retry_ssh_errors
     def download_file_from_remote_server(self, remote_file_name, local_file_name):
         '''
             Function to download a file from remote server on the local machine.
@@ -476,11 +519,14 @@ class SSHClient(object):
             remote_file_name: Path to the shell script on remote machine
         '''
         if self.ssh_type == SSH:
-            self.sftp_client = self.client.open_sftp()
+            scp_client = SCPClient(self.client.get_transport())
             try:
-                self.sftp_client.get(remote_file_name, local_file_name)
+                scp_client.get(remote_file_name, local_file_name)
+            except Exception as e:
+                logging.warning('Caught exception on file transfer', e)
+                raise e
             finally:
-                self.sftp_client.close()
+                scp_client.close()
         else:
             cmd = self.__generate_shell_command(self.hostname, self.port,
                                                 self.username, self.key,
@@ -489,7 +535,8 @@ class SSHClient(object):
                                                 get_from_remote=True)
             run_command(cmd)
 
-    def upload_file_to_remote_server(self, local_file_name, remote_file_name):
+    @retry_ssh_errors
+    def upload_file_to_remote_server(self, local_file_name, remote_file_name, **kwargs):
         '''
             Function to upload a file from local server on the remote machine.
             Parameters:
@@ -497,11 +544,14 @@ class SSHClient(object):
             remote_file_name: Path to the shell script on remote machine
         '''
         if self.ssh_type == SSH:
-            self.sftp_client = self.client.open_sftp()
+            scp_client = SCPClient(self.client.get_transport())
             try:
-                self.sftp_client.put(local_file_name, remote_file_name)
+                scp_client.put(local_file_name, remote_file_name)
+            except Exception as e:
+                logging.warning('Caught exception on file transfer', e)
+                raise e
             finally:
-                self.sftp_client.close()
+                scp_client.close()
         else:
             cmd = self.__generate_shell_command(self.hostname, self.port,
                                                 self.username, self.key,

@@ -16,8 +16,7 @@
 #include "yb/util/result.h"
 #include "yb/util/test_util.h"
 
-namespace yb {
-namespace test {
+namespace yb::test {
 
 class ResultTest : public YBTest {
 };
@@ -127,6 +126,22 @@ Result<const std::string&> GetConstStringReference() {
   return GetStringReference();
 }
 
+class Base {
+ public:
+  virtual ~Base() {}
+  virtual size_t func() = 0;
+};
+
+class Derived : public Base {
+ public:
+  explicit Derived(size_t value) : value_(value) {}
+
+  size_t func() override { return value_; }
+
+ private:
+  const size_t value_;
+};
+
 } // namespace
 
 TEST_F(ResultTest, Status) {
@@ -184,7 +199,13 @@ Result<std::unique_ptr<int>> ReturnVariable() {
 // Result<T>.
 TEST_F(ResultTest, ReturnVariable) {
   auto ptr = ASSERT_RESULT(ReturnVariable());
-  ASSERT_EQ(42, *ptr);
+  ASSERT_EQ(*ptr, 42);
+
+  auto base_ptr = ASSERT_RESULT([]() -> Result<std::unique_ptr<Base>>{
+    return std::make_unique<Derived>(42);
+  }());
+
+  ASSERT_EQ(base_ptr->func(), 42);
 }
 
 Result<std::unique_ptr<int>> ReturnBadVariable() {
@@ -279,5 +300,31 @@ TEST_F(ResultTest, VerifyResultMacroMoveCount) {
   ASSERT_EQ(2, MoveCounter::counter());
 }
 
-} // namespace test
-} // namespace yb
+namespace {
+
+template<typename T>
+void TestNotOk(T t) {
+  const auto LogPrefix = []() -> std::string { return "prefix"; };
+  WARN_NOT_OK(t, "boo");
+  WARN_WITH_PREFIX_NOT_OK(t, "foo");
+  ERROR_NOT_OK(t, "moo");
+}
+
+} // namespace
+
+TEST_F(ResultTest, NotOk) {
+  Result<std::string> good_result = "good";
+  Result<std::string> bad_result = STATUS(InternalError, "bad");
+
+  LOG(INFO) << "Checking OK because it's mandatory: " << bad_result.ok();
+
+  // Result
+  TestNotOk<Result<std::string>>(good_result);
+  TestNotOk<Result<std::string>>(bad_result);
+
+  // Status
+  TestNotOk<Status>(Status::OK());
+  TestNotOk<Status>(bad_result.status());
+}
+
+} // namespace yb::test

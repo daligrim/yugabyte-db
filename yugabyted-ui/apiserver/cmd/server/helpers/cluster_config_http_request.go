@@ -2,10 +2,7 @@ package helpers
 
 import (
     "encoding/json"
-    "fmt"
-    "io/ioutil"
-    "net/http"
-    "time"
+    "net/url"
 )
 
 type PlacementBlock struct {
@@ -13,13 +10,20 @@ type PlacementBlock struct {
     MinNumReplicas int             `json:"min_num_replicas"`
 }
 
-type LiveReplicasStruct struct {
+type ReplicasStruct struct {
     NumReplicas     int              `json:"num_replicas"`
     PlacementBlocks []PlacementBlock `json:"placement_blocks"`
+    PlacementUuid   string           `json:"placement_uuid"`
 }
 
+type MultiAffinitizedLeader struct {
+    Zones []CloudInfoStruct `json:"zones"`
+ }
+
 type ReplicationInfoStruct struct {
-    LiveReplicas LiveReplicasStruct `json:"live_replicas"`
+    LiveReplicas              ReplicasStruct          `json:"live_replicas"`
+    ReadReplicas             []ReplicasStruct         `json:"read_replicas"`
+    MultiAffinitizedLeaders  []MultiAffinitizedLeader `json:"multi_affinitized_leaders"`
 }
 
 type EncryptionInfoStruct struct {
@@ -33,31 +37,25 @@ type ClusterConfigStruct struct {
     Version         int                   `json:"version"`
     ReplicationInfo ReplicationInfoStruct `json:"replication_info"`
     ClusterUuid     string                `json:"cluster_uuid"`
+    UniverseUuid    string                `json:"universe_uuid"`
     EncryptionInfo  EncryptionInfoStruct  `json:"encryption_info"`
 }
 
 type ClusterConfigFuture struct {
     ClusterConfig ClusterConfigStruct
-    Error error
+    Error         error
 }
 
-func GetClusterConfigFuture(nodeHost string, future chan ClusterConfigFuture) {
+func (h *HelperContainer) GetClusterConfigFuture(nodeHost string, future chan ClusterConfigFuture) {
     clusterConfig := ClusterConfigFuture{
         ClusterConfig: ClusterConfigStruct{},
-        Error: nil,
+        Error:         nil,
     }
-    httpClient := &http.Client{
-        Timeout: time.Second * 10,
-    }
-    url := fmt.Sprintf("http://%s:7000/api/v1/cluster-config", nodeHost)
-    resp, err := httpClient.Get(url)
-    if err != nil {
-        clusterConfig.Error = err
-        future <- clusterConfig
-        return
-    }
-    defer resp.Body.Close()
-    body, err := ioutil.ReadAll(resp.Body)
+    body, err := h.BuildMasterURLsAndAttemptGetRequests(
+        "api/v1/cluster-config", // path
+        url.Values{}, // params
+        true, // expectJson
+    )
     if err != nil {
         clusterConfig.Error = err
         future <- clusterConfig

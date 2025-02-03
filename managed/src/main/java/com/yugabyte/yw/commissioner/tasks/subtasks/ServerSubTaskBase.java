@@ -13,16 +13,22 @@ package com.yugabyte.yw.commissioner.tasks.subtasks;
 import com.google.common.net.HostAndPort;
 import com.yugabyte.yw.commissioner.AbstractTaskBase;
 import com.yugabyte.yw.commissioner.BaseTaskDependencies;
-import com.yugabyte.yw.commissioner.tasks.UniverseDefinitionTaskBase.ServerType;
+import com.yugabyte.yw.commissioner.tasks.UniverseTaskBase.ServerType;
 import com.yugabyte.yw.commissioner.tasks.params.ServerSubTaskParams;
+import com.yugabyte.yw.common.services.config.YbClientConfig;
 import com.yugabyte.yw.models.Universe;
 import com.yugabyte.yw.models.helpers.NodeDetails;
+import java.util.concurrent.TimeUnit;
 import javax.inject.Inject;
 import lombok.extern.slf4j.Slf4j;
 import org.yb.client.YBClient;
 
 @Slf4j
 public abstract class ServerSubTaskBase extends AbstractTaskBase {
+
+  private static final Long VALIDATE_PRECHECK_ADMIN_TIMEOUT_MS = TimeUnit.SECONDS.toMillis(30);
+  private static final Long VALIDATE_PRECHECK_SOCKET_READ_TIMEOUT_MS = TimeUnit.SECONDS.toMillis(8);
+  private static final Long VALIDATE_PRECHECK_OPERATION_TIMEOUT_MS = TimeUnit.SECONDS.toMillis(15);
 
   @Inject
   protected ServerSubTaskBase(BaseTaskDependencies baseTaskDependencies) {
@@ -38,7 +44,7 @@ public abstract class ServerSubTaskBase extends AbstractTaskBase {
   public String getName() {
     return super.getName()
         + "("
-        + taskParams().universeUUID
+        + taskParams().getUniverseUUID()
         + ", "
         + taskParams().nodeName
         + ", type="
@@ -51,12 +57,12 @@ public abstract class ServerSubTaskBase extends AbstractTaskBase {
   }
 
   public String getMasterAddresses(boolean getSecondary) {
-    Universe universe = Universe.getOrBadRequest(taskParams().universeUUID);
+    Universe universe = Universe.getOrBadRequest(taskParams().getUniverseUUID());
     return universe.getMasterAddresses(false /* mastersQueryable */, getSecondary);
   }
 
   public HostAndPort getHostPort() {
-    Universe universe = Universe.getOrBadRequest(taskParams().universeUUID);
+    Universe universe = Universe.getOrBadRequest(taskParams().getUniverseUUID());
     NodeDetails node = universe.getNode(taskParams().nodeName);
     return HostAndPort.fromParts(
         node.cloudInfo.private_ip,
@@ -64,9 +70,19 @@ public abstract class ServerSubTaskBase extends AbstractTaskBase {
   }
 
   public YBClient getClient() {
-    Universe universe = Universe.getOrBadRequest(taskParams().universeUUID);
+    Universe universe = Universe.getOrBadRequest(taskParams().getUniverseUUID());
     String masterAddresses = universe.getMasterAddresses();
     String certificate = universe.getCertificateNodetoNode();
+    if (taskParams().isRunOnlyPrechecks()) {
+      YbClientConfig ybClientConfig =
+          new YbClientConfig(
+              masterAddresses,
+              certificate,
+              TimeUnit.SECONDS.toMillis(VALIDATE_PRECHECK_ADMIN_TIMEOUT_MS),
+              TimeUnit.SECONDS.toMillis(VALIDATE_PRECHECK_SOCKET_READ_TIMEOUT_MS),
+              TimeUnit.SECONDS.toMillis(VALIDATE_PRECHECK_OPERATION_TIMEOUT_MS));
+      return ybService.getClientWithConfig(ybClientConfig);
+    }
     return ybService.getClient(masterAddresses, certificate);
   }
 
@@ -75,47 +91,47 @@ public abstract class ServerSubTaskBase extends AbstractTaskBase {
   }
 
   public void checkParams() {
-    Universe universe = Universe.getOrBadRequest(taskParams().universeUUID);
+    Universe universe = Universe.getOrBadRequest(taskParams().getUniverseUUID());
     String masterAddresses = universe.getMasterAddresses();
     log.info("Running {} on masterAddress = {}.", getName(), masterAddresses);
 
     if (masterAddresses == null || masterAddresses.isEmpty()) {
       throw new IllegalArgumentException(
-          "Invalid master addresses " + masterAddresses + " for " + taskParams().universeUUID);
+          "Invalid master addresses " + masterAddresses + " for " + taskParams().getUniverseUUID());
     }
 
     NodeDetails node = universe.getNode(taskParams().nodeName);
 
     if (node == null) {
       throw new IllegalArgumentException(
-          "Node " + taskParams().nodeName + " not found in universe " + taskParams().universeUUID);
+          "Node "
+              + taskParams().nodeName
+              + " not found in universe "
+              + taskParams().getUniverseUUID());
     }
 
     if (taskParams().serverType != ServerType.TSERVER
         && taskParams().serverType != ServerType.MASTER
-        && taskParams().serverType != ServerType.CONTROLLER) {
+        && taskParams().serverType != ServerType.CONTROLLER
+        && taskParams().serverType != ServerType.YSQLSERVER) {
       throw new IllegalArgumentException(
           "Unexpected server type "
               + taskParams().serverType
               + " for universe "
-              + taskParams().universeUUID);
+              + taskParams().getUniverseUUID());
     }
 
-    boolean isTserverTask = taskParams().serverType == ServerType.TSERVER;
+    boolean isTserverTask =
+        taskParams().serverType == ServerType.TSERVER
+            || taskParams().serverType == ServerType.YSQLSERVER;
     if (isTserverTask && !node.isTserver) {
-      throw new IllegalArgumentException(
-          "Task server type "
-              + taskParams().serverType
-              + " is for a node running tserver: "
-              + node.toString());
+      log.warn(
+          "Node {} is not yet updated to be a tserver but is being waited for", node.toString());
     }
 
     if (!isTserverTask && !node.isMaster) {
-      throw new IllegalArgumentException(
-          "Task server type "
-              + taskParams().serverType
-              + " is for a node running master: "
-              + node.toString());
+      log.warn(
+          "Node {} is not yet updated to be a master but is being waited for", node.toString());
     }
   }
 }

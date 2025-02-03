@@ -17,7 +17,7 @@ type: docs
 <ul class="nav nav-tabs-alt nav-tabs-yb">
   <li >
     <a href="../helm-chart/" class="nav-link active">
-      <i class="fas fa-cubes" aria-hidden="true"></i>
+      <i class="fa-regular fa-dharmachakra" aria-hidden="true"></i>
       Helm chart
     </a>
   </li>
@@ -36,7 +36,7 @@ The YugabyteDB Helm chart has been tested with the following software versions:
 - GKE running Kubernetes 1.20 or later with nodes such that a total of 12 CPU cores and 45 GB RAM can be allocated to YugabyteDB. This can be three nodes with 4 CPU core and 15 GB RAM allocated to YugabyteDB. `n1-standard-8` is the minimum instance type that meets these criteria.
 - Helm 3.4 or later.
 - YugabyteDB Docker image (yugabytedb/yugabyte) 2.1.0 or later.
-- For optimal performance, ensure you have set the appropriate [system limits using `ulimit`](../../../../manual-deployment/system-config/#ulimits) on each node in your Kubernetes cluster.
+- For optimal performance, ensure you have set the appropriate [system limits using `ulimit`](../../../../manual-deployment/system-config/#set-ulimits) on each node in your Kubernetes cluster.
 
 The following steps show how to meet these prerequisites:
 
@@ -448,7 +448,7 @@ kubectl get services -n yb-demo-us-west1-b --context gke_yugabyte_us-west1-b_yug
 ```
 
 ```output
-NAME                 TYPE           CLUSTER-IP      EXTERNAL-IP   PORT(S)                                        AGE
+NAME                 TYPE           CLUSTER-IP      EXTERNAL-IP     PORT(S)                                        AGE
 yb-master-ui         LoadBalancer   10.31.250.228   35.185.207.11   7000:31185/TCP                                 91m
 yb-masters           ClusterIP      None            <none>          7100/TCP,7000/TCP                              91m
 yb-tserver-service   LoadBalancer   10.31.247.185   34.83.192.162   6379:31858/TCP,9042:30444/TCP,5433:30854/TCP   91m
@@ -486,34 +486,34 @@ To view the new configuration, navigate to `http://<external-ip>:7000/cluster-co
 
 ## Connect using YSQL and YCQL shells
 
-To connect and use the YSQL Shell (`ysqlsh`), run the following command:
+To connect and use the YSQL Shell (ysqlsh), run the following command:
 
 ```sh
 kubectl exec -n yb-demo-us-west1-b --context gke_yugabyte_us-west1-b_yugabytedb1 \
  -it yb-tserver-0 -- ysqlsh -h yb-tserver-0.yb-tservers.yb-demo-us-west1-b
 ```
 
-To connect and use the YCQL Shell (`ycqlsh`), run the following command:
+To connect and use the YCQL Shell (ycqlsh), run the following command:
 
 ```sh
 kubectl exec -n yb-demo-us-west1-b --context gke_yugabyte_us-west1-b_yugabytedb1 \
 -it yb-tserver-0 -- ycqlsh yb-tserver-0.yb-tservers.yb-demo-us-west1-b
 ```
 
-Follow the instructions provided in [Explore YSQL](../../../../../quick-start/explore/ysql/) and then browse to `http://<external-ip>:7000/tablet-servers` of the YB-Master Admin UI to confirm that tablet peers and their leaders are placed evenly across all three zones for both user data and system data, as per the following illustration:
+Follow the instructions provided in [Explore YSQL](/preview/tutorials/quick-start/explore/ysql/) and then browse to `http://<external-ip>:7000/tablet-servers` of the YB-Master Admin UI to confirm that tablet peers and their leaders are placed evenly across all three zones for both user data and system data, as per the following illustration:
 
 ![mz-ybtserver](/images/deploy/kubernetes/gke-multicluster-ybtserver.png)
 
 ## Connect using external clients
 
-To connect an external program, obtain the load balancer `EXTERNAL-IP` address of one of the `yb-tserver-service` services and connect to the 5433 or 9042 port for YSQL or YCQL service respectively, as follows:
+To connect an external program, get the load balancer `EXTERNAL-IP` address of the `yb-tserver-service` service and connect using port 5433 for YSQL or port 9042 for YCQL, as follows:
 
 ```sh
 kubectl get services -n yb-demo-us-west1-b --context gke_yugabyte_us-west1-b_yugabytedb1
 ```
 
 ```output
-NAME                 TYPE           CLUSTER-IP      EXTERNAL-IP   PORT(S)                                        AGE
+NAME                 TYPE           CLUSTER-IP      EXTERNAL-IP     PORT(S)                                        AGE
 ...
 yb-tserver-service   LoadBalancer   10.31.247.185   34.83.192.162   6379:31858/TCP,9042:30444/TCP,5433:30854/TCP   91m
 ...
@@ -531,4 +531,4 @@ kubectl scale statefulset yb-master --replicas=0 -n yb-demo-us-central1-b \
  --context gke_yugabyte_us-central1-b_yugabytedb2
 ```
 
-Now rerun the queries from [Connect using YSQL and YCQL shells](#connect-using-ysql-and-ycql-shells) after reconnecting to the nodes in the `us-west1` region to see that there is no impact to the availability of the cluster and the data stored therein. However, there is higher latency for some of the transactions, since the farthest `us-east1` region has to be involved in the write path. In other words, the database cluster is fully protected against region failures but may temporarily experience higher latency, which is a better outcome than a complete outage of the business-critical database service. See [Understanding How YugabyteDB Runs on Kubernetes](https://blog.yugabyte.com/understanding-how-yugabyte-db-runs-on-kubernetes/) for details on how YugabyteDB self-heals the replicas when subjected to the failure of a fault domain (the cloud region, in this case) by auto-electing a new leader for each of the impacted shards in the remaining fault domains. The cluster goes back to its original configuration as soon as the nodes in the lost region become available again.
+Now rerun the queries from [Connect using YSQL and YCQL shells](#connect-using-ysql-and-ycql-shells) after reconnecting to the nodes in the `us-west1` region to see that there is no impact to the availability of the cluster and the data stored therein. However, there is higher latency for some of the transactions, since the farthest `us-east1` region has to be involved in the write path. In other words, the database cluster is fully protected against region failures but may temporarily experience higher latency, which is a better outcome than a complete outage of the business-critical database service. See [Understanding How YugabyteDB Runs on Kubernetes](https://www.yugabyte.com/blog/understanding-how-yugabyte-db-runs-on-kubernetes/) for details on how YugabyteDB self-heals the replicas when subjected to the failure of a fault domain (the cloud region, in this case) by auto-electing a new leader for each of the impacted shards in the remaining fault domains. The cluster goes back to its original configuration as soon as the nodes in the lost region become available again.

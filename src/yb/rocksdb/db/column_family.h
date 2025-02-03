@@ -21,8 +21,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
-#ifndef YB_ROCKSDB_DB_COLUMN_FAMILY_H
-#define YB_ROCKSDB_DB_COLUMN_FAMILY_H
 
 #pragma once
 
@@ -42,6 +40,8 @@
 #include "yb/rocksdb/util/mutable_cf_options.h"
 #include "yb/rocksdb/util/thread_local.h"
 
+#include "yb/util/enums.h"
+
 namespace rocksdb {
 
 class Version;
@@ -57,6 +57,8 @@ class DBImpl;
 class LogBuffer;
 class InstrumentedMutex;
 class InstrumentedMutexLock;
+
+YB_DEFINE_ENUM(CompactionSizeKind, (kSmall)(kLarge));
 
 extern const double kSlowdownRatio;
 
@@ -233,11 +235,9 @@ class ColumnFamilyData {
   const MutableCFOptions* GetLatestMutableCFOptions() const {
     return &mutable_cf_options_;
   }
-#ifndef ROCKSDB_LITE
   // REQUIRES: DB mutex held
   Status SetOptions(
       const std::unordered_map<std::string, std::string>& options_map);
-#endif  // ROCKSDB_LITE
 
   InternalStats* internal_stats() { return internal_stats_.get(); }
 
@@ -277,6 +277,9 @@ class ColumnFamilyData {
       uint32_t output_path_id,
       const InternalKey* begin,
       const InternalKey* end,
+      CompactionReason compaction_reason,
+      uint64_t file_number_upper_bound,
+      uint64_t input_size_limit,
       InternalKey** compaction_end,
       bool* manual_conflict);
 
@@ -327,9 +330,20 @@ class ColumnFamilyData {
 
   // Protected by DB mutex
   void set_pending_flush(bool value) { pending_flush_ = value; }
-  void set_pending_compaction(bool value) { pending_compaction_ = value; }
   bool pending_flush() { return pending_flush_; }
-  bool pending_compaction() { return pending_compaction_; }
+
+  void PendingCompactionAdded(CompactionSizeKind compaction_size_kind);
+  void PendingCompactionRemoved(CompactionSizeKind compaction_size_kind);
+  void PendingCompactionSizeKindUpdated(CompactionSizeKind from, CompactionSizeKind to);
+  bool pending_compaction() const;
+
+  bool pending_compaction(CompactionSizeKind compaction_size_kind) const {
+    return num_pending_compactions_[yb::to_underlying(compaction_size_kind)] > 0;
+  }
+
+  size_t num_pending_compactions(CompactionSizeKind compaction_size_kind) const {
+    return num_pending_compactions_[yb::to_underlying(compaction_size_kind)];
+  }
 
   // Recalculate some small conditions, which are changed only during
   // compaction, adding new memtable and/or
@@ -404,9 +418,11 @@ class ColumnFamilyData {
   // If true --> this ColumnFamily is currently present in DBImpl::flush_queue_
   bool pending_flush_;
 
-  // If true --> this ColumnFamily is currently present in
-  // DBImpl::compaction_queue_
-  bool pending_compaction_;
+  // How many times this ColumnFamily is currently present in DBImpl::compaction_queue_.
+  // Note: in general it might be not effective to use such nearly aligned atomics. This is not a
+  // problem for this particular use case because this is not a hot path, but shouldn't be applied
+  // in other cases where performance is critical.
+  std::array<std::atomic<size_t>, kElementsInCompactionSizeKind> num_pending_compactions_;
 
   uint64_t prev_compaction_needed_bytes_;
 };
@@ -565,5 +581,3 @@ extern const Comparator* GetColumnFamilyUserComparator(
     ColumnFamilyHandle* column_family);
 
 }  // namespace rocksdb
-
-#endif // YB_ROCKSDB_DB_COLUMN_FAMILY_H

@@ -7,6 +7,7 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.swagger.annotations.ApiModelProperty;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.UUID;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -51,6 +52,8 @@ public class PlacementInfo {
     @ApiModelProperty public String name;
     // The list of AZs inside this region into which we want to place data.
     @ApiModelProperty public List<PlacementAZ> azList = new ArrayList<PlacementAZ>();
+    // The Load Balancer FQDN.
+    @ApiModelProperty public String lbFQDN;
 
     @Override
     public String toString() {
@@ -81,6 +84,8 @@ public class PlacementInfo {
     @ApiModelProperty public int numNodesInAZ;
     // Is this an affinitized zone.
     @ApiModelProperty public boolean isAffinitized;
+    // The Load Balancer id.
+    @ApiModelProperty public String lbName;
 
     @Override
     public String toString() {
@@ -99,10 +104,14 @@ public class PlacementInfo {
 
   @JsonIgnore
   public Stream<PlacementAZ> azStream() {
-    return cloudList
-        .stream()
+    return cloudList.stream()
         .flatMap(cloud -> cloud.regionList.stream())
         .flatMap(region -> region.azList.stream());
+  }
+
+  @JsonIgnore
+  public PlacementAZ findByAZUUID(UUID azUUID) {
+    return azStream().filter(az -> Objects.equals(azUUID, az.uuid)).findFirst().orElse(null);
   }
 
   @Override

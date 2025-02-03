@@ -3,8 +3,7 @@ title: Audit logging in YugabyteDB
 headerTitle: Audit logging
 linkTitle: Audit logging
 description: Audit logging in YugabyteDB.
-headcontent: Audit logging in YugabyteDB.
-image: /images/section_icons/secure/authorization.png
+headcontent: Trace statements and configure audit logging
 menu:
   preview:
     identifier: audit-logging
@@ -13,42 +12,32 @@ menu:
 type: indexpage
 ---
 
-<div class="row">
+Use audit logging to produce audit logs needed to comply with government, financial, or ISO certifications.
 
-  <div class="col-12 col-md-6 col-lg-12 col-xl-6">
-    <a class="section-link icon-offset" href="audit-logging-ysql/">
-      <div class="head">
-        <img class="icon" src="/images/section_icons/secure/authentication.png" aria-hidden="true" />
-        <div class="title">Configure audit logging</div>
-      </div>
-      <div class="body">
-          Configure audit logging in YugabyteDB.
-      </div>
-    </a>
-  </div>
+{{<index/block>}}
 
-  <div class="col-12 col-md-6 col-lg-12 col-xl-6">
-    <a class="section-link icon-offset" href="session-audit-logging-ysql/">
-      <div class="head">
-        <img class="icon" src="/images/section_icons/secure/authentication.png" aria-hidden="true" />
-        <div class="title">Session audit logging</div>
-      </div>
-      <div class="body">
-          Session audit logging in YSQL.
-      </div>
-    </a>
-  </div>
+  {{<index/item
+    title="Manually trace statements"
+    body="Trace executed statements in a session using session identifiers."
+    href="trace-statements-ysql/"
+    icon="fa-thin fa-list-check">}}
 
-  <div class="col-12 col-md-6 col-lg-12 col-xl-6">
-    <a class="section-link icon-offset" href="object-audit-logging-ysql/">
-      <div class="head">
-        <img class="icon" src="/images/section_icons/secure/authentication.png" aria-hidden="true" />
-        <div class="title">Object audit logging</div>
-      </div>
-      <div class="body">
-          Object audit logging in YSQL.
-      </div>
-    </a>
-  </div>
+  {{<index/item
+    title="Configure audit logging"
+    body="Configure audit logging in YugabyteDB."
+    href="audit-logging-ysql/"
+    icon="fa-thin fa-gear">}}
 
-</div>
+  {{<index/item
+    title="Session audit logging"
+    body="Session audit logging in YSQL."
+    href="session-audit-logging-ysql/"
+    icon="fa-thin fa-check-double">}}
+
+  {{<index/item
+    title="Object audit logging"
+    body="Object audit logging in YSQL."
+    href="object-audit-logging-ysql/"
+    icon="fa-thin fa-file-check">}}
+
+{{</index/block>}}

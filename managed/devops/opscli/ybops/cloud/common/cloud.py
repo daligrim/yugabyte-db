@@ -18,13 +18,27 @@ import tempfile
 import time
 
 import yaml
+from enum import Enum
 from ybops.cloud.common.ansible import AnsibleProcess
 from ybops.cloud.common.base import AbstractCommandParser
 from ybops.utils import (YB_HOME_DIR, YBOpsRuntimeError, get_datafile_path,
-                         get_internal_datafile_path, remote_exec_command)
-from ybops.utils.remote_shell import RemoteShell
+                         get_internal_datafile_path)
+from ybops.utils.remote_shell import (copy_to_tmp, wait_for_server, get_host_port_user,
+                                      RemoteShell)
 from ybops.common.exceptions import YBOpsRecoverableError
-from ybops.utils.ssh import wait_for_ssh, scp_to_tmp, get_ssh_host_port
+from ybops.utils import remote_exec_command
+from cryptography import x509
+from cryptography.x509.oid import (NameOID, ExtensionOID)
+
+
+class InstanceState(str, Enum):
+    STARTING = "starting",
+    RUNNING = "running",
+    STOPPING = "stopping",
+    STOPPED = "stopped",
+    TERMINATING = "terminating",
+    TERMINATED = "terminated",
+    UNKNOWN = "unknown"
 
 
 class AbstractCloud(AbstractCommandParser):
@@ -47,13 +61,15 @@ class AbstractCloud(AbstractCommandParser):
     CLIENT_KEY_NAME = "yugabytedb.key"
     CERT_LOCATION_NODE = "node"
     CERT_LOCATION_PLATFORM = "platform"
-    SSH_RETRY_COUNT = 180
-    SSH_WAIT_SECONDS = 5
-    SSH_TIMEOUT_SECONDS = 4
+    SERVER_RETRY_COUNT = 90
+    SERVER_WAIT_SECONDS = 5
+    SERVER_TIMEOUT_SECONDS = 4
     MOUNT_PATH_PREFIX = "/mnt/d"
 
     def __init__(self, name):
         super(AbstractCloud, self).__init__(name)
+
+    def init(self, args=None):
         devops_home = os.environ.get("yb_devops_home")
         vars_file = os.path.join(devops_home,
                                  AbstractCloud.VARS_DIR_SUFFIX,
@@ -168,10 +184,9 @@ class AbstractCloud(AbstractCommandParser):
         if args.systemd_services:
             updated_vars.update({"systemd_services": args.systemd_services})
         updated_vars.update(extra_vars)
-        updated_vars.update(get_ssh_host_port(host_info, args.custom_ssh_port))
-        remote_shell = RemoteShell(updated_vars)
+
         if args.num_volumes:
-            volume_cnt = remote_shell.run_command(
+            volume_cnt = RemoteShell(updated_vars).run_command(
                 "df | awk '{{print $6}}' | egrep '^{}[0-9]+' | wc -l".format(
                     AbstractCloud.MOUNT_PATH_PREFIX
                 )
@@ -189,79 +204,67 @@ class AbstractCloud(AbstractCommandParser):
 
         if os.environ.get("YB_USE_FABRIC", False):
             file_path = os.path.join(YB_HOME_DIR, "bin/yb-server-ctl.sh")
-            remote_shell.run_command(
+            RemoteShell(updated_vars).run_command(
                 "{} {} {}".format(file_path, process, command)
             )
         else:
             self.setup_ansible(args).run("yb-server-ctl.yml", updated_vars, host_info)
 
-    def initYSQL(self, master_addresses, ssh_options):
-        remote_shell = RemoteShell(ssh_options)
+    def initYSQL(self, master_addresses, connect_options, args):
+        # TODO Looks like this is not used.
+        remote_shell = RemoteShell(connect_options)
         init_db_path = os.path.join(YB_HOME_DIR, "tserver/postgres/bin/initdb")
         remote_shell.run_command(
             "bash -c \"YB_ENABLED_IN_POSTGRES=1 FLAGS_pggate_master_addresses={} "
-            "{} -D /tmp/yb_pg_initdb_tmp_data_dir "
-            "-U postgres\"".format(master_addresses, init_db_path)
+            "{} -D {}/yb_pg_initdb_tmp_data_dir "
+            "-U postgres\"".format(master_addresses, init_db_path, args.remote_tmp_dir)
         )
 
     def execute_boot_script(self, args, extra_vars):
-        dest_path = os.path.join("/tmp", os.path.basename(args.boot_script))
+        dest_path = os.path.join(args.remote_tmp_dir, os.path.basename(args.boot_script))
 
         # Make it executable, in case it isn't one.
         st = os.stat(args.boot_script)
         os.chmod(args.boot_script, st.st_mode | stat.S_IEXEC)
 
-        scp_to_tmp(
-            args.boot_script, extra_vars["ssh_host"],
-            extra_vars["ssh_user"], extra_vars["ssh_port"], args.private_key_file,
-            ssh2_enabled=args.ssh2_enabled)
+        copy_to_tmp(extra_vars, args.boot_script, remote_tmp_dir=args.remote_tmp_dir)
 
         cmd = "sudo {}".format(dest_path)
-        rc, stdout, stderr = remote_exec_command(
-            extra_vars["ssh_host"], extra_vars["ssh_port"],
-            extra_vars["ssh_user"], args.private_key_file, cmd,
-            ssh2_enabled=args.ssh2_enabled)
+        rc, stdout, stderr = remote_exec_command(extra_vars, cmd)
         if rc:
             raise YBOpsRecoverableError(
                 "[app] Could not run bootscript {} {}".format(stdout, stderr))
 
-    def configure_secondary_interface(self, args, extra_vars, subnet_cidr):
+    def configure_secondary_interface(self, args, extra_vars, subnet_cidr, server_ports):
         logging.info("[app] Configuring second NIC")
         subnet_network, subnet_netmask = subnet_cidr.split('/')
         # Copy and run script to configure routes
-        scp_to_tmp(
-            get_datafile_path('configure_nic.sh'), extra_vars["ssh_host"],
-            extra_vars["ssh_user"], extra_vars["ssh_port"], args.private_key_file,
-            ssh2_enabled=args.ssh2_enabled)
-        cmd = ("sudo /tmp/configure_nic.sh "
-               "--subnet_network {} --subnet_netmask {} --cloud {}").format(
-            subnet_network, subnet_netmask, self.name)
-        rc, stdout, stderr = remote_exec_command(
-            extra_vars["ssh_host"], extra_vars["ssh_port"],
-            extra_vars["ssh_user"], args.private_key_file, cmd,
-            ssh2_enabled=args.ssh2_enabled)
+        copy_to_tmp(extra_vars, get_datafile_path('configure_nic.sh'),
+                    remote_tmp_dir=args.remote_tmp_dir)
+        cmd = ("sudo {}/configure_nic.sh "
+               "--subnet_network {} --subnet_netmask {} --cloud {} --tmp_dir {}").format(
+            args.remote_tmp_dir, subnet_network, subnet_netmask, self.name, args.remote_tmp_dir)
+        rc, stdout, stderr = remote_exec_command(extra_vars, cmd)
         if rc:
             raise YBOpsRecoverableError(
                 "Could not configure second nic {} {}".format(stdout, stderr))
-        # Since this is on start, wait for ssh on default port
         # Reboot instance
-        remote_exec_command(
-            extra_vars["ssh_host"], extra_vars["ssh_port"], extra_vars["ssh_user"],
-            args.private_key_file, 'sudo reboot', ssh2_enabled=args.ssh2_enabled)
-        self.wait_for_ssh_port(extra_vars["ssh_host"], args.search_pattern, extra_vars["ssh_port"])
-        # Make sure we can ssh into the node after the reboot as well.
-        if wait_for_ssh(extra_vars["ssh_host"], extra_vars["ssh_port"],
-                        extra_vars["ssh_user"], args.private_key_file, num_retries=120,
-                        ssh2_enabled=args.ssh2_enabled):
+        remote_exec_command(extra_vars, 'sudo reboot')
+        host_port_user = get_host_port_user(extra_vars)
+        # Since this is on start, wait for server port to open.
+        self.wait_for_server_ports(
+            host_port_user["host"], args.search_pattern, server_ports)
+        # Make sure we can connect into the node after the reboot as well.
+        if wait_for_server(extra_vars, num_retries=120):
             pass
         else:
-            raise YBOpsRecoverableError("Could not ssh into node {}".format(extra_vars["ssh_host"]))
+            raise YBOpsRecoverableError(
+                "Could not connect to node {}".format(', '.join(server_ports)))
 
         # Verify that the command ran successfully:
-        rc, stdout, stderr = remote_exec_command(extra_vars["ssh_host"], extra_vars["ssh_port"],
-                                                 extra_vars["ssh_user"], args.private_key_file,
-                                                 'ls /tmp/dhclient-script-*',
-                                                 ssh2_enabled=args.ssh2_enabled)
+        rc, stdout, stderr = remote_exec_command(extra_vars,
+                                                 'ls {}/dhclient-script-*'
+                                                 .format(args.remote_tmp_dir))
         if rc:
             raise YBOpsRecoverableError(
                 "Second nic not configured at start up")
@@ -293,28 +296,48 @@ class AbstractCloud(AbstractCommandParser):
 
         return 3
 
-    def append_new_root_cert(self, ssh_options, root_cert_path,
+    def get_cert_fingerprints(self, remote_shell, remote_cert_path):
+        serials = []
+        # This command returns 'SHA1 Fingerprint=<value>' separated by new lines.
+        cmd = "bash -c \"while openssl x509 -fingerprint -noout 2>/dev/null;do :;done < '{}'\""
+        output = remote_shell.run_command(cmd.format(remote_cert_path))
+        for line in output.stdout.splitlines():
+            tokens = line.split('=')
+            if len(tokens) == 2:
+                logging.info("[app] Found fingerprint {} for {}"
+                             .format(tokens[1], remote_cert_path))
+                serials.append(tokens[1])
+        return set(serials)
+
+    def append_new_root_cert(self, connect_options, root_cert_path,
                              certs_location, certs_dir):
-        remote_shell = RemoteShell(ssh_options)
+        remote_shell = RemoteShell(connect_options)
         yb_root_cert_path = os.path.join(certs_dir, self.ROOT_CERT_NAME)
         yb_root_cert_new_path = os.path.join(certs_dir, self.ROOT_CERT_NEW_NAME)
-
         # Give write permissions to cert directory
         remote_shell.run_command('chmod -f 666 {}/* || true'.format(certs_dir))
+        # Delete the new destination cert file if it exists.
+        remote_shell.run_command("rm -f '{}'".format(yb_root_cert_new_path))
         # Copy the new root cert to ca_new.crt
         if certs_location == self.CERT_LOCATION_NODE:
             remote_shell.run_command("cp '{}' '{}'".format(root_cert_path,
                                                            yb_root_cert_new_path))
         if certs_location == self.CERT_LOCATION_PLATFORM:
             remote_shell.put_file(root_cert_path, yb_root_cert_new_path)
-        # Append new cert content to ca.crt
-        remote_shell.run_command(
-            "cat '{}' >> '{}'".format(yb_root_cert_new_path, yb_root_cert_path))
+        # Get the fingerprints of the certs.
+        new_fingerprints = self.get_cert_fingerprints(remote_shell, yb_root_cert_new_path)
+        current_fingerprints = self.get_cert_fingerprints(remote_shell, yb_root_cert_path)
+        if not new_fingerprints.issubset(current_fingerprints):
+            # Append new cert content to ca.crt.
+            remote_shell.run_command(
+                "cat '{}' >> '{}'".format(yb_root_cert_new_path, yb_root_cert_path))
+        else:
+            logging.info("Multi cert is already created")
         # Reset the write permissions
         remote_shell.run_command('chmod 400 {}/*'.format(certs_dir))
 
-    def remove_old_root_cert(self, ssh_options, certs_dir):
-        remote_shell = RemoteShell(ssh_options)
+    def remove_old_root_cert(self, connect_options, certs_dir):
+        remote_shell = RemoteShell(connect_options)
         yb_root_cert_path = os.path.join(certs_dir, self.ROOT_CERT_NAME)
         yb_root_cert_new_path = os.path.join(certs_dir, self.ROOT_CERT_NEW_NAME)
         # Check if ca_new.crt is present, it will be present if
@@ -332,27 +355,36 @@ class AbstractCloud(AbstractCommandParser):
             # Reset the write permissions
             remote_shell.run_command('chmod 400 {}/*'.format(certs_dir))
 
-    def __verify_certs_hostname(self, node_crt_path, ssh_options):
-        host = ssh_options["ssh_host"]
-        remote_shell = RemoteShell(ssh_options)
+    def __verify_certs_hostname(self, node_crt_path, connect_options):
+        host_port_user = get_host_port_user(connect_options)
+        host = host_port_user["host"]
+        remote_shell = RemoteShell(connect_options)
         logging.info("Verifying Subject for certs {}".format(node_crt_path))
 
         # Get readable text version of cert
-        cert_text = remote_shell.run_command(
-            "openssl x509 -noout -text -in {}".format(node_crt_path))
-        if "Certificate:" not in cert_text.stdout:
-            raise YBOpsRuntimeError("Unable to decode the node cert: {}.".format(node_crt_path))
-
+        cert_text = remote_shell.run_command("cat {}".format(node_crt_path)).stdout.encode('utf-8')
         # Extract commonName and subjectAltName from the cert text output
-        regex_out = re.findall(" Subject:.*CN=([\\S]*)$| (DNS|IP Address):([\\S]*?)(,|$)",
-                               cert_text.stdout, re.M)
-        # Hostname will be present in group 0 for CN and in group 1 and 2 for SAN
-        cn_entry = [x[0] for x in regex_out if x[0] != '']
-        san_entry = {(x[1], x[2]) for x in regex_out if x[0] == ''}
+        cert = x509.load_pem_x509_certificate(cert_text)
+        # Extract commonName (CN) and Subject Alternative Name (SAN) from the certificate
+        cn_entry = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
+        # Extract Subject Alternative Name (SAN) from the certificate
+        san_entry = set()
+        try:
+            san = cert.extensions.get_extension_for_oid(
+                ExtensionOID.SUBJECT_ALTERNATIVE_NAME).value
+            # Extract only DNS names, IP addresses from the SAN extension
+            san_entry_dns = san.get_values_for_type(x509.DNSName)
+            if san_entry_dns:
+                san_entry.update(("DNS", x) for x in san_entry_dns)
+            san_entry_ip = san.get_values_for_type(x509.IPAddress)
+            if san_entry_ip:
+                san_entry.update(("IP Address", str(x)) for x in san_entry_ip)
+        except x509.ExtensionNotFound:
+            pass
 
         # Create cert object following the below dictionary format
         # https://docs.python.org/3/library/ssl.html#ssl.SSLSocket.getpeercert
-        cert_cn = {'subject': ((('commonName', cn_entry[0] if len(cn_entry) > 0 else ''),),)}
+        cert_cn = {'subject': ((('commonName', cn_entry[0].value if len(cn_entry) > 0 else ''),),)}
         cert_san = {'subjectAltName': tuple(san_entry)}
 
         # Check if the provided hostname matches with either CN or SAN
@@ -374,17 +406,33 @@ class AbstractCloud(AbstractCommandParser):
                 "'{}' does not match with any entry in CN or SAN of the node cert: {}, "
                 "cert_cn: {}, cert_san: {}".format(host, node_crt_path, cert_cn, cert_san))
 
-    def verify_certs(self, root_crt_path, node_crt_path, ssh_options, verify_hostname=False):
-        remote_shell = RemoteShell(ssh_options)
-        # Verify that both cert are present in FS and have read rights
+    def verify_certs(self, root_crt_path, server_crt_path, server_key_path, connect_options,
+                     verify_hostname=False, perform_extended_validation=False):
+        remote_shell = RemoteShell(connect_options)
+
+        # Verify that the root cert, server certs and keys are not empty strings or None
+        if not root_crt_path or not server_crt_path or not server_key_path:
+            raise YBOpsRuntimeError(
+                "Path to root cert: {}, server cert: {} or key: {} is empty."
+                .format(root_crt_path, server_crt_path, server_key_path))
+
+        # Verify that both cert and the key are present in FS and have read rights
         root_file_verify = remote_shell.run_command_raw("test -r {}".format(root_crt_path))
         if root_file_verify.exited == 1:
             raise YBOpsRuntimeError(
                 "Root cert: {} is absent or is not readable.".format(root_crt_path))
-        node_file_verify = remote_shell.run_command_raw("test -r {}".format(node_crt_path))
-        if node_file_verify.exited == 1:
+
+        cert_file_verify = remote_shell.run_command_raw("test -r {}".format(server_crt_path))
+        if cert_file_verify.exited == 1:
             raise YBOpsRuntimeError(
-                "Node cert: {} is absent or is not readable.".format(node_crt_path))
+                "Server cert: {} is absent or is not readable.".format(server_crt_path))
+
+        key_file_verify = remote_shell.run_command_raw("test -r {}".format(server_key_path))
+        if key_file_verify.exited == 1:
+            raise YBOpsRuntimeError(
+                "Key file: {} is absent or is not readable.".format(server_key_path))
+
+        # Verify OpenSSL is installed
         try:
             remote_shell.run_command('which openssl')
         except YBOpsRuntimeError:
@@ -395,33 +443,68 @@ class AbstractCloud(AbstractCommandParser):
         cert_verify = remote_shell.run_command_raw(
             ("openssl crl2pkcs7 -nocrl -certfile {} -certfile {} "
                 "| openssl pkcs7 -print_certs -text -noout")
-            .format(root_crt_path, node_crt_path))
+            .format(root_crt_path, server_crt_path))
         if cert_verify.exited == 1:
             raise YBOpsRuntimeError(
                 "Provided certs ({}, {}) are not valid."
-                .format(root_crt_path, node_crt_path))
+                .format(root_crt_path, server_crt_path))
 
-        # Verify if the node cert is not expired
+        # Verify if the server cert is not expired
         validity_verify = remote_shell.run_command_raw(
-            "openssl x509 -noout -checkend 86400 -in {}".format(node_crt_path))
+            "openssl x509 -noout -checkend 86400 -in {}".format(server_crt_path))
         if validity_verify.exited == 1:
             raise YBOpsRuntimeError(
-                "Node cert: {} is expired or will expire in one day.".format(node_crt_path))
+                "Node cert: {} is expired or will expire in one day.".format(server_crt_path))
 
-        # Verify if node cert has valid signature
+        # Verify if node cert has valid signature and the certificate chain is valid
         signature_verify = remote_shell.run_command_raw(
-            "openssl verify -CAfile {} {} | egrep error".format(root_crt_path, node_crt_path))
+            "openssl verify -CAfile {} {} | egrep error".format(root_crt_path, server_crt_path))
         if signature_verify.exited != 1:
             raise YBOpsRuntimeError(
-                "Node cert: {} is not signed by the provided root cert: {}.".format(node_crt_path,
+                "Node cert: {} is not signed by the provided root cert: {}.".format(server_crt_path,
                                                                                     root_crt_path))
+        if perform_extended_validation:
+            # Verify both certificates are RSA
+            for crt_path, cert_name in [(root_crt_path, "Root"), (server_crt_path, "Server")]:
+                output = remote_shell.run_command_raw(
+                    f"openssl x509 -in {crt_path} -noout -text | grep -i 'Signature Algorithm'")
+                if output.exited != 0:
+                    raise YBOpsRuntimeError(
+                        f"Failed to read {cert_name.lower()} certificate - {crt_path}.")
+                if "rsa" not in output.stdout.lower():
+                    raise YBOpsRuntimeError(
+                        f"{cert_name} certificate - {crt_path} is not using RSA algorithm.")
+
+            # Verify server key is RSA and at least 2048 bits
+            key_info = remote_shell.run_command_raw(
+                f"openssl rsa -in {server_key_path} -noout -text")
+            if key_info.exited != 0:
+                raise YBOpsRuntimeError(f"Key file: {server_key_path} is not using RSA algorithm.")
+
+            # Extract and verify the key size
+            key_size = int(key_info.stdout.split("Private-Key: (")[1].split()[0].strip())
+            logging.info(f"Key size: {key_size}")
+            if key_size < 2048:
+                raise YBOpsRuntimeError(
+                    f"RSA key size in server cert at {server_key_path} is less than 2048 bits.")
+
+            # Verify key signs the certificate
+            cert_md5 = remote_shell.run_command_raw(
+                "openssl x509 -noout -modulus -in {} | openssl md5".format(server_crt_path)).stdout
+            key_md5 = remote_shell.run_command_raw(
+                "openssl rsa -noout -modulus -in {} | openssl md5".format(
+                    server_key_path)
+                ).stdout
+            if cert_md5 != key_md5:
+                raise YBOpsRuntimeError(
+                    "Server certificate and server key do not match.")
 
         if verify_hostname:
-            self.__verify_certs_hostname(node_crt_path, ssh_options)
+            self.__verify_certs_hostname(server_crt_path, connect_options)
 
     def copy_server_certs(
             self,
-            ssh_options,
+            connect_options,
             root_cert_path,
             server_cert_path,
             server_key_path,
@@ -429,8 +512,9 @@ class AbstractCloud(AbstractCommandParser):
             certs_dir,
             rotate_certs,
             skip_cert_validation):
-        remote_shell = RemoteShell(ssh_options)
-        node_ip = ssh_options["ssh_host"]
+        host_port_user = get_host_port_user(connect_options)
+        remote_shell = RemoteShell(connect_options)
+        node_ip = host_port_user["host"]
         cert_file = 'node.{}.crt'.format(node_ip)
         key_file = 'node.{}.key'.format(node_ip)
         yb_root_cert_path = os.path.join(certs_dir, self.ROOT_CERT_NAME)
@@ -477,8 +561,8 @@ class AbstractCloud(AbstractCommandParser):
                     logging.info(
                         "Skipping host name validation for certs for node {}".format(node_ip))
                     verify_hostname = False
-                self.verify_certs(root_cert_path, server_cert_path,
-                                  ssh_options, verify_hostname)
+                self.verify_certs(root_cert_path, server_cert_path, server_key_path,
+                                  connect_options, verify_hostname)
             if copy_root:
                 remote_shell.run_command("cp '{}' '{}'".format(root_cert_path,
                                                                yb_root_cert_path))
@@ -497,30 +581,31 @@ class AbstractCloud(AbstractCommandParser):
 
     def copy_xcluster_root_cert(
             self,
-            ssh_options,
+            connect_options,
             root_cert_path,
             replication_config_name,
-            producer_certs_dir):
-        remote_shell = RemoteShell(ssh_options)
-        node_ip = ssh_options["ssh_host"]
-        src_root_cert_dir_path = os.path.join(producer_certs_dir, replication_config_name)
-        src_root_cert_path = os.path.join(src_root_cert_dir_path, self.ROOT_CERT_NAME)
+            xcluster_dest_certs_dir):
+        host_port_user = get_host_port_user(connect_options)
+        remote_shell = RemoteShell(connect_options)
+        node_ip = host_port_user["host"]
+        xcluster_root_cert_dir_path = os.path.join(xcluster_dest_certs_dir, replication_config_name)
+        xcluster_root_cert_path = os.path.join(xcluster_root_cert_dir_path, self.ROOT_CERT_NAME)
         logging.info("Moving server cert located at {} to {}:{}.".format(
-            root_cert_path, node_ip, src_root_cert_dir_path))
+            root_cert_path, node_ip, xcluster_root_cert_dir_path))
 
-        remote_shell.run_command('mkdir -p ' + src_root_cert_dir_path)
+        remote_shell.run_command('mkdir -p ' + xcluster_root_cert_dir_path)
         # Give write permissions. If the command fails, ignore.
-        remote_shell.run_command('chmod -f 666 {}/* || true'.format(src_root_cert_dir_path))
-        remote_shell.put_file(root_cert_path, src_root_cert_path)
+        remote_shell.run_command('chmod -f 666 {}/* || true'.format(xcluster_root_cert_dir_path))
+        remote_shell.put_file(root_cert_path, xcluster_root_cert_path)
 
         # Reset the write permission as a sanity check.
-        remote_shell.run_command('chmod 400 {}/*'.format(src_root_cert_dir_path))
+        remote_shell.run_command('chmod 400 {}/*'.format(xcluster_root_cert_dir_path))
 
     def remove_xcluster_root_cert(
             self,
-            ssh_options,
+            connect_options,
             replication_config_name,
-            producer_certs_dir):
+            xcluster_dest_certs_dir):
         def check_rm_result(rm_result):
             if rm_result.exited and rm_result.stderr.find("No such file or directory") == -1:
                 raise YBOpsRuntimeError(
@@ -528,30 +613,31 @@ class AbstractCloud(AbstractCommandParser):
                     "return code '{}' and error '{}'".format(rm_result.stderr.encode('utf-8'),
                                                              rm_result.exited))
 
-        remote_shell = RemoteShell(ssh_options)
-        node_ip = ssh_options["ssh_host"]
-        src_root_cert_dir_path = os.path.join(producer_certs_dir, replication_config_name)
-        src_root_cert_path = os.path.join(src_root_cert_dir_path, self.ROOT_CERT_NAME)
+        host_port_user = get_host_port_user(connect_options)
+        remote_shell = RemoteShell(connect_options)
+        node_ip = host_port_user["host"]
+        xcluster_root_cert_dir_path = os.path.join(xcluster_dest_certs_dir, replication_config_name)
+        xcluster_root_cert_path = os.path.join(xcluster_root_cert_dir_path, self.ROOT_CERT_NAME)
         logging.info("Removing server cert located at {} from server {}.".format(
-            src_root_cert_dir_path, node_ip))
+            xcluster_root_cert_dir_path, node_ip))
 
-        remote_shell.run_command('chmod -f 666 {}/* || true'.format(src_root_cert_dir_path))
-        result = remote_shell.run_command_raw('rm ' + src_root_cert_path)
+        remote_shell.run_command('chmod -f 666 {}/* || true'.format(xcluster_root_cert_dir_path))
+        result = remote_shell.run_command_raw('rm ' + xcluster_root_cert_path)
         check_rm_result(result)
         # Remove the directory only if it is empty.
-        result = remote_shell.run_command_raw('rm -d ' + src_root_cert_dir_path)
+        result = remote_shell.run_command_raw('rm -d ' + xcluster_root_cert_dir_path)
         check_rm_result(result)
         # No need to check the result of this command.
-        remote_shell.run_command_raw('rm -d ' + producer_certs_dir)
+        remote_shell.run_command_raw('rm -d ' + xcluster_dest_certs_dir)
 
     def copy_client_certs(
             self,
-            ssh_options,
+            connect_options,
             root_cert_path,
             client_cert_path,
             client_key_path,
             certs_location):
-        remote_shell = RemoteShell(ssh_options)
+        remote_shell = RemoteShell(connect_options)
         yb_root_cert_path = os.path.join(
             self.YSQLSH_CERT_DIR, self.CLIENT_ROOT_NAME)
         yb_client_cert_path = os.path.join(
@@ -582,8 +668,8 @@ class AbstractCloud(AbstractCommandParser):
         # Reset the write permission as a sanity check.
         remote_shell.run_command('chmod 400 {}/*'.format(self.YSQLSH_CERT_DIR))
 
-    def cleanup_client_certs(self, ssh_options):
-        remote_shell = RemoteShell(ssh_options)
+    def cleanup_client_certs(self, connect_options):
+        remote_shell = RemoteShell(connect_options)
         yb_root_cert_path = os.path.join(
             self.YSQLSH_CERT_DIR, self.CLIENT_ROOT_NAME)
         yb_client_cert_path = os.path.join(
@@ -605,7 +691,7 @@ class AbstractCloud(AbstractCommandParser):
         remote_shell.run_command(
             'chmod 400 {}/* || true'.format(self.YSQLSH_CERT_DIR))
 
-    def create_encryption_at_rest_file(self, extra_vars, ssh_options):
+    def create_encryption_at_rest_file(self, extra_vars, connect_options):
         encryption_key_path = extra_vars["encryption_key_file"]  # Source file path
         key_node_dir = extra_vars["encryption_key_dir"]  # Target file path
         with open(encryption_key_path, "r") as f:
@@ -616,7 +702,7 @@ class AbstractCloud(AbstractCommandParser):
             with open(os.path.join(common_path, key_file), 'wb') as key_out:
                 key_out.write(encryption_key)
             # Copy files over to node
-            remote_shell = RemoteShell(ssh_options)
+            remote_shell = RemoteShell(connect_options)
             remote_shell.run_command('mkdir -p ' + key_node_dir)
             remote_shell.put_file(os.path.join(common_path, key_file),
                                   os.path.join(key_node_dir, key_file))
@@ -643,79 +729,52 @@ class AbstractCloud(AbstractCommandParser):
             return ",".join(["{}{}".format(AbstractCloud.MOUNT_PATH_PREFIX, i)
                              for i in range(args.num_volumes)])
 
-    def expand_file_system(self, args, ssh_options):
-        remote_shell = RemoteShell(ssh_options)
+    def expand_file_system(self, args, connect_options):
+        remote_shell = RemoteShell(connect_options)
         mount_points = self.get_mount_points_csv(args).split(',')
         for mount_point in mount_points:
             logging.info("Expanding file system with mount point: {}".format(mount_point))
             remote_shell.run_command('sudo xfs_growfs {}'.format(mount_point))
 
-    def wait_for_ssh_port(self, private_ip, instance_name, ssh_port):
-        try:
-            sock = None
-            retry_count = 0
-
-            ssh_port = int(ssh_port)
-
-            while retry_count < self.SSH_RETRY_COUNT:
-                logging.info("[app] Waiting for ssh port: {}:{}".format(private_ip, str(ssh_port)))
-                time.sleep(self.SSH_WAIT_SECONDS)
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                result = sock.connect_ex((private_ip, ssh_port))
-
-                if result == 0:
-                    break
-
-                retry_count += 1
-            else:
-                logging.error("[app] Start instance {} exceeded maxRetries!".format(instance_name))
-                raise YBOpsRuntimeError(
-                    "Cannot reach the instance {} after its start at port {}".format(
-                        instance_name, ssh_port)
-                )
-        finally:
-            if sock:
-                sock.close()
-
-    def wait_for_ssh_ports(self, private_ip, instance_name, ssh_ports):
+    def wait_for_server_ports(self, private_ip, instance_name, server_ports):
         sock = None
         retry_count = 0
 
-        while True:
-            logging.info("[app] Waiting for ssh ports: {}:{}".format(private_ip, str(ssh_ports)))
-            # Try connecting with the given ssh ports in succession.
-            for ssh_port in ssh_ports:
-                ssh_port = int(ssh_port)
-                logging.info("[app] Attempting socket connection to ssh port: {}:{}".format(
-                             private_ip, str(ssh_port)))
+        while retry_count < self.SERVER_RETRY_COUNT:
+            logging.info("[app] Waiting for server ports: {}:{}".format(
+                         private_ip, str(server_ports)))
+            # Sleep just as a precaution
+            time.sleep(self.SERVER_WAIT_SECONDS)
+            # Try connecting with the given server ports in succession.
+            for server_port in server_ports:
+                server_port = int(server_port)
+                logging.info("[app] Attempting socket connection to server port: {}:{}".format(
+                             private_ip, str(server_port)))
                 try:
                     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    sock.settimeout(self.SSH_TIMEOUT_SECONDS)
-                    result = sock.connect_ex((private_ip, ssh_port))
+                    sock.settimeout(self.SERVER_TIMEOUT_SECONDS)
+                    result = sock.connect_ex((private_ip, server_port))
 
                     if result == 0:
-                        logging.info("[app] Connected to {}:{}".format(private_ip, str(ssh_port)))
-                        return ssh_port
+                        logging.info("[app] Connected to {}:{}".format(
+                                     private_ip, str(server_port)))
+                        return server_port
                 finally:
                     if sock:
                         sock.close()
             # Increment retry only after attempts on all ports fail.
             retry_count += 1
-            if retry_count < self.SSH_RETRY_COUNT:
-                time.sleep(self.SSH_WAIT_SECONDS)
-            else:
-                logging.error("[app] Start instance {} exceeded maxRetries!".format(instance_name))
-                raise YBOpsRuntimeError(
-                    "Cannot reach the instance {} after its start at ports {}".format(
-                        instance_name, str(ssh_ports))
-                )
 
-    def wait_for_startup_script(self, args, host_info):
+        logging.error("[app] Start instance {} exceeded maxRetries!".format(instance_name))
+        raise YBOpsRecoverableError(
+            "Cannot reach the instance {} after its start at ports {}".format(
+                instance_name, str(server_ports))
+        )
+
+    def wait_for_startup_script(self, args, connect_options):
         if self._wait_for_startup_script_command:
             rc, stdout, stderr = remote_exec_command(
-                host_info['ssh_host'], host_info['ssh_port'],
-                host_info['ssh_user'], args.private_key_file,
-                self._wait_for_startup_script_command, ssh2_enabled=args.ssh2_enabled)
+                connect_options, self._wait_for_startup_script_command)
             if rc != 0:
                 logging.error(
                     'Failed to wait for startup script completion on {}:'.format(
@@ -728,13 +787,9 @@ class AbstractCloud(AbstractCommandParser):
 
         return True
 
-    def verify_startup_script(self, args, host_info):
+    def verify_startup_script(self, args, connect_options):
         cmd = "cat /etc/yb-boot-script-complete"
-        rc, stdout, stderr = remote_exec_command(
-            host_info['ssh_host'], host_info['ssh_port'],
-            host_info['ssh_user'], args.private_key_file, cmd,
-            ssh2_enabled=args.ssh2_enabled
-        )
+        rc, stdout, stderr = remote_exec_command(connect_options, cmd)
         if rc != 0:
             raise YBOpsRecoverableError(
                 'Failed to read /etc/yb-boot-script-complete {}\nSTDOUT: {}\nSTDERR: {}\n'.format(
@@ -748,5 +803,16 @@ class AbstractCloud(AbstractCommandParser):
     def get_console_output(self, args):
         return ''
 
-    def reboot_instance(self, args, ssh_ports):
+    def reboot_instance(self, args, server_ports):
+        pass
+
+    def hard_reboot_instance(self, args, server_ports):
+        pass
+
+    def normalize_instance_state(self, instance_state):
+        """Map the cloud specific instance state to the generic normalized instance state.
+        """
+        return InstanceState.UNKNOWN
+
+    def update_user_data(self, args):
         pass

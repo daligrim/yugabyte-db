@@ -14,15 +14,15 @@ package org.yb.pgsql;
 
 import org.junit.Test;
 import org.junit.runner.RunWith;
-import org.yb.util.YBTestRunnerNonTsanOnly;
+import org.yb.YBTestRunner;
 
 import java.util.Map;
 
 /**
  * Runs the pg_regress test suite on YB code.
  */
-@RunWith(value=YBTestRunnerNonTsanOnly.class)
-public class TestPgRegressMisc extends BasePgSQLTest {
+@RunWith(value=YBTestRunner.class)
+public class TestPgRegressMisc extends BasePgRegressTest {
   @Override
   protected Map<String, String> getMasterFlags() {
     Map<String, String> flagMap = super.getMasterFlags();
@@ -43,5 +43,20 @@ public class TestPgRegressMisc extends BasePgSQLTest {
   @Test
   public void testPgRegressMiscSerial() throws Exception {
     runPgRegressTest("yb_misc_serial_schedule");
+  }
+
+  @Test
+  public void testPgRegressMiscSerial2() throws Exception {
+    runPgRegressTest("yb_misc_serial2_schedule");
+  }
+
+  @Test
+  public void testPgRegressMiscSerial3() throws Exception {
+    runPgRegressTest("yb_misc_serial3_schedule");
+  }
+
+  @Test
+  public void testPgRegressMiscSerial4() throws Exception {
+    runPgRegressTest("yb_misc_serial4_schedule");
   }
 }

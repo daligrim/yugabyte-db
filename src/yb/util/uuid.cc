@@ -17,6 +17,7 @@
 #include <boost/uuid/detail/sha1.hpp>
 #include <boost/uuid/nil_generator.hpp>
 #include <boost/uuid/random_generator.hpp>
+#include <boost/uuid/string_generator.hpp>
 #include <boost/uuid/uuid_io.hpp>
 
 #include "yb/gutil/endian.h"
@@ -31,10 +32,6 @@ namespace yb {
 
 Uuid::Uuid() {
   memset(&boost_uuid_, 0, sizeof(boost_uuid_));
-}
-
-Uuid::Uuid(const Uuid& other) {
-  boost_uuid_ = other.boost_uuid_;
 }
 
 Uuid::Uuid(const uuid_t copy) {
@@ -123,6 +120,10 @@ std::string Uuid::ToHexString() const {
 }
 
 Result<Uuid> Uuid::FromHexString(const std::string& hex_string) {
+  if (hex_string.empty()) {
+    return Uuid::Nil();
+  }
+
   constexpr size_t kInputLen = kUuidSize * 2;
   if (hex_string.length() != kInputLen) {
     return STATUS_SUBSTITUTE(InvalidArgument, "Size of hex_string is invalid: $0, expected: $1",
@@ -234,54 +235,54 @@ Status Uuid::IsTimeUuid() const {
                            "Not a type 1 UUID. Current type: $0", boost_uuid_.version());
 }
 
-bool Uuid::operator<(const Uuid& other) const {
+bool operator<(const Uuid& lhs, const Uuid& rhs) {
   // First compare the version, variant and then the timestamp bytes.
-  if (boost_uuid_.version() < other.boost_uuid_.version()) {
+  if (lhs.boost_uuid_.version() < rhs.boost_uuid_.version()) {
     return true;
-  } else if (boost_uuid_.version() > other.boost_uuid_.version()) {
+  } else if (lhs.boost_uuid_.version() > rhs.boost_uuid_.version()) {
     return false;
   }
-  if (boost_uuid_.version() == boost::uuids::uuid::version_time_based) {
+  if (lhs.boost_uuid_.version() == boost::uuids::uuid::version_time_based) {
     // Compare the hi timestamp bits.
-    for (size_t i = 6; i < kUuidMsbSize; i++) {
-      if (boost_uuid_.data[i] < other.boost_uuid_.data[i]) {
+    for (size_t i = 6; i < Uuid::kUuidMsbSize; i++) {
+      if (lhs.boost_uuid_.data[i] < rhs.boost_uuid_.data[i]) {
         return true;
-      } else if (boost_uuid_.data[i] > other.boost_uuid_.data[i]) {
+      } else if (lhs.boost_uuid_.data[i] > rhs.boost_uuid_.data[i]) {
         return false;
       }
     }
     // Compare the mid timestamp bits.
     for (int i = 4; i < 6; i++) {
-      if (boost_uuid_.data[i] < other.boost_uuid_.data[i]) {
+      if (lhs.boost_uuid_.data[i] < rhs.boost_uuid_.data[i]) {
         return true;
-      } else if (boost_uuid_.data[i] > other.boost_uuid_.data[i]) {
+      } else if (lhs.boost_uuid_.data[i] > rhs.boost_uuid_.data[i]) {
         return false;
       }
     }
     // Compare the low timestamp bits.
     for (int i = 0; i < 4; i++) {
-      if (boost_uuid_.data[i] < other.boost_uuid_.data[i]) {
+      if (lhs.boost_uuid_.data[i] < rhs.boost_uuid_.data[i]) {
         return true;
-      } else if (boost_uuid_.data[i] > other.boost_uuid_.data[i]) {
+      } else if (lhs.boost_uuid_.data[i] > rhs.boost_uuid_.data[i]) {
         return false;
       }
     }
   } else {
     // Compare all the other bits
-    for (size_t i = 0; i < kUuidMsbSize; i++) {
-      if (boost_uuid_.data[i] < other.boost_uuid_.data[i]) {
+    for (size_t i = 0; i < Uuid::kUuidMsbSize; i++) {
+      if (lhs.boost_uuid_.data[i] < rhs.boost_uuid_.data[i]) {
         return true;
-      } else if (boost_uuid_.data[i] > other.boost_uuid_.data[i]) {
+      } else if (lhs.boost_uuid_.data[i] > rhs.boost_uuid_.data[i]) {
         return false;
       }
     }
   }
 
   // Then compare the remaining bytes.
-  for (size_t i = kUuidMsbSize; i < kUuidSize; i++) {
-    if (boost_uuid_.data[i] < other.boost_uuid_.data[i]) {
+  for (size_t i = Uuid::kUuidMsbSize; i < kUuidSize; i++) {
+    if (lhs.boost_uuid_.data[i] < rhs.boost_uuid_.data[i]) {
       return true;
-    } else if (boost_uuid_.data[i] > other.boost_uuid_.data[i]) {
+    } else if (lhs.boost_uuid_.data[i] > rhs.boost_uuid_.data[i]) {
       return false;
     }
   }
@@ -337,7 +338,19 @@ Result<Uuid> Uuid::FromString(const std::string& strval) {
   try {
     return Uuid(boost::lexical_cast<boost::uuids::uuid>(strval));
   } catch (std::exception& e) {
-    return STATUS(Corruption, "Couldn't read Uuid from string!");
+    return STATUS(Corruption, "Couldn't read Uuid from string", strval);
+  }
+}
+
+Result<Uuid> Uuid::FromHexStringBigEndian(const std::string& strval) {
+  if (strval.empty()) {
+    return Uuid::Nil();
+  }
+  try {
+    boost::uuids::string_generator uuid_gen;
+    return Uuid(uuid_gen(strval));
+  } catch (std::exception& e) {
+    return STATUS(Corruption, "Couldn't read Uuid from string", strval);
   }
 }
 

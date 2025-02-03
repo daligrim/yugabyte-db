@@ -1,101 +1,70 @@
 package handlers
+
 import (
+    "apiserver/cmd/server/helpers"
     "apiserver/cmd/server/models"
-    "github.com/labstack/echo/v4"
+    "fmt"
     "net/http"
+    "github.com/labstack/echo/v4"
 )
 
-// CreateBackup - Create backups
-func (c *Container) CreateBackup(ctx echo.Context) error {
-    return ctx.JSON(http.StatusOK, models.HelloWorld {
-        Message: "Hello World",
-    })
-}
+func (c *Container) GetBackupDetails(ctx echo.Context) error {
+    var operationType = "backup"
+    lockfilelistFuture := make(chan helpers.LockFileListFuture, 1)
+    c.helper.ListLockFilesFuture(helpers.DataDir, operationType, lockfilelistFuture)
+    lockfilelistResult := <-lockfilelistFuture
+    if lockfilelistResult.Error != nil {
+        return ctx.String(http.StatusInternalServerError,
+                    fmt.Sprintf("Failed to list lock files: %v", lockfilelistResult.Error))
+    }
+    if len(lockfilelistResult.Result) == 0 {
+        return ctx.JSON(http.StatusOK, []interface{}{})
+    }
+    var lockFileDetails helpers.LockFileDetails
+    lockFileInfoFutures := make([]chan helpers.LockFileInfoFuture,
+                                                        len(lockfilelistResult.Result))
+    taskProgressInfoFutures := make([]chan helpers.TaskProgressInfoFuture,
+                                                        len(lockfilelistResult.Result))
 
+    for i, lockFilePath := range lockfilelistResult.Result {
+        lockFileInfoFutures[i] = make(chan helpers.LockFileInfoFuture)
+        // Fetch lock file info asynchronously
+        go c.helper.GetLockFileInfoFuture(lockFilePath, lockFileInfoFutures[i])
+    }
+    // Asynchronously start task progress
+    for i := range lockfilelistResult.Result {
+        lockFileInfo := <-lockFileInfoFutures[i]
+        if lockFileInfo.Error != nil {
+            return ctx.String(http.StatusInternalServerError,
+                    fmt.Sprintf("Failed to parse lock files: %v", lockFileInfo.Error))
+        }
+        c.logger.Infof("Successfully read lock file for database/keyspace: %s",
+                                                       lockFileInfo.DatabaseKeyspace)
+        lockFileDetails.Data = append(lockFileDetails.Data, lockFileInfo)
+        taskProgressInfoFutures[i] = make(chan helpers.TaskProgressInfoFuture)
+        go c.helper.GetYBCTaskProgress(lockFileInfo.YbcTaskID, lockFileInfo.TserverIP,
+                                                                taskProgressInfoFutures[i])
+    }
 
-// DeleteBackup - Delete a backup
-func (c *Container) DeleteBackup(ctx echo.Context) error {
-    return ctx.JSON(http.StatusOK, models.HelloWorld {
-        Message: "Hello World",
-    })
-}
-
-
-// DeleteClusterBackups - Submit task to delete all backups of a cluster
-func (c *Container) DeleteClusterBackups(ctx echo.Context) error {
-    return ctx.JSON(http.StatusOK, models.HelloWorld {
-        Message: "Hello World",
-    })
-}
-
-
-// DeleteSchedule - Delete a schedule
-func (c *Container) DeleteSchedule(ctx echo.Context) error {
-    return ctx.JSON(http.StatusOK, models.HelloWorld {
-        Message: "Hello World",
-    })
-}
-
-
-// EditBackupSchedule - Edit the backup schedule
-func (c *Container) EditBackupSchedule(ctx echo.Context) error {
-    return ctx.JSON(http.StatusOK, models.HelloWorld {
-        Message: "Hello World",
-    })
-}
-
-
-// GetBackup - Get a backup
-func (c *Container) GetBackup(ctx echo.Context) error {
-    return ctx.JSON(http.StatusOK, models.HelloWorld {
-        Message: "Hello World",
-    })
-}
-
-
-// GetSchedule - Get a schedule
-func (c *Container) GetSchedule(ctx echo.Context) error {
-    return ctx.JSON(http.StatusOK, models.HelloWorld {
-        Message: "Hello World",
-    })
-}
-
-
-// ListBackups - List backups
-func (c *Container) ListBackups(ctx echo.Context) error {
-    return ctx.JSON(http.StatusOK, models.HelloWorld {
-        Message: "Hello World",
-    })
-}
-
-
-// ListRestores - List restore operations
-func (c *Container) ListRestores(ctx echo.Context) error {
-    return ctx.JSON(http.StatusOK, models.HelloWorld {
-        Message: "Hello World",
-    })
-}
-
-
-// ListSchedules - List schedules
-func (c *Container) ListSchedules(ctx echo.Context) error {
-    return ctx.JSON(http.StatusOK, models.HelloWorld {
-        Message: "Hello World",
-    })
-}
-
-
-// RestoreBackup - Restore a backup to a Cluster
-func (c *Container) RestoreBackup(ctx echo.Context) error {
-    return ctx.JSON(http.StatusOK, models.HelloWorld {
-        Message: "Hello World",
-    })
-}
-
-
-// ScheduleBackup - Schedule a backup
-func (c *Container) ScheduleBackup(ctx echo.Context) error {
-    return ctx.JSON(http.StatusOK, models.HelloWorld {
-        Message: "Hello World",
-    })
+    var response models.BackupResponse
+    for i, lockFileInfo := range lockFileDetails.Data {
+        taskProgressInfo := <-taskProgressInfoFutures[i]
+        if taskProgressInfo.Error != nil {
+            return ctx.String(http.StatusInternalServerError,
+                fmt.Sprintf("Failed to get task progress: %v", taskProgressInfo.Error))
+        }
+        response.Backup = append(response.Backup, models.BackupDetails{
+            YbcTaskId:        lockFileInfo.YbcTaskID,
+            TserverIp:        lockFileInfo.TserverIP,
+            UserOperation:    lockFileInfo.UserOperation,
+            YbdbApi:          lockFileInfo.YbdbAPI,
+            DatabaseKeyspace: lockFileInfo.DatabaseKeyspace,
+            TaskStartTime:    lockFileInfo.TaskStartTime,
+            TaskStatus:       taskProgressInfo.FinalStatus,
+            TimeTaken:        taskProgressInfo.TimeTaken,
+            BytesTransferred: taskProgressInfo.BytesTransferred,
+            ActualSize:       taskProgressInfo.ActualSize,
+        })
+    }
+    return ctx.JSON(http.StatusOK, response)
 }

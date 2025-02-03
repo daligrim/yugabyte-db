@@ -10,12 +10,13 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_MASTER_YSQL_TABLESPACE_MANAGER_H
-#define YB_MASTER_YSQL_TABLESPACE_MANAGER_H
+#pragma once
 
 #include <unordered_map>
 
 #include <boost/optional/optional.hpp>
+
+#include "yb/common/common_net.pb.h"
 
 #include "yb/gutil/ref_counted.h"
 
@@ -26,13 +27,6 @@
 namespace yb {
 
 namespace master {
-
-// Maps tablespace id -> placement policies.
-typedef std::unordered_map<TablespaceId, boost::optional<ReplicationInfoPB>>
-    TablespaceIdToReplicationInfoMap;
-
-// Maps table id -> tablespace id.
-typedef std::unordered_map<TableId, boost::optional<TablespaceId>> TableToTablespaceIdMap;
 
 // Number of default tablespaces created by PG upon startup. Postgres creates 'pg_default'
 // which is the default tablespace associated with tables/indexes unless the user explicitly
@@ -82,4 +76,3 @@ class YsqlTablespaceManager {
 
 }  // namespace master
 }  // namespace yb
-#endif // YB_MASTER_YSQL_TABLESPACE_MANAGER_H

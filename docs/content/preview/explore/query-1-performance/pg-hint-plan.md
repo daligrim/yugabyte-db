@@ -3,7 +3,6 @@ title: Optimize YSQL queries using pg_hint_plan
 linkTitle: Optimize YSQL queries
 description: Query optimization of YSQL queries using pg_hint_plan
 headerTitle: Optimize YSQL queries using pg_hint_plan
-image: /images/section_icons/index/develop.png
 menu:
   preview:
     identifier: pg_hint_plan
@@ -20,13 +19,15 @@ pg_hint_plan makes it possible to tweak execution plans using "hints", which are
 
 {{< warning title="Revisit your hint plans" >}}
 
-To use `pg_hint_plan` effectively, you need thorough knowledge of how your application will be deployed. Hint plans also need to be revisited when the database grows or the deployment changes to ensure that the plan is not limiting performance rather than optimizing it.
+To use `pg_hint_plan` effectively, you need a thorough knowledge of how your application will be deployed. Hint plans also need to be revisited when the database grows or the deployment changes to ensure that the plan is not limiting performance rather than optimizing it.
 
 {{< /warning >}}
 
+{{% explore-setup-single %}}
+
 ## Configure pg_hint_plan
 
-pg_hint_plan is pre-configured, and enabled by default. The following GUC (Grand Unified Configuration) parameters control pg_hint_plan:
+pg_hint_plan is pre-configured, and enabled by default. The following YSQL configuration parameters control pg_hint_plan:
 
 | Option | Description | Default |
 | :----- | :---------- | :------ |
@@ -39,8 +40,12 @@ pg_hint_plan is pre-configured, and enabled by default. The following GUC (Grand
 To enable pg_hint_plan, run the following command:
 
 ```sql
-SET pg_hint_plan.enable_hint=ON;
+yugabyte=# SET pg_hint_plan.enable_hint=ON;
 ```
+
+{{<note title="Enable pg_hint_plan for all sessions">}}
+You can enable `pg_hint_plan` in different levels like [all PostgreSQL options can](../../../reference/configuration/yb-tserver/#postgresql-server-options).
+{{</note>}}
 
 ### Turn on debug output
 
@@ -84,7 +89,7 @@ yugabyte-#   ORDER BY a.aid;
 
 ## Using pg_hint_plan
 
-The following table and index definitions are used in the examples that follow to illustrate the features of pg_hint_plan.
+The following table and index definitions are used in the examples that follow to illustrate the features of pg_hint_plan:
 
 ```sql
 CREATE TABLE t1 (id int PRIMARY KEY, val int);
@@ -152,11 +157,12 @@ Scan method hints enforce the scanning method on tables when specified along wit
 | NoIndexOnlyScan(table) | Do not enable IndexOnlyScan on the table. |
 | IndexScanRegexp(table regex) | Enable index scan on the table whose indices match with the regular expression defined by `regex`. |
 | IndexOnlyScanRegexp(table regex) | Do not enable index scan on the table whose indices match with the regular expression defined by `regex`. |
+| BitmapScan(table) | Enable BitmapScan on the table. |
 
 In the following example, the hint `/*+SeqScan(t2)*/` allows table `t2` to be scanned using `SeqScan`.
 
 ``` sql
-yugabyte=# /*+SeqScan(t2)*/
+/*+SeqScan(t2)*/
 EXPLAIN (COSTS false) SELECT * FROM t1, t2 WHERE t1.id = t2.id;
 ```
 
@@ -180,8 +186,8 @@ error hint:
 In the following example, due to the hint `/*+SeqScan(t1)IndexScan(t2)*/`, `t2` is scanned using IndexScan, and `t1` is scanned using `SeqScan`.
 
 ``` sql
-yugabyte=# /*+SeqScan(t1)IndexScan(t2)*/
-yugabyte-# EXPLAIN (COSTS false) SELECT * FROM t1, t2 WHERE t1.id = t2.id;
+/*+SeqScan(t1)IndexScan(t2)*/
+EXPLAIN (COSTS false) SELECT * FROM t1, t2 WHERE t1.id = t2.id;
 ```
 
 ```output
@@ -205,8 +211,8 @@ error hint:
 You can also use hint phrases to instruct the query planner not to use a specific type of scan. As shown in the following example, the hint `/*+NoIndexScan(t1)*/` restricts `IndexScan` on table `t1`.
 
 ``` sql
-yugabyte=# /*+NoIndexScan(t1)*/
-yugabyte-# EXPLAIN (COSTS false) SELECT * FROM t1, t2 WHERE t1.id = t2.id;
+/*+NoIndexScan(t1)*/
+EXPLAIN (COSTS false) SELECT * FROM t1, t2 WHERE t1.id = t2.id;
 ```
 
 ```output
@@ -247,8 +253,8 @@ yugabyte=# EXPLAIN (COSTS false) SELECT * FROM t3 WHERE t3.id = 1;
 **Query using a secondary index**:
 
 ``` sql
-yugabyte=# /*+IndexScan(t3 t3_id2)*/
-yugabyte-# EXPLAIN (COSTS false) SELECT * FROM t3 WHERE t3.id = 1;
+/*+IndexScan(t3 t3_id2)*/
+EXPLAIN (COSTS false) SELECT * FROM t3 WHERE t3.id = 1;
 ```
 
 ```output
@@ -270,8 +276,8 @@ error hint:
 **Query reverts to `SeqScan` as none of the indices can be used**:
 
 ``` sql
-yugabyte=# /*+IndexScan(t3 no_exist)*/
-yugabyte-# EXPLAIN (COSTS false) SELECT * FROM t3 WHERE t3.id = 1;
+/*+IndexScan(t3 no_exist)*/
+EXPLAIN (COSTS false) SELECT * FROM t3 WHERE t3.id = 1;
 ```
 
 ```output
@@ -293,8 +299,8 @@ error hint:
 **Query with a selective list of indexes**:
 
 ``` sql
-yugabyte=# /*+IndexScan(t3 t3_id1 t3_id2)*/
-yugabyte-# EXPLAIN (COSTS false) SELECT * FROM t3 WHERE t3.id = 1;
+/*+IndexScan(t3 t3_id1 t3_id2)*/
+EXPLAIN (COSTS false) SELECT * FROM t3 WHERE t3.id = 1;
 ```
 
 ```output
@@ -325,6 +331,7 @@ Join method hints enforce the join methods for SQL statements. Using pg_hint_pla
 | NoHashJoin(t1 t2 t3 ...) | Do not join t1, t2, and t3 using HashJoin.|
 | NestLoop(t1 t2 t3 ...) | Join t1, t2, and t3 using NestLoop join. |
 | NoNestLoop(t1 t2 t3 ...) | Do not join t1, t2, and t3 using NestLoop join.|
+<!-- | [YbBatchedNL](../../ysql-language-features/join-strategies/#batched-nested-loop-join-bnl)(t1 t2) | Join t1 and t2 using YbBatchedNL join.| -->
 
 ```sql
 /*+HashJoin(t1 t2)*/
@@ -374,9 +381,9 @@ error hint:
 In this example, the first query uses a `HashJoin` on tables `t1` and `t2` respectively while the second query uses a `NestedLoop` join for the same. The required join methods are specified in their respective hint phrases. You can use multiple hint phrases to combine join methods and scan methods.
 
 ```sql
-yugabyte=# /*+NestLoop(t2 t3 t1) SeqScan(t3) SeqScan(t2)*/
-yugabyte-# EXPLAIN (COSTS false) SELECT * FROM t1, t2, t3
-yugabyte-# WHERE t1.id = t2.id AND t1.id = t3.id;
+/*+NestLoop(t2 t3 t1) SeqScan(t3) SeqScan(t2)*/
+EXPLAIN (COSTS false) SELECT * FROM t1, t2, t3
+WHERE t1.id = t2.id AND t1.id = t3.id;
 ```
 
 ```output
@@ -409,7 +416,7 @@ In the preceding example, the hint `/*+NestLoop(t2 t3 t4 t1) SeqScan(t3) SeqScan
 Joining order hints execute joins in a particular order, as enumerated in a hint phrase's parameter list. You can enforce joining in a specific order using the `Leading` hint.
 
 ```sql
-yugabyte=# /*+Leading(t1 t2 t3)*/
+/*+Leading(t1 t2 t3)*/
 EXPLAIN (COSTS false) SELECT * FROM t1, t2, t3 WHERE t1.id = t2.id AND t1.id = t3.id;
 ```
 
@@ -427,7 +434,7 @@ EXPLAIN (COSTS false) SELECT * FROM t1, t2, t3 WHERE t1.id = t2.id AND t1.id = t
 ```
 
 ```sql
-yugabyte=# /*+Leading(t2 t3 t1)*/
+/*+Leading(t2 t3 t1)*/
 EXPLAIN (COSTS false) SELECT * FROM t1, t2, t3 WHERE t1.id = t2.id AND t1.id = t3.id;
 ```
 
@@ -446,49 +453,22 @@ EXPLAIN (COSTS false) SELECT * FROM t1, t2, t3 WHERE t1.id = t2.id AND t1.id = t
 
 The joining order in the first query is `/*+Leading(t1 t2 t3)*/`, whereas the joining order for the second query is `/*+Leading(t2 t3 t1)*/`. You can see that the query plan's order of execution follows the joining order specified in the parameter lists of the hint phrases.
 
-### Setting working memory
-
-You can leverage the `work_mem` setting in PostgreSQL to improve the performance of slow queries that sort, join, or aggregate large sets of table rows. For a detailed description of the implications, refer to [Tuning work_mem Setting in PostgreSQL to Speed Up Slow SQL Queries](https://andreigridnev.com/blog/2016-04-16-increase-work_mem-parameter-in-postgresql-to-make-expensive-queries-faster/).
-
-The following example shows how to enable `work_mem` as a part of a hint plan.
-
-``` sql
-yugabyte=# /*+Set(work_mem "1MB")*/
-EXPLAIN (COSTS false) SELECT * FROM t1, t2 WHERE t1.id = t2.id;
-```
-
-```output
-LOG:  pg_hint_plan:
-used hint:
-Set(work_mem 1MB)
-not used hint:
-duplication hint:
-error hint:
-
-              QUERY PLAN
---------------------------------------
- Nested Loop
-   ->  Seq Scan on t1
-   ->  Index Scan using t2_pkey on t2
-         Index Cond: (id = t1.id)
-(4 rows)
-```
-
 ### Configuring the planner method
 
 Planner method configuration parameters provide a crude method of influencing the query plans chosen by the query optimizer. If the default plan chosen by the optimizer for a particular query is not optimal, a temporary solution is to use one of these configuration parameters to force the optimizer to choose a different plan. YugabyteDB supports the following configuration parameters:
 
-* enable_hashagg
-* enable_hashjoin
-* enable_indexscan
-* enable_indexonlyscan
-* enable_material
-* enable_nestloop
-* enable_partition_pruning
-* enable_partitionwise_join
-* enable_partitionwise_aggregate
-* enable_seqscan
-* enable_sort
+- enable_bitmapscan
+- enable_hashagg
+- enable_hashjoin
+- enable_indexscan
+- enable_indexonlyscan
+- enable_material
+- enable_nestloop
+- enable_partition_pruning
+- enable_partitionwise_join
+- enable_partitionwise_aggregate
+- enable_seqscan
+- enable_sort
 
 pg_hint_plan leverages the planner method configuration by embedding these configuration parameters in each query's comment. Consider the following example:
 
@@ -507,7 +487,7 @@ yugabyte=# EXPLAIN (COSTS false) SELECT * FROM t1, t2 WHERE t1.id = t2.id;
 ```
 
 ```sql
-yugabyte=# /*+Set(enable_indexscan off)*/
+/*+Set(enable_indexscan off)*/
 EXPLAIN (COSTS false) SELECT * FROM t1, t2 WHERE t1.id = t2.id;
 ```
 
@@ -529,9 +509,9 @@ error hint:
 (5 rows)
 ```
 
-The first query uses an `IndexScan` in table `t2`. However, when you add `/*+Set(enable_indexscan off)*/`, the second query uses `SeqScan` in table `t2`. You can combine any GUC parameters in the hint phrases of your SQL queries.
+The first query uses an `IndexScan` in table `t2`. However, when you add `/*+Set(enable_indexscan off)*/`, the second query uses `SeqScan` in table `t2`. You can combine any parameters in the hint phrases of your SQL queries.
 
-For a more detailed explanation of the Planner Method Configuration and a complete list of available GUC parameters, refer to [Planner Method Configuration](https://www.postgresql.org/docs/11/runtime-config-query.html#RUNTIME-CONFIG-QUERY-ENABLE) in the PostgreSQL documentation.
+For a more detailed explanation of the Planner Method Configuration and a complete list of available configuration parameters, refer to [Planner Method Configuration](https://www.postgresql.org/docs/15/runtime-config-query.html#RUNTIME-CONFIG-QUERY-ENABLE) in the PostgreSQL documentation.
 
 ## Using the hint table
 
@@ -541,7 +521,7 @@ To enable the hint table, run the following commands:
 
  ```sql
  /* Create the hint_plan.hints table */
- CREATE EXTENSION pg_hint_plan;
+CREATE EXTENSION pg_hint_plan;
 
  /*
   * Tell pg_hint_plan to check the hint table for
@@ -596,6 +576,6 @@ This example inserts queries into the `hint_plan.hints` table, with placeholders
 ## Learn more
 
 - Refer to [Get query statistics using pg_stat_statements](../pg-stat-statements/) to track planning and execution of all the SQL statements.
-- Refer to [View live queries with pg_stat_activity](../pg-stat-activity/) to analyze live queries.
-- Refer to [View COPY progress with pg_stat_progress_copy](../pg-stat-progress-copy/) to track the COPY operation status.
+- Refer to [View live queries with pg_stat_activity](../../observability/pg-stat-activity/) to analyze live queries.
+- Refer to [View COPY progress with pg_stat_progress_copy](../../observability/pg-stat-progress-copy/) to track the COPY operation status.
 - Refer to [Analyze queries with EXPLAIN](../explain-analyze/) to optimize YSQL's EXPLAIN and EXPLAIN ANALYZE queries.

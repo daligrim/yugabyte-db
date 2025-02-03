@@ -1,13 +1,13 @@
 // Copyright (c) YugaByte, Inc.
 
-import React, { Component, Fragment } from 'react';
+import { Component, Fragment } from 'react';
 import PropTypes from 'prop-types';
 import 'react-bootstrap-table/css/react-bootstrap-table.css';
 import { YBModal, YBButton } from '../../common/forms/fields';
 import { YBCodeBlock, YBCopyButton } from '../../common/descriptors';
 import { isValidObject, isEmptyObject } from '../../../utils/ObjectUtils';
 import { Tab, Tabs } from 'react-bootstrap';
-import { isKubernetesUniverse } from '../../../utils/UniverseUtils';
+import { getIsKubernetesUniverse } from '../../../utils/UniverseUtils';
 
 import './UniverseAppsModal.scss';
 
@@ -18,7 +18,7 @@ const appTypes = [
     title: 'YSQL',
     description:
       'This app writes out 2M unique string keys each with a string value. There are multiple ' +
-      'readers and writers that write 2M keys and read 1.5M keys . ' + 
+      'readers and writers that write 2M keys and read 1.5M keys . ' +
       'To write the keys and read them indefinitely set num_reads & num_writes to -1 . Note that the number of ' +
       'reads and writes to perform can be specified as a parameter.',
     options: [
@@ -36,8 +36,8 @@ const appTypes = [
     description:
       'This app writes out 2M unique string keys ' +
       'each with a string value. There are multiple readers and writers that update 2M ' +
-      'keys and read 1.5M keys. '  +
-      'To update the keys and read them indefinitely set num_reads & num_writes to -1 .' + 
+      'keys and read 1.5M keys. ' +
+      'To update the keys and read them indefinitely set num_reads & num_writes to -1 .' +
       'Note that the number of reads and writes to ' +
       'perform can be specified as a parameter.',
     options: [
@@ -66,7 +66,7 @@ export default class UniverseAppsModal extends Component {
       modal: { showModal, visibleModal }
     } = this.props;
     const enableYSQL = universeDetails.clusters[0].userIntent.enableYSQL;
-    const isItKubernetesUniverse = isKubernetesUniverse(this.props.currentUniverse);
+    const isItKubernetesUniverse = getIsKubernetesUniverse(this.props.currentUniverse);
     const nodeDetails = universeDetails.nodeDetailsSet
       ? universeDetails.nodeDetailsSet.filter((nodeDetails) => nodeDetails.isTserver)
       : [];
@@ -135,7 +135,7 @@ export default class UniverseAppsModal extends Component {
       }
 
       const appOptions = appType.options.map(function (option, idx) {
-        const option_data = Array.shift(Object.entries(option));
+        const option_data = Object.entries(option).shift();
         return <p key={idx}>--{option_data[0] + ' ' + option_data[1]}</p>;
       });
 
@@ -143,9 +143,15 @@ export default class UniverseAppsModal extends Component {
         ? 'kubectl run --image=yugabytedb/yb-sample-apps yb-sample-apps --'
         : 'docker run -d yugabytedb/yb-sample-apps';
 
-       const command = (appType.title === 'YCQL'
-              ? sampleAppCommandTxt
-              : commandSyntax + ' --workload ' + appType.code + ' --nodes ' + hostPorts)
+      const command =
+        appType.title === 'YCQL'
+          ? sampleAppCommandTxt
+          : commandSyntax +
+            ' --workload ' +
+            appType.code +
+            ' --nodes ' +
+            hostPorts +
+            ' --username yugabyte --password <your_password> ';
 
       return (
         <Tab eventKey={idx} title={appType.title} key={appType.code}>

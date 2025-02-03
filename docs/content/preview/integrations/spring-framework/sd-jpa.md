@@ -4,14 +4,12 @@ linkTitle: Spring Data JPA
 description: Spring Data JPA
 aliases:
 menu:
-  preview:
+  preview_integrations:
     identifier: spring-JPA
     parent: spring-framework
     weight: 579
 type: docs
 ---
-
-
 
 [Spring Data JPA](https://spring.io/projects/spring-data-jpa) is a popular Spring Framework projects, and simplifies creating JPA-based repositories by reducing the boilerplate code required to implement data access layers. It provides enhanced support for JPA-based data access using Spring annotation driven programming.
 
@@ -21,7 +19,7 @@ This document describes the fundamentals of using Spring Data JPA with YugabyteD
 
 ## Quick start
 
-Learn how to establish a connection to YugabyteDB database and begin basic CRUD operations using the steps in [Build an Application](../../../develop/build-apps/java/ysql-spring-data/) in the Quick Start section.
+Learn how to establish a connection to YugabyteDB database and begin basic CRUD operations using the steps in [Java ORM example application](../../../drivers-orms/orms/java/ysql-spring-data/).
 
 ## Project dependencies
 
@@ -41,7 +39,7 @@ Add the following dependencies for Spring Data JPA with [YugabyteDB JDBC Driver]
   <dependency>
     <groupId>com.yugabyte</groupId>
     <artifactId>jdbc-yugabytedb</artifactId>
-    <version>42.3.4</version>
+    <version>42.7.3-yb-1</version>
   </dependency>
 <dependencies>
 ```
@@ -213,7 +211,7 @@ public User updateUser(@PathVariable Long userId,
 }
 ```
 
-Spring Data JPA repositories provide [named queries](https://docs.spring.io/spring-data/jpa/docs/current/reference/html/#jpa.query-methods.at-query) for adding custom queries to repositories and to update the behavior of built-in queries by using the `@Query` annotation in the repository implementation.
+Spring Data JPA repositories provide [named queries](https://docs.spring.io/spring-data/jpa/reference/jpa/query-methods.html) for adding custom queries to repositories and to update the behavior of built-in queries by using the `@Query` annotation in the repository implementation.
 
 For example:
 

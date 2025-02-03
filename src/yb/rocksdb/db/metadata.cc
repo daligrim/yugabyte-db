@@ -67,8 +67,12 @@ std::string SstFileMetaData::Name() const {
   return MakeTableFileName(/* path= */ "", name_id);
 }
 
-std::string SstFileMetaData::FullName() const {
+std::string SstFileMetaData::BaseFilePath() const {
   return MakeTableFileName(db_path, name_id);
+}
+
+std::string SstFileMetaData::DataFilePath() const {
+  return MakeTableDataFilePath(db_path, name_id);
 }
 
 std::string LiveFileMetaData::ToString() const {
@@ -113,6 +117,14 @@ void UpdateUserValues(
     const UserBoundaryValues& source, UpdateUserValueType type, UserBoundaryValues* values) {
   for (const auto& user_value : source) {
     UpdateUserValue(values, user_value, type);
+  }
+}
+
+void UpdateFrontiers(UserFrontiersPtr& frontiers, const UserFrontiers& update) {
+  if (frontiers) {
+    frontiers->MergeFrontiers(update);
+  } else {
+    frontiers = update.Clone();
   }
 }
 

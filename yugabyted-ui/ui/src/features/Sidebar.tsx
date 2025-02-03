@@ -1,141 +1,157 @@
-import React, { FC, useState } from 'react';
-import clsx from 'clsx';
-import { Link, NavLink, NavLinkProps, useRouteMatch } from 'react-router-dom';
-import { makeStyles, Typography, Link as MUILink, Box } from '@material-ui/core';
-import { useTranslation } from 'react-i18next';
-import { createGlobalState } from 'react-use';
-import { browserStorage } from '@app/helpers';
+import React, { FC, useState } from "react";
+import clsx from "clsx";
+import { Link, NavLink, NavLinkProps, useRouteMatch } from "react-router-dom";
+import { makeStyles, Typography, Link as MUILink, Box } from "@material-ui/core";
+import { useTranslation } from "react-i18next";
+import { browserStorage } from "@app/helpers";
 
-import YBLogo from '@app/assets/yb-logo-dark.svg';
-import ClusterIcon from '@app/assets/cluster.svg';
-import SettingsIcon from '@app/assets/cog.svg';
-import DbSecurityIcon from '@app/assets/database-security.svg';
-import MetricsIcon from '@app/assets/stats.svg';
-import DoubleArrowIcon from '@app/assets/double-arrow-left.svg';
-import AlertsIcon from '@app/assets/bell.svg';
-import PerformanceIcon from '@app/assets/rocket.svg'
-import { themeVariables } from '@app/theme/variables';
+import YBLogoFull from "@app/assets/yugabyteDB-logo.svg";
+import YBLogo from "@app/assets/yb-logo.svg";
+import RocketIcon from "@app/assets/rocket.svg";
+import MigrateIcon from "@app/assets/migration.svg";
+import DbSecurityIcon from "@app/assets/database-security.svg";
+import MetricsIcon from "@app/assets/stats.svg";
+import DoubleArrowIcon from "@app/assets/double-arrow-left.svg";
+import AlertsIcon from "@app/assets/bell.svg";
+import DatabaseIcon from "@app/assets/database.svg";
+import { themeVariables } from "@app/theme/variables";
+import { useAlerts } from "./clusters/details/alerts/alerts";
 
 // Global state for setting and getting new alert flag that can be used on alerts list page
-export const useAlertGlobalValue = createGlobalState<boolean>(() => false);
+// export const useAlertGlobalValue = createGlobalState<boolean>(() => false);
 
 const useStyles = makeStyles((theme) => ({
   filler: {
     flexShrink: 0,
     width: themeVariables.sidebarWidthMax,
-    transition: theme.transitions.create('width')
+    transition: theme.transitions.create("width"),
   },
   sidebar: {
-    position: 'fixed',
-    height: '100%',
-    display: 'flex',
-    flexDirection: 'column',
+    position: "fixed",
+    height: "100%",
+    display: "flex",
+    flexDirection: "column",
     width: themeVariables.sidebarWidthMax,
-    transition: theme.transitions.create('width'),
+    transition: theme.transitions.create("width"),
     backgroundColor: theme.palette.background.paper,
     borderRight: `1px solid ${theme.palette.grey[200]}`,
     boxShadow: `inset -1px 0 0 0 ${theme.palette.grey[200]}`,
-    zIndex: theme.zIndex.drawer
+    zIndex: theme.zIndex.drawer,
   },
   collapsed: {
-    width: themeVariables.sidebarWidthMin
+    width: themeVariables.sidebarWidthMin,
   },
   linkRow: {
-    display: 'flex',
-    alignItems: 'center',
+    display: "flex",
+    alignItems: "center",
     // override browser styles for <a>
-    '&:link, &:focus, &:active, &:visited': {
-      textDecoration: 'none',
-      color: theme.palette.text.secondary
-    }
+    "&:link, &:focus, &:active, &:visited": {
+      textDecoration: "none",
+      color: theme.palette.text.secondary,
+    },
   },
   logoIcon: {
-    width: themeVariables.sidebarWidthMin,
-    minWidth: themeVariables.sidebarWidthMin,
-    padding: theme.spacing(1),
-    marginRight: theme.spacing(0.5)
+    width: "100%",
+    height: themeVariables.sidebarWidthMin,
+    minHeight: themeVariables.sidebarWidthMin,
+    padding: theme.spacing(2.5),
+    marginRight: theme.spacing(3),
+  },
+  logoIconCollapsed: {
+    padding: theme.spacing(2),
+    marginRight: 0,
   },
   claimShirtIcon: {
-    display: 'flex',
-    alignItems: 'center',
+    display: "flex",
+    alignItems: "center",
     padding: theme.spacing(4, 2),
-    '&:before': {
+    "&:before": {
       content: '"\uD83D\uDC4B"', // "waving hand" unicode symbol
       fontSize: 24,
-      marginRight: theme.spacing(1.5)
-    }
+      marginRight: theme.spacing(1.5),
+    },
   },
 
   link: {
     height: 56,
-    display: 'flex',
-    alignItems: 'center',
-    '&:hover': {
-      boxShadow: `inset 4px 0px 0px 0px ${theme.palette.secondary[300]}`
+    display: "flex",
+    alignItems: "center",
+    "&:hover": {
+      boxShadow: `inset 4px 0px 0px 0px ${theme.palette.secondary[300]}`,
     },
     // override browser styles for <a>
-    '&:link, &:focus, &:active, &:visited': {
-      textDecoration: 'none',
-      color: theme.palette.text.primary
-    }
+    "&:link, &:focus, &:active, &:visited": {
+      textDecoration: "none",
+      color: theme.palette.text.primary,
+    },
   },
   linkActive: {
     boxShadow: `inset 4px 0px 0px 0px ${theme.palette.secondary[900]}`,
-    '&:hover': {
-      boxShadow: `inset 4px 0px 0px 0px ${theme.palette.secondary[900]}`
-    }
+    "&:hover": {
+      boxShadow: `inset 4px 0px 0px 0px ${theme.palette.secondary[900]}`,
+    },
   },
   icon: {
     minWidth: 24,
     color: theme.palette.secondary[800],
     marginLeft: theme.spacing(2.5),
-    marginRight: theme.spacing(3)
+    marginRight: theme.spacing(3),
   },
   footer: {
-    display: 'flex',
-    alignItems: 'center',
-    marginTop: 'auto',
-    padding: theme.spacing(2, 0)
+    display: "flex",
+    alignItems: "center",
+    marginTop: "auto",
+    padding: theme.spacing(2, 0),
   },
   footerSmall: {
-    flexDirection: 'column'
+    flexDirection: "column",
   },
   statusIcon: {
-    margin: theme.spacing(0, 2)
+    margin: theme.spacing(0, 2),
   },
   expandIcon: {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
     borderRadius: 4,
     border: `1px solid ${theme.palette.grey[300]}`,
     padding: theme.spacing(0.5),
-    marginLeft: 'auto',
+    marginLeft: "auto",
     marginRight: theme.spacing(2),
-    cursor: 'pointer',
-    '&:hover': {
-      borderColor: theme.palette.grey[400]
-    }
+    cursor: "pointer",
+    "&:hover": {
+      borderColor: theme.palette.grey[400],
+    },
   },
   rotateExpandIcon: {
-    transform: 'rotate(180deg)',
+    transform: "rotate(180deg)",
     marginTop: theme.spacing(3),
-    marginLeft: 'unset',
-    marginRight: 'unset'
+    marginLeft: "unset",
+    marginRight: "unset",
   },
   fadeOut: {
-    transition: theme.transitions.create('opacity'),
-    opacity: 0
+    transition: theme.transitions.create("opacity"),
+    opacity: 0,
   },
   newAlerts: {
-    borderRadius: '50%',
+    borderRadius: "50%",
     background: theme.palette.error[500],
     width: 9,
-    position: 'absolute',
-    right: theme.spacing(2.4),
+    position: "absolute",
+    right: theme.spacing(3),
     top: theme.spacing(-0.3),
-    height: 9
-  }
+    height: 9,
+  },
+  label: {
+    color: theme.palette.grey[500],
+    fontWeight: theme.typography.fontWeightMedium as number,
+    margin: theme.spacing(3, 0, 2, 2.2),
+    textTransform: "uppercase",
+    textAlign: "left",
+  },
+  hidden: {
+    display: "none",
+  },
 }));
 
 interface NavLinkWithDisableProps extends NavLinkProps {
@@ -143,7 +159,7 @@ interface NavLinkWithDisableProps extends NavLinkProps {
   className?: string;
 }
 
-const YB_WIN_TSHIRT_PAGE = 'https://www.yugabyte.com/community-rewards/'
+const YB_WIN_TSHIRT_PAGE = "https://www.yugabyte.com/community-rewards/";
 
 const NavLinkWithDisable: FC<NavLinkWithDisableProps> = ({ disabled, ...rest }) => {
   return disabled ? <span className={rest.className}>{rest.children}</span> : <NavLink {...rest} />;
@@ -153,7 +169,7 @@ export const Sidebar: FC<{ projectId: string }> = ({ projectId }) => {
   const classes = useStyles();
   const {
     url,
-    params: {}
+    params: {},
   } = useRouteMatch<App.RouteParams>();
   const [isCollapsed, setCollapsed] = useState(browserStorage.sidebarCollapsed);
   const { t } = useTranslation();
@@ -164,10 +180,10 @@ export const Sidebar: FC<{ projectId: string }> = ({ projectId }) => {
     browserStorage.sidebarCollapsed = newValue;
   };
 
-  const [isNewAlert] = useAlertGlobalValue();
+  const { data: alerts } = useAlerts("");
 
   // const { data: runtimeConfig } = useRuntimeConfig();
- 
+
   //   //Alerts Policy - Hide Alerting bell icon on sidebar
   //   const ALERTS_FLAG_PATH = 'ybcloud.conf.alerts.enabled';
   //   const { data: alertsFeatGlobal } = useGetAppConfigQuery({
@@ -205,11 +221,12 @@ export const Sidebar: FC<{ projectId: string }> = ({ projectId }) => {
     <>
       <div className={clsx(classes.filler, isCollapsed && classes.collapsed)} />
       <div className={clsx(classes.sidebar, isCollapsed && classes.collapsed)}>
-        <Link to="/cluster/tabOverview" className={classes.linkRow}>
-          <YBLogo className={classes.logoIcon} />
-          <Typography variant="body2" noWrap className={clsx(isCollapsed && classes.fadeOut)}>
-            {t('common.appTitle')}
-          </Typography>
+        <Link to="/" className={classes.linkRow}>
+          {!isCollapsed ? (
+            <YBLogoFull className={classes.logoIcon} />
+          ) : (
+            <YBLogo className={clsx(classes.logoIcon, classes.logoIconCollapsed)} />
+          )}
         </Link>
         {/* {!runtimeConfig?.PLGOnboardingPhase1 && (
           <NavLinkWithDisable
@@ -225,17 +242,36 @@ export const Sidebar: FC<{ projectId: string }> = ({ projectId }) => {
             </Typography>
           </NavLinkWithDisable>
         )} */}
+        <Typography
+          variant="subtitle2"
+          className={clsx(classes.label, isCollapsed && classes.hidden)}
+        >
+          {t("clusterDetail.universe")}
+        </Typography>
         <NavLinkWithDisable
           disabled={isDisabled}
-          to={`/cluster/tabOverview`}
-          isActive={(_, location) => /^\/cluster/.test(location.pathname)}
+          to={`/`}
+          isActive={(_, location) => /^\/$/.test(location.pathname)}
           className={classes.link}
           activeClassName={classes.linkActive}
-          data-testid="SidebarLinkClusters"
+          data-testid="SidebarLinkCluster"
         >
-          <ClusterIcon className={classes.icon} />
+          <RocketIcon className={classes.icon} />
           <Typography variant="body2" noWrap className={clsx(isCollapsed && classes.fadeOut)}>
-            {t('common.cluster')}
+            {t("common.universe")}
+          </Typography>
+        </NavLinkWithDisable>
+        <NavLinkWithDisable
+          disabled={isDisabled}
+          to={`/databases/tabYsql`}
+          isActive={(_, location) => /^\/databases/.test(location.pathname)}
+          className={classes.link}
+          activeClassName={classes.linkActive}
+          data-testid="SidebarLinkDatabases"
+        >
+          <DatabaseIcon className={classes.icon} />
+          <Typography variant="body2" noWrap className={clsx(isCollapsed && classes.fadeOut)}>
+            {t("common.databases")}
           </Typography>
         </NavLinkWithDisable>
         <NavLinkWithDisable
@@ -244,28 +280,28 @@ export const Sidebar: FC<{ projectId: string }> = ({ projectId }) => {
           isActive={(_, location) => /^\/performance/.test(location.pathname)}
           className={classes.link}
           activeClassName={classes.linkActive}
-          data-testid="SidebarLinkClusters"
+          data-testid="SidebarLinkPerformance"
         >
-          <PerformanceIcon className={classes.icon} />
+          <MetricsIcon className={classes.icon} />
           <Typography variant="body2" noWrap className={clsx(isCollapsed && classes.fadeOut)}>
-            {t('clusterDetail.tabPerformance')}
+            {t("clusterDetail.tabPerformance")}
           </Typography>
         </NavLinkWithDisable>
         {isAlertsEnabled && (
           <NavLinkWithDisable
             disabled={isDisabled}
-            to={`/alerts`}
+            to={`/alerts/tabNotifications`}
             isActive={(_, location) => /^\/alerts/.test(location.pathname)}
             className={classes.link}
             activeClassName={classes.linkActive}
             data-testid="alertsPageNav"
           >
             <Box position="relative">
-              {isNewAlert && <Box className={classes.newAlerts}></Box>}
+              {alerts.length > 0 && <Box className={classes.newAlerts}></Box>}
               <AlertsIcon className={classes.icon} />
             </Box>
             <Typography variant="body2" noWrap className={clsx(isCollapsed && classes.fadeOut)}>
-              {t('common.alerts')}
+              {t("common.alerts")}
             </Typography>
           </NavLinkWithDisable>
         )}
@@ -280,7 +316,7 @@ export const Sidebar: FC<{ projectId: string }> = ({ projectId }) => {
           >
             <MetricsIcon className={classes.icon} />
             <Typography variant="body2" noWrap className={clsx(isCollapsed && classes.fadeOut)}>
-              {t('common.analytics')}
+              {t("common.analytics")}
             </Typography>
           </NavLinkWithDisable>
         </div>
@@ -294,33 +330,52 @@ export const Sidebar: FC<{ projectId: string }> = ({ projectId }) => {
           >
             <DbSecurityIcon className={classes.icon} />
             <Typography variant="body2" noWrap className={clsx(isCollapsed && classes.fadeOut)}>
-              {t('common.dbSecurity')}
+              {t("common.dbSecurity")}
             </Typography>
           </NavLinkWithDisable>
         </div>
+        <Typography
+          variant="subtitle2"
+          className={clsx(classes.label, isCollapsed && classes.hidden)}
+        >
+          {t("clusterDetail.migrations")}
+        </Typography>
         <NavLinkWithDisable
           disabled={isDisabled}
-          to={`/admin`}
-          isActive={(_, location) => /^\/admin/.test(location.pathname)}
+          to={`/migrations`}
+          isActive={(_, location) => /^\/migrations/.test(location.pathname)}
           className={classes.link}
           activeClassName={classes.linkActive}
-          data-testid="SidebarLinkAdmin"
+          data-testid="SidebarLinkMigrations"
         >
-          <SettingsIcon className={classes.icon} />
+          <MigrateIcon className={classes.icon} />
           <Typography variant="body2" noWrap className={clsx(isCollapsed && classes.fadeOut)}>
-            {t('common.admin')}
+            {t("common.migrations")}
           </Typography>
         </NavLinkWithDisable>
 
         <div className={clsx(classes.footer, isCollapsed && classes.footerSmall)}>
-          <MUILink className={classes.linkRow} href={YB_WIN_TSHIRT_PAGE} target="_blank" data-testid="systemStatus">
+          <MUILink
+            className={classes.linkRow}
+            href={YB_WIN_TSHIRT_PAGE}
+            target="_blank"
+            data-testid="systemStatus"
+          >
             {!isCollapsed && (
-              <Typography variant="body2" noWrap color="textSecondary" className={classes.claimShirtIcon}>
-                {t('common.claimTshirt')}
+              <Typography
+                variant="body2"
+                noWrap
+                color="textSecondary"
+                className={classes.claimShirtIcon}
+              >
+                {t("common.claimTshirt")}
               </Typography>
             )}
           </MUILink>
-          <div className={clsx(classes.expandIcon, isCollapsed && classes.rotateExpandIcon)} onClick={toggleWidth}>
+          <div
+            className={clsx(classes.expandIcon, isCollapsed && classes.rotateExpandIcon)}
+            onClick={toggleWidth}
+          >
             <DoubleArrowIcon />
           </div>
         </div>

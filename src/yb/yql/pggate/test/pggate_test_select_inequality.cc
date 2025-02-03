@@ -14,12 +14,15 @@
 //--------------------------------------------------------------------------------------------------
 
 #include "yb/common/constants.h"
-#include "yb/common/ybc-internal.h"
+#include "yb/common/value.messages.h"
 
 #include "yb/util/status_log.h"
 
 #include "yb/yql/pggate/test/pggate_test.h"
+#include "yb/yql/pggate/util/ybc-internal.h"
 #include "yb/yql/pggate/ybc_pggate.h"
+
+using std::string;
 
 namespace yb {
 namespace pggate {
@@ -31,22 +34,25 @@ TEST_F(PggateTestSelectInequality, TestSelectInequality) {
   CHECK_OK(Init("TestSelectInequality"));
 
   const char *tabname = "basic_table";
-  const YBCPgOid tab_oid = 3;
-  YBCPgStatement pg_stmt;
+  const YbcPgOid tab_oid = 3;
+  YbcPgStatement pg_stmt;
 
   // Create table in the connected database.
   int col_count = 0;
   CHECK_YBC_STATUS(YBCPgNewCreateTable(kDefaultDatabase, kDefaultSchema, tabname,
                                        kDefaultDatabaseOid, tab_oid,
                                        false /* is_shared_table */,
+                                       false /* is_sys_catalog_table */,
                                        true /* if_not_exist */,
-                                       false /* add_primary_key */,
+                                       PG_YBROWID_MODE_NONE,
                                        true /* is_colocated_via_database */,
                                        kInvalidOid /* tablegroup_id */,
                                        kColocationIdNotSet /* colocation_id */,
                                        kInvalidOid /* tablespace_id */,
                                        false /* is_matview */,
-                                       kInvalidOid /* matview_pg_table_id */,
+                                       kInvalidOid /* pg_table_oid */,
+                                       kInvalidOid /* old_relfilenode_oid */,
+                                       false /* is_truncate */,
                                        &pg_stmt));
   CHECK_YBC_STATUS(YBCTestCreateTableAddColumn(pg_stmt, "h", ++col_count,
                                                DataType::STRING, true, false));
@@ -54,24 +60,25 @@ TEST_F(PggateTestSelectInequality, TestSelectInequality) {
                                                DataType::INT64, false, true));
   CHECK_YBC_STATUS(YBCTestCreateTableAddColumn(pg_stmt, "val", ++col_count,
                                                DataType::STRING, false, false));
-  CHECK_YBC_STATUS(YBCPgExecCreateTable(pg_stmt));
+  ExecCreateTableTransaction(pg_stmt);
 
   pg_stmt = nullptr;
 
   // INSERT ----------------------------------------------------------------------------------------
   // Allocate new insert.
-  CHECK_YBC_STATUS(YBCPgNewInsert(kDefaultDatabaseOid, tab_oid, false /* is_single_row_txn */,
-                                  false /* is_region_local */, &pg_stmt));
+  CHECK_YBC_STATUS(YBCPgNewInsert(
+      kDefaultDatabaseOid, tab_oid, false /* is_region_local */, &pg_stmt,
+      YbcPgTransactionSetting::YB_TRANSACTIONAL));
 
   int h = 0, r = 0;
   // Allocate constant expressions.
   // TODO(neil) We can also allocate expression with bind.
-  YBCPgExpr expr_id;
+  YbcPgExpr expr_id;
   string h_str = strings::Substitute("$0", h);
   CHECK_YBC_STATUS(YBCTestNewConstantText(pg_stmt, h_str.c_str(), false, &expr_id));
-  YBCPgExpr expr_r1;
+  YbcPgExpr expr_r1;
   CHECK_YBC_STATUS(YBCTestNewConstantInt8(pg_stmt, r, false, &expr_r1));
-  YBCPgExpr expr_val;
+  YbcPgExpr expr_val;
   string val = strings::Substitute("$0-$1", h, r);
   CHECK_YBC_STATUS(YBCTestNewConstantText(pg_stmt, val.c_str(), false, &expr_val));
 
@@ -119,7 +126,7 @@ TEST_F(PggateTestSelectInequality, TestSelectInequality) {
                                   false /* is_region_local */, &pg_stmt));
 
   // Specify the selected expressions.
-  YBCPgExpr colref;
+  YbcPgExpr colref;
   CHECK_YBC_STATUS(YBCTestNewColumnRef(pg_stmt, 1, DataType::STRING, &colref));
   CHECK_YBC_STATUS(YBCPgDmlAppendTarget(pg_stmt, colref));
   CHECK_YBC_STATUS(YBCTestNewColumnRef(pg_stmt, 2, DataType::INT64, &colref));
@@ -134,9 +141,9 @@ TEST_F(PggateTestSelectInequality, TestSelectInequality) {
   h_str = strings::Substitute("$0", h);
   CHECK_YBC_STATUS(YBCTestNewConstantText(pg_stmt, h_str.c_str(), false, &expr_id));
   CHECK_YBC_STATUS(YBCPgDmlBindColumn(pg_stmt, 1, expr_id));
-  YBCPgExpr expr_r1_A;
+  YbcPgExpr expr_r1_A;
   CHECK_YBC_STATUS(YBCTestNewConstantInt8Op(pg_stmt, A, false, &expr_r1_A, true /* is_gt */));
-  YBCPgExpr expr_r1_B;
+  YbcPgExpr expr_r1_B;
   CHECK_YBC_STATUS(YBCTestNewConstantInt8Op(pg_stmt, B, false, &expr_r1_B, false /* is_gt */));
   CHECK_YBC_STATUS(YBCPgDmlBindColumnCondBetween(pg_stmt, 2, expr_r1_A, true, expr_r1_B, true));
 
@@ -148,7 +155,7 @@ TEST_F(PggateTestSelectInequality, TestSelectInequality) {
   uint64_t *values = static_cast<uint64_t*>(YBCPAlloc(col_count * sizeof(uint64_t)));
   bool *isnulls = static_cast<bool*>(YBCPAlloc(col_count * sizeof(bool)));
   int select_row_count = 0;
-  YBCPgSysColumns syscols;
+  YbcPgSysColumns syscols;
   for (int i = A; i <= B; i++) {
     bool has_data = false;
     CHECK_YBC_STATUS(YBCPgDmlFetch(pg_stmt, col_count, values, isnulls, &syscols, &has_data));

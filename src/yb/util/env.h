@@ -24,14 +24,14 @@
 // All Env implementations are safe for concurrent access from
 // multiple threads without any external synchronization.
 
-#ifndef YB_UTIL_ENV_H
-#define YB_UTIL_ENV_H
+#pragma once
 
 #include <stdint.h>
 
 #include <functional>
 #include <string>
 #include <vector>
+#include <boost/optional.hpp>
 
 #include "yb/gutil/callback_forward.h"
 
@@ -133,30 +133,30 @@ class FileFactoryWrapper : public FileFactory {
   virtual ~FileFactoryWrapper() {}
 
   Status NewSequentialFile(const std::string& fname,
-                                   std::unique_ptr<SequentialFile>* result) override;
+                           std::unique_ptr<SequentialFile>* result) override;
 
   Status NewRandomAccessFile(const std::string& fname,
-                                     std::unique_ptr<RandomAccessFile>* result) override;
+                             std::unique_ptr<RandomAccessFile>* result) override;
 
   Status NewWritableFile(const std::string& fname,
-                                 std::unique_ptr<WritableFile>* result) override;
+                         std::unique_ptr<WritableFile>* result) override;
 
   Status NewWritableFile(const WritableFileOptions& opts,
-                                 const std::string& fname,
-                                 std::unique_ptr<WritableFile>* result) override;
+                         const std::string& fname,
+                         std::unique_ptr<WritableFile>* result) override;
 
   Status NewTempWritableFile(const WritableFileOptions& opts,
-                                     const std::string& name_template,
-                                     std::string* created_filename,
-                                     std::unique_ptr<WritableFile>* result) override;
+                             const std::string& name_template,
+                             std::string* created_filename,
+                             std::unique_ptr<WritableFile>* result) override;
 
   Status NewRWFile(const std::string& fname,
-                           std::unique_ptr<RWFile>* result) override;
+                   std::unique_ptr<RWFile>* result) override;
 
   // Like the previous NewRWFile, but allows options to be specified.
   Status NewRWFile(const RWFileOptions& opts,
-                           const std::string& fname,
-                           std::unique_ptr<RWFile>* result) override;
+                   const std::string& fname,
+                   std::unique_ptr<RWFile>* result) override;
 
   Result<uint64_t> GetFileSize(const std::string& fname) override;
 
@@ -172,13 +172,15 @@ class Env {
  public:
   // Governs if/how the file is created.
   //
-  // enum value                      | file exists       | file does not exist
-  // --------------------------------+-------------------+--------------------
-  // CREATE_IF_NON_EXISTING_TRUNCATE | opens + truncates | creates
-  // CREATE_NON_EXISTING             | fails             | creates
-  // OPEN_EXISTING                   | opens             | fails
+  // enum value                      | file exists        | file does not exist
+  // --------------------------------+--------------------+--------------------
+  // CREATE_IF_NON_EXISTING_TRUNCATE | opens + truncates  | creates
+  // CREATE_NONBLOCK_IF_NON_EXISTING | opens (O_NONBLOCK) | creates (O_NONBLOCK)
+  // CREATE_NON_EXISTING             | fails              | creates
+  // OPEN_EXISTING                   | opens              | fails
   enum CreateMode {
     CREATE_IF_NON_EXISTING_TRUNCATE,
+    CREATE_NONBLOCK_IF_NON_EXISTING,
     CREATE_NON_EXISTING,
     OPEN_EXISTING
   };
@@ -302,6 +304,9 @@ class Env {
   virtual Status LinkFile(const std::string& src,
                                   const std::string& target) = 0;
 
+  // Symlink new_symlink to pointed_to. Unlinks new_symlink if it's already linked.
+  virtual Status SymlinkPath(const std::string& pointed_to, const std::string& new_symlink) = 0;
+
   // Read link's actual target
   virtual Result<std::string> ReadLink(const std::string& link) = 0;
 
@@ -380,6 +385,9 @@ class Env {
 
   // Like IsDirectory, but non-existence of the given path is not considered an error.
   Result<bool> DoesDirectoryExist(const std::string& path);
+
+  // Checks if the file is a symlink. Returns an error if it doesn't exist.
+  virtual Result<bool> IsSymlink(const std::string& path) = 0;
 
   // Checks if the given path is an executable file. If the file does not exist
   // we simply return false rather than consider that an error.
@@ -473,6 +481,9 @@ struct WritableFileOptions {
 
   // See CreateMode for details.
   Env::CreateMode mode;
+
+  // Set this variable to customize the default starting offset.
+  boost::optional<uint64_t> initial_offset;
 
   WritableFileOptions()
     : sync_on_close(false),
@@ -683,15 +694,15 @@ class EnvWrapper : public Env {
 
   // The following text is boilerplate that forwards all methods to target()
   Status NewSequentialFile(const std::string& f,
-                                   std::unique_ptr<SequentialFile>* r) override;
+                           std::unique_ptr<SequentialFile>* r) override;
   Status NewRandomAccessFile(const std::string& f,
-                                     std::unique_ptr<RandomAccessFile>* r) override;
+                             std::unique_ptr<RandomAccessFile>* r) override;
   Status NewWritableFile(const std::string& f, std::unique_ptr<WritableFile>* r) override;
   Status NewWritableFile(const WritableFileOptions& o,
-                                 const std::string& f,
-                                 std::unique_ptr<WritableFile>* r) override;
+                         const std::string& f,
+                         std::unique_ptr<WritableFile>* r) override;
   Status NewTempWritableFile(const WritableFileOptions& o, const std::string& t,
-                                     std::string* f, std::unique_ptr<WritableFile>* r) override;
+                             std::string* f, std::unique_ptr<WritableFile>* r) override;
   Status NewRWFile(const std::string& f, std::unique_ptr<RWFile>* r) override;
   Status NewRWFile(const RWFileOptions& o,
                    const std::string& f,
@@ -711,6 +722,7 @@ class EnvWrapper : public Env {
   Result<uint64_t> GetBlockSize(const std::string& f) override;
   Result<FilesystemStats> GetFilesystemStatsBytes(const std::string& f) override;
   Status LinkFile(const std::string& s, const std::string& t) override;
+  Status SymlinkPath(const std::string& pointed_to, const std::string& new_symlink) override;
   Result<std::string> ReadLink(const std::string& s) override;
   Status RenameFile(const std::string& s, const std::string& t) override;
   Status LockFile(const std::string& f, FileLock** l, bool r) override;
@@ -735,6 +747,7 @@ class EnvWrapper : public Env {
 
   Status GetExecutablePath(std::string* path) override;
   Status IsDirectory(const std::string& path, bool* is_dir) override;
+  Result<bool> IsSymlink(const std::string& path) override;
   Result<bool> IsExecutableFile(const std::string& path) override;
   Status Walk(const std::string& root,
               DirectoryOrder order,
@@ -758,5 +771,3 @@ class EnvWrapper : public Env {
 Status DeleteIfExists(const std::string& path, Env* env);
 
 }  // namespace yb
-
-#endif // YB_UTIL_ENV_H

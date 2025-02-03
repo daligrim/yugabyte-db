@@ -11,8 +11,7 @@
 // under the License.
 //
 
-#ifndef YB_CLIENT_TABLE_CREATOR_H
-#define YB_CLIENT_TABLE_CREATOR_H
+#pragma once
 
 #include <boost/optional/optional.hpp>
 
@@ -21,6 +20,8 @@
 
 #include "yb/common/constants.h"
 #include "yb/common/common_fwd.h"
+
+#include "yb/dockv/dockv_fwd.h"
 
 #include "yb/gutil/macros.h"
 
@@ -53,7 +54,7 @@ class YBTableCreator {
   YBTableCreator& is_pg_shared_table();
 
   // Sets the partition hash schema.
-  YBTableCreator& hash_schema(YBHashSchema hash_schema);
+  YBTableCreator& hash_schema(dockv::YBHashSchema hash_schema);
 
   // Number of tablets that should be used for this table. If tablet_count is not given, YBClient
   // will calculate this value (num_shards_per_tserver * num_of_tservers).
@@ -72,7 +73,13 @@ class YBTableCreator {
 
   YBTableCreator& is_matview(bool is_matview);
 
-  YBTableCreator& matview_pg_table_id(const std::string& matview_pg_table_id);
+  YBTableCreator& pg_table_id(const std::string& pg_table_id);
+
+  YBTableCreator& old_rewrite_table_id(const std::string& old_rewrite_table_id);
+
+  YBTableCreator& is_truncate(bool is_truncate);
+
+  YBTableCreator& xcluster_source_table_id(const TableId& source_table_id);
 
   // Sets the schema with which to create the table. Must remain valid for
   // the lifetime of the builder. Required.
@@ -82,7 +89,7 @@ class YBTableCreator {
   YBTableCreator& part_of_transaction(const TransactionMetadata* txn);
 
   // Adds a partitions to the table.
-  YBTableCreator& add_partition(const Partition& partition);
+  YBTableCreator& add_partition(const dockv::Partition& partition);
 
   // Adds a set of hash partitions to the table.
   //
@@ -133,6 +140,9 @@ class YBTableCreator {
   // For index table: sets whether to do online schema migration when creating index.
   YBTableCreator& skip_index_backfill(const bool skip_index_backfill);
 
+  // For vector index table: adds vector index-specific options.
+  YBTableCreator& add_vector_options(const PgVectorIdxOptionsPB& vec_options);
+
   // For index table: indicates whether this index has mangled column name.
   // - Older index supports only ColumnRef, and its name is identical with colum name.
   // - Newer index supports expressions including ColumnRef, and its name is a mangled name of
@@ -156,7 +166,7 @@ class YBTableCreator {
   // If not provided, defaults to true.
   YBTableCreator& wait(bool wait);
 
-  YBTableCreator& replication_info(const master::ReplicationInfoPB& ri);
+  YBTableCreator& replication_info(const ReplicationInfoPB& ri);
 
   // Creates the table.
   //
@@ -165,7 +175,9 @@ class YBTableCreator {
   // returned.
   Status Create();
 
-  Result<int> NumTabletsForUserTable();
+  const std::string& get_table_id() const {
+    return table_id_;
+  }
 
  private:
   friend class YBClient;
@@ -192,11 +204,11 @@ class YBTableCreator {
 
   std::unique_ptr<PartitionSchemaPB> partition_schema_;
 
-  std::vector<Partition> partitions_;
+  std::vector<dockv::Partition> partitions_;
 
   int num_replicas_ = 0;
 
-  std::unique_ptr<master::ReplicationInfoPB> replication_info_;
+  std::unique_ptr<ReplicationInfoPB> replication_info_;
 
   // When creating index, proxy server construct index_info_, and master server will write it to
   // the data-table being indexed.
@@ -222,7 +234,18 @@ class YBTableCreator {
 
   boost::optional<bool> is_matview_;
 
-  std::string matview_pg_table_id_;
+  // In case the table was rewritten, explicitly store the TableId containing the PG table OID
+  // (as the table's TableId no longer matches).
+  TableId pg_table_id_;
+
+  // Used during table rewrite - the TableId of the old DocDB table that is being rewritten.
+  TableId old_rewrite_table_id_;
+
+  // Set to true when the table is being re-written as part of a TRUNCATE operation.
+  boost::optional<bool> is_truncate_;
+
+  // Set by DDL Replication to link the table to the original table in the source cluster.
+  TableId xcluster_source_table_id_;
 
   const TransactionMetadata* txn_ = nullptr;
 
@@ -231,5 +254,3 @@ class YBTableCreator {
 
 } // namespace client
 } // namespace yb
-
-#endif // YB_CLIENT_TABLE_CREATOR_H

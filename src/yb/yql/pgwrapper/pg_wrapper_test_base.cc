@@ -16,6 +16,7 @@
 #include "yb/tserver/tserver_service.pb.h"
 
 #include "yb/util/env_util.h"
+#include "yb/util/os-util.h"
 #include "yb/util/path_util.h"
 #include "yb/util/size_literals.h"
 #include "yb/util/string_trim.h"
@@ -24,10 +25,16 @@
 #include "yb/yql/pgwrapper/pg_wrapper.h"
 
 using std::unique_ptr;
+using std::string;
+using std::vector;
 
 using yb::util::TrimStr;
 using yb::util::TrimTrailingWhitespaceFromEveryLine;
 using yb::util::LeftShiftTextBlock;
+
+using namespace std::literals;
+
+DECLARE_int32(replication_factor);
 
 namespace yb {
 namespace pgwrapper {
@@ -53,6 +60,7 @@ void PgWrapperTestBase::SetUp() {
 
   opts.extra_master_flags.emplace_back("--client_read_write_timeout_ms=120000");
   opts.extra_master_flags.emplace_back(Format("--memory_limit_hard_bytes=$0", 2_GB));
+  opts.extra_master_flags.emplace_back(Format("--replication_factor=$0", FLAGS_replication_factor));
 
   UpdateMiniClusterOptions(&opts);
 
@@ -81,15 +89,19 @@ Result<TabletId> PgWrapperTestBase::GetSingleTabletId(const TableName& table_nam
   return STATUS(NotFound, Format("No tablet found for table $0.", table_name));
 }
 
+Result<string> PgWrapperTestBase::RunYbAdminCommand(const string& cmd) {
+  const auto yb_admin = "yb-admin"s;
+  auto command = GetToolPath(yb_admin) +
+    " --master_addresses " + cluster_->GetMasterAddresses() +
+    " " + cmd;
+  LOG(INFO) << "Running " << command;
+  return RunShellProcess(command);
+}
+
 namespace {
 
 string TrimSqlOutput(string output) {
   return TrimStr(TrimTrailingWhitespaceFromEveryLine(LeftShiftTextBlock(output)));
-}
-
-string CertsDir() {
-  const auto sub_dir = JoinPathSegments("ent", "test_certs");
-  return JoinPathSegments(env_util::GetRootDir(sub_dir), sub_dir);
 }
 
 } // namespace
@@ -109,7 +121,7 @@ Result<std::string> PgCommandTestBase::RunPsqlCommand(
   vector<string> argv{
       GetPostgresInstallRoot() + "/bin/ysqlsh",
       "-h", pg_ts->bind_host(),
-      "-p", std::to_string(pg_ts->pgsql_rpc_port()),
+      "-p", std::to_string(pg_ts->ysql_port()),
       "-U", "yugabyte",
       "-f", tmp_file_name
   };
@@ -122,22 +134,40 @@ Result<std::string> PgCommandTestBase::RunPsqlCommand(
   if (encrypt_connection_) {
     argv.push_back(Format(
         "sslmode=require sslcert=$0/ysql.crt sslrootcert=$0/ca.crt sslkey=$0/ysql.key",
-        CertsDir()));
+        GetCertsDir()));
   }
 
   if (tuples_only) {
     argv.push_back("-t");
   }
 
-  LOG(INFO) << "Run tool: " << yb::ToString(argv);
-  Subprocess proc(argv.front(), argv);
-  if (use_auth_) {
-    proc.SetEnv("PGPASSWORD", "yugabyte");
-  }
-
-  string psql_stdout;
+  std::string psql_stdout;
   LOG(INFO) << "Executing statement: " << statement;
-  RETURN_NOT_OK(proc.Call(&psql_stdout));
+  // Postgres might not yet be ready, so retry a few times.
+  for (int retry = 0;;) {
+    LOG(INFO) << "Retry: " << retry << ", run tool: " << AsString(argv);
+    Subprocess proc(argv.front(), argv);
+    if (use_auth_) {
+      proc.SetEnv("PGPASSWORD", "yugabyte");
+    }
+
+    psql_stdout.clear();
+    std::string psql_stderr;
+    auto status = proc.Call(&psql_stdout, &psql_stderr);
+    if (status.ok()) {
+      break;
+    }
+    if (++retry < 10 && status.IsRuntimeError() &&
+        (psql_stderr.find("Connection refused") != std::string::npos ||
+         psql_stderr.find("the database system is starting up") != std::string::npos ||
+         psql_stderr.find(
+             "the database system is not yet accepting connections") != std::string::npos)) {
+      std::this_thread::sleep_for(250ms * kTimeMultiplier);
+      continue;
+    }
+    LOG(WARNING) << "Stderr: " << psql_stderr;
+    return status;
+  }
   LOG(INFO) << "Output from statement {{ " << statement << " }}:\n"
             << psql_stdout;
 
@@ -154,8 +184,8 @@ void PgCommandTestBase::RunPsqlCommand(
 void PgCommandTestBase::UpdateMiniClusterOptions(ExternalMiniClusterOptions* options) {
   PgWrapperTestBase::UpdateMiniClusterOptions(options);
   if (encrypt_connection_) {
-    const vector<string> common_flags{"--use_node_to_node_encryption=true",
-                                      "--certs_dir=" + CertsDir()};
+    const vector<string> common_flags{
+        "--use_node_to_node_encryption=true", "--certs_dir=" + GetCertsDir()};
     for (auto flags : {&options->extra_master_flags, &options->extra_tserver_flags}) {
       flags->insert(flags->begin(), common_flags.begin(), common_flags.end());
     }

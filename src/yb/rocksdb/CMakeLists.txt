@@ -14,7 +14,7 @@
 # RocksDB build.
 
 set(YB_PCH_PREFIX rocksdb)
-set(YB_PCH_DEP_LIBS opid_proto yb_test_util)
+set(YB_PCH_DEP_LIBS yb_test_util)
 
 PROTOBUF_GENERATE_CPP(
   ROCKSDB_PROTO_SRCS ROCKSDB_PROTO_HDRS ROCKSDB_PROTO_TGTS
@@ -75,7 +75,6 @@ set(ROCKSDB_SRCS
     db/write_batch_base.cc
     db/write_controller.cc
     db/write_thread.cc
-    db/xfunc_test_points.cc
     db/db_iterator_wrapper.cc
     memtable/hash_linklist_rep.cc
     memtable/hash_skiplist_rep.cc
@@ -99,6 +98,7 @@ set(ROCKSDB_SRCS
     table/full_filter_block.cc
     table/get_context.cc
     table/index_builder.cc
+    table/index_iterator.cc
     table/index_reader.cc
     table/iterator.cc
     table/merger.cc
@@ -123,7 +123,6 @@ set(ROCKSDB_SRCS
     util/delete_scheduler.cc
     util/dynamic_bloom.cc
     util/env.cc
-    util/env_hdfs.cc
     util/env_posix.cc
     util/io_posix.cc
     util/thread_posix.cc
@@ -138,11 +137,7 @@ set(ROCKSDB_SRCS
     utilities/convenience/info_log_finder.cc
     utilities/checkpoint/checkpoint.cc
     utilities/compaction_filters/remove_emptyvalue_compactionfilter.cc
-    utilities/document/document_db.cc
-    utilities/document/json_document_builder.cc
-    utilities/document/json_document.cc
     utilities/env_mirror.cc
-    utilities/geodb/geodb_impl.cc
     utilities/leveldb_options/leveldb_options.cc
     utilities/memory/memory_util.cc
     utilities/merge_operators/put.cc
@@ -150,17 +145,7 @@ set(ROCKSDB_SRCS
     utilities/merge_operators/string_append/stringappend.cc
     utilities/merge_operators/uint64add.cc
     utilities/options/options_util.cc
-    utilities/redis/redis_lists.cc
     utilities/table_properties_collectors/compact_on_deletion_collector.cc
-    utilities/transactions/optimistic_transaction_impl.cc
-    utilities/transactions/optimistic_transaction_db_impl.cc
-    utilities/transactions/transaction_base.cc
-    utilities/transactions/transaction_db_impl.cc
-    utilities/transactions/transaction_db_mutex_impl.cc
-    utilities/transactions/transaction_lock_mgr.cc
-    utilities/transactions/transaction_impl.cc
-    utilities/transactions/transaction_util.cc
-    utilities/ttl/db_ttl_impl.cc
     utilities/write_batch_with_index/write_batch_with_index.cc
     utilities/write_batch_with_index/write_batch_with_index_internal.cc
     util/event_logger.cc
@@ -179,9 +164,7 @@ set(ROCKSDB_SRCS
     util/rate_limiter.cc
     util/slice_transform.cc
     util/statistics.cc
-    util/sync_point.cc
     util/thread_local.cc
-    util/xfunc.cc
     util/xxhash.cc
     ${ROCKSDB_PROTO_SRCS}
 )
@@ -201,7 +184,7 @@ endif()
 
 ADD_YB_LIBRARY(rocksdb
                SRCS ${ROCKSDB_SRCS}
-               DEPS gflags gutil snappy z lz4 yb_common yb_util opid_proto)
+               DEPS gflags gutil snappy z lz4 yb_common yb_util)
 
 add_library(rocksdb_tools
   tools/ldb_cmd.cc
@@ -215,21 +198,18 @@ macro(ADD_YB_ROCKSDB_TOOL tool)
 endmacro()
 
 set(ROCKSDB_TEST_UTIL_SRCS
+  db/db_test_util.cc
   table/mock_table.cc
   util/mock_env.cc
   util/testharness.cc
   util/testutil.cc
 )
 
-if (NOT "${CMAKE_BUILD_TYPE}" STREQUAL "RELEASE")
-  set(ROCKSDB_TEST_UTIL_SRCS ${ROCKSDB_TEST_UTIL_SRCS} db/db_test_util.cc)
-endif()
-
 add_library(rocksdb_test_util ${ROCKSDB_TEST_UTIL_SRCS})
 target_link_libraries(rocksdb_test_util gmock gtest rocksdb yb_rocksutil)
 
 add_executable(db_bench tools/db_bench.cc tools/db_bench_tool.cc)
-target_link_libraries(db_bench rocksdb)
+target_link_libraries(db_bench rocksdb yb_ash)
 ADD_YB_ROCKSDB_TOOL(db_sanity_test)
 ADD_YB_ROCKSDB_TOOL(db_stress)
 ADD_YB_ROCKSDB_TOOL(write_stress)
@@ -243,6 +223,7 @@ set(YB_TEST_LINK_LIBS rocksdb_test_util rocksdb ${YB_MIN_TEST_LIBS} rocksdb_tool
 ADD_YB_TEST(db/compaction_job_test)
 ADD_YB_TEST(db/compaction_picker_test)
 ADD_YB_TEST(db/comparator_db_test)
+ADD_YB_TEST(db/db_perf_test)
 ADD_YB_TEST(db/dbformat_test)
 ADD_YB_TEST(db/file_indexer_test)
 ADD_YB_TEST(db/filename_test)
@@ -254,6 +235,7 @@ ADD_YB_TEST(db/merge_test)
 ADD_YB_TEST(db/options_file_test)
 ADD_YB_TEST(db/perf_context_test)
 ADD_YB_TEST(db/prefix_test)
+ADD_YB_TEST(db/readahead_test)
 ADD_YB_TEST(db/skiplist_test)
 ADD_YB_TEST(db/table_properties_collector_test)
 ADD_YB_TEST(db/user_op_id_test)
@@ -281,28 +263,23 @@ ADD_YB_TEST(util/dynamic_bloom_test)
 ADD_YB_TEST(util/env_test)
 ADD_YB_TEST(util/event_logger_test)
 ADD_YB_TEST(util/filelock_test)
+ADD_YB_TEST(util/heap_test)
 ADD_YB_TEST(util/histogram_test)
 ADD_YB_TEST(util/memenv_test)
 ADD_YB_TEST(util/mock_env_test)
 ADD_YB_TEST(util/options_test)
 ADD_YB_TEST(util/rate_limiter_test)
-
+ADD_YB_TEST(util/file_reader_writer_test)
 ADD_YB_TEST(util/slice_transform_test)
+
 if (BUILD_TESTS AND
     COMPILER_FAMILY STREQUAL "gcc" AND
     "${COMPILER_VERSION}" MATCHES "^(10|11)[.].*$")
   target_compile_options(slice_transform_test PRIVATE "-Wno-array-bounds")
 endif()
 
-ADD_YB_TEST(utilities/document/document_db_test)
-ADD_YB_TEST(utilities/document/json_document_test)
-ADD_YB_TEST(utilities/geodb/geodb_test)
-ADD_YB_TEST(utilities/merge_operators/string_append/stringappend_test)
 ADD_YB_TEST(utilities/options/options_util_test)
-ADD_YB_TEST(utilities/redis/redis_lists_test)
 ADD_YB_TEST(utilities/table_properties_collectors/compact_on_deletion_collector_test)
-ADD_YB_TEST(utilities/transactions/optimistic_transaction_test)
-ADD_YB_TEST(utilities/ttl/ttl_test)
 ADD_YB_TEST(utilities/write_batch_with_index/write_batch_with_index_test)
 
 if (NOT "${CMAKE_BUILD_TYPE}" STREQUAL "RELEASE")
@@ -342,6 +319,8 @@ ADD_YB_TEST(util/delete_scheduler_test)
 ADD_YB_TEST(util/thread_local_test)
 ADD_YB_TEST(utilities/checkpoint/checkpoint_test)
 ADD_YB_TEST(utilities/memory/memory_test)
-ADD_YB_TEST(utilities/transactions/transaction_test)
 
 endif()
+
+set(YB_FUZZ_TARGET_LINK_LIBS rocksdb_test_util rocksdb ${YB_MIN_TEST_LIBS} rocksdb_tools)
+ADD_YB_FUZZ_TARGET(util/fuzz-targets/coding_fuzz_target)

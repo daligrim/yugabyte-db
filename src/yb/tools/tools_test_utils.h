@@ -11,8 +11,7 @@
 // under the License.
 //
 
-#ifndef YB_TOOLS_TOOLS_TEST_UTILS_H
-#define YB_TOOLS_TOOLS_TEST_UTILS_H
+#pragma once
 
 #include <memory>
 #include <string>
@@ -22,15 +21,28 @@
 #include "yb/util/net/net_fwd.h"
 
 namespace yb {
+
+class ExternalYbController;
+class MiniClusterBase;
+
 namespace tools {
 
 // Runs backup command against specified cluster.
 // Note: to get detailed output from 'yb_backup' tool for debug purposes add into your test:
-//       FLAGS_verbose_yb_backup = true;
+//       ANNOTATE_UNPROTECTED_WRITE(FLAGS_verbose_yb_backup) = true;
 Status RunBackupCommand(
     const HostPort& pg_hp, const std::string& master_addresses,
     const std::string& tserver_http_addresses, const std::string& tmp_dir,
     const std::vector<std::string>& extra_args);
+
+// Runs Backup/Restore command via YB Controller
+// The yb controller data dir(which has the logs) is present in the same directory as master/ts
+Status RunYbControllerCommand(
+    MiniClusterBase* cluster, const std::string& tmp_dir, const std::vector<std::string>& args);
+
+// Runs ysql_dump against specified database of the cluster and returns the output.
+Result<std::string> RunYSQLDump(
+    HostPort& pg_host_port, const std::string& database_name = "yugabyte");
 
 // A class to manage random tmp dir for test.
 class TmpDirProvider {
@@ -46,5 +58,3 @@ class TmpDirProvider {
 
 } // namespace tools
 } // namespace yb
-
-#endif // YB_TOOLS_TOOLS_TEST_UTILS_H

@@ -38,8 +38,6 @@
 
 #include <rapidjson/document.h>
 
-#include <glog/logging.h>
-
 #include "yb/common/jsonb.h"
 #include "yb/common/wire_protocol.h"
 
@@ -58,6 +56,8 @@
 
 #include "yb/master/master_defaults.h"
 
+#include "yb/server/async_client_initializer.h"
+
 #include "yb/tablet/tablet.h"
 #include "yb/tablet/tablet_peer.h"
 #include "yb/tserver/tablet_server.h"
@@ -66,13 +66,13 @@
 
 #include "yb/client/client_fwd.h"
 #include "yb/gutil/macros.h"
+#include "yb/util/callsite_profiling.h"
 
 #include "yb/util/bytes_formatter.h"
-#include "yb/util/capabilities.h"
 #include "yb/util/date_time.h"
 #include "yb/util/decimal.h"
 #include "yb/util/enums.h"
-#include "yb/util/flag_tags.h"
+#include "yb/util/flags.h"
 #include "yb/util/logging.h"
 #include "yb/util/mem_tracker.h"
 #include "yb/util/metrics.h"
@@ -84,40 +84,42 @@
 #include "yb/util/tsan_util.h"
 #include "yb/util/varint.h"
 
+#include "yb/yql/ysql_conn_mgr_wrapper/ysql_conn_mgr_stats.h"
+
 using namespace std::literals;
 
-DEFINE_int32(metrics_snapshotter_interval_ms, 30 * 1000,
+DEFINE_RUNTIME_int32(metrics_snapshotter_interval_ms, 30 * 1000,
              "Interval at which the metrics are snapshotted.");
 TAG_FLAG(metrics_snapshotter_interval_ms, advanced);
 
-DEFINE_string(metrics_snapshotter_tserver_metrics_whitelist,
+DEFINE_UNKNOWN_string(metrics_snapshotter_tserver_metrics_whitelist,
     "handler_latency_yb_client_read_local_sum,handler_latency_yb_client_read_local_count",
     "Tserver metrics to record in native metrics storage.");
 TAG_FLAG(metrics_snapshotter_tserver_metrics_whitelist, advanced);
 
-DEFINE_string(metrics_snapshotter_table_metrics_whitelist,
+DEFINE_UNKNOWN_string(metrics_snapshotter_table_metrics_whitelist,
     "rocksdb_sst_read_micros_sum,rocksdb_sst_read_micros_count",
     "Table metrics to record in native metrics storage.");
 TAG_FLAG(metrics_snapshotter_table_metrics_whitelist, advanced);
 
-constexpr int kTServerMetricsSnapshotterYbClientDefaultTimeoutMs =
+constexpr int kTServerMetricsSnapshotterYBClientDefaultTimeoutMs =
   yb::RegularBuildVsSanitizers(5, 60) * 1000;
 
-DEFINE_int32(tserver_metrics_snapshotter_yb_client_default_timeout_ms,
-    kTServerMetricsSnapshotterYbClientDefaultTimeoutMs,
+DEFINE_UNKNOWN_int32(tserver_metrics_snapshotter_yb_client_default_timeout_ms,
+    kTServerMetricsSnapshotterYBClientDefaultTimeoutMs,
     "Default timeout for the YBClient embedded into the tablet server that is used "
     "by metrics snapshotter.");
 TAG_FLAG(tserver_metrics_snapshotter_yb_client_default_timeout_ms, advanced);
 
-DEFINE_uint64(metrics_snapshotter_ttl_ms, 7 * 24 * 60 * 60 * 1000 /* 1 week */,
+DEFINE_UNKNOWN_uint64(metrics_snapshotter_ttl_ms, 7 * 24 * 60 * 60 * 1000 /* 1 week */,
              "Ttl for snapshotted metrics.");
 TAG_FLAG(metrics_snapshotter_ttl_ms, advanced);
 
-DECLARE_int32(max_tables_metrics_breakdowns);
+DECLARE_bool(enable_ysql_conn_mgr_stats);
 
 using std::shared_ptr;
 using std::vector;
-using strings::Substitute;
+using std::set;
 
 namespace yb {
 
@@ -145,6 +147,8 @@ class MetricsSnapshotter::Thread {
   Status DoPrometheusMetricsSnapshot(const client::TableHandle& table,
     shared_ptr<YBSession> session, const std::string& entity_type, const std::string& entity_id,
     const std::string& metric_name, int64_t metric_val, const rapidjson::Document* details);
+  Status DoYsqlConnMgrMetricsSnapshot(const client::TableHandle& table,
+    shared_ptr<YBSession> session);
   Status DoMetricsSnapshot();
 
   void FlushSession(const std::shared_ptr<YBSession>& session,
@@ -156,16 +160,13 @@ class MetricsSnapshotter::Thread {
     return log_prefix_;
   }
 
-  // Retrieves current cpu usage information.
-  Result<vector<uint64_t>> GetCpuUsage();
-
   // The server for which we are collecting metrics.
   TabletServer* const server_;
 
   // The actual running thread (NULL before it is started)
   scoped_refptr<yb::Thread> thread_;
 
-  boost::optional<yb::client::AsyncClientInitialiser> async_client_init_;
+  boost::optional<yb::client::AsyncClientInitializer> async_client_init_;
 
   // True once at least one attempt to record a snapshot has been made.
   bool has_metricssnapshotted_ = false;
@@ -212,6 +213,44 @@ Status MetricsSnapshotter::Start() {
 Status MetricsSnapshotter::Stop() {
   return thread_->Stop();
 }
+
+Result<std::vector<double>> MetricsSnapshotter::GetCpuUsageInInterval(int ms) {
+  std::vector<double> cpu_usage;
+  auto cur_ticks1 = VERIFY_RESULT(GetCpuUsage());
+  bool get_cpu_success = std::all_of(
+      cur_ticks1.begin(), cur_ticks1.end(), [](uint64_t v) { return v > 0; });
+  if (!get_cpu_success) {
+    return STATUS_FORMAT(RuntimeError, "Failed to retrieve CPU ticks. Got "
+                          "[total_ticks, user-ticks, system_ticks]=$0.", cur_ticks1);
+  }
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+  auto cur_ticks2 = VERIFY_RESULT(GetCpuUsage());
+  get_cpu_success = std::all_of(
+      cur_ticks2.begin(), cur_ticks2.end(), [](uint64_t v) { return v > 0; });
+  if (!get_cpu_success) {
+    return STATUS_FORMAT(RuntimeError, "Failed to retrieve CPU ticks. Got "
+                        "[total_ticks, user-ticks, system_ticks]=$0.", cur_ticks2);
+  }
+
+  uint64_t total_ticks = cur_ticks2[0] - cur_ticks1[0];
+  uint64_t user_ticks = cur_ticks2[1] - cur_ticks1[1];
+  uint64_t system_ticks = cur_ticks2[2] - cur_ticks1[2];
+  if (total_ticks < 0) {
+    return STATUS_FORMAT(RuntimeError, "Failed to calculate CPU usage - "
+                        "invalid total CPU ticks: $0.", total_ticks);
+  } else if (total_ticks == 0) {
+    cpu_usage.emplace_back(0);
+    cpu_usage.emplace_back(0);
+  } else {
+    cpu_usage.emplace_back(static_cast<double>(user_ticks) / total_ticks);
+    cpu_usage.emplace_back(static_cast<double>(system_ticks) / total_ticks);
+  }
+
+  return cpu_usage;
+}
+
+
 
 ////////////////////////////////////////////////////////////
 // MetricsSnapshotter::Thread
@@ -314,43 +353,113 @@ Status MetricsSnapshotter::Thread::DoPrometheusMetricsSnapshot(const client::Tab
   return Status::OK();
 }
 
+namespace {
+
+constexpr uint32_t kYsqlConnMgrMaxPools = YSQL_CONN_MGR_MAX_POOLS;
+
+constexpr auto kMetricWhitelistItemNodeUp = "node_up";
+constexpr auto kMetricWhitelistItemCpuUsage = "cpu_usage";
+constexpr auto kMetricWhitelistItemDiskUsage = "disk_usage";
+constexpr auto kMetricWhitelistItemYsqlConnMgr = "ysql_conn_mgr";
+
+} // namespace
+
+Status MetricsSnapshotter::Thread::DoYsqlConnMgrMetricsSnapshot(const client::TableHandle& table,
+    shared_ptr<YBSession> session) {
+  if (!FLAGS_enable_ysql_conn_mgr_stats) {
+    YB_LOG_EVERY_N_SECS(WARNING, 120) << "Metrics whitelist contains ysql_conn_mgr, but "
+                                      << "enable_ysql_conn_mgr_stats flag is false.";
+    return Status::OK();
+  }
+  // Below is a modified copy of the GetYsqlConnMgrStats function in
+  // ybc_pg_webserver_wrapper.cc.
+  std::vector<ConnectionStats> stats_list;
+  auto shm_key = server_->GetYsqlConnMgrStatsShmemKey();
+  if (shm_key == 0) {
+    YB_LOG_EVERY_N_SECS(WARNING, 120) << "Ysql connection manager shmem key is zero.";
+    return Status::OK();
+  }
+
+  int shmid = shmget(shm_key, 0, 0666);
+  if (shmid == -1) {
+    YB_LOG_EVERY_N_SECS(WARNING, 120) << "Unable to find ysql conn mgr stats from the shared "
+                                      << "memory segment, with errno: "
+                                      << strerror(errno);
+    return Status::OK();
+  }
+  // Attach to the segment to get a pointer to it.
+  auto *shmp = (struct ConnectionStats *)shmat(shmid, NULL, 0);
+  if (shmp == NULL) {
+    YB_LOG_EVERY_N_SECS(WARNING, 120) << "Unable to find ysql conn mgr stats from the shared "
+                                      << "memory segment, with errno: "
+                                      << strerror(errno);
+    return Status::OK();
+  }
+  for (uint32_t itr = 0; itr < kYsqlConnMgrMaxPools; itr++) {
+    if (strcmp(shmp[itr].database_name, "") == 0) {
+      // All the valid entries in the shmem have been processed.
+      break;
+    }
+    stats_list.push_back(shmp[itr]);
+  }
+  // Detach from shared memory.
+  shmdt(shmp);
+  // End of modified copy of the GetYsqlConnMgrStats function.
+
+  uint64_t total_logical_connections = 0;
+  uint64_t total_physical_connections = 0;
+  for (const auto &stat : stats_list) {
+    if (strcmp(stat.database_name, "control_connection") != 0) {
+      total_logical_connections += stat.active_clients +
+                                   stat.queued_clients +
+                                   stat.waiting_clients;
+      total_physical_connections += stat.active_servers + stat.idle_servers;
+    }
+  }
+  RETURN_NOT_OK(DoPrometheusMetricsSnapshot(table, session, "tserver",
+                                            server_->permanent_uuid(),
+                                            "total_logical_connections",
+                                            total_logical_connections));
+  RETURN_NOT_OK(DoPrometheusMetricsSnapshot(table, session, "tserver",
+                                            server_->permanent_uuid(),
+                                            "total_physical_connections",
+                                            total_physical_connections));
+  return Status::OK();
+}
+
 Status MetricsSnapshotter::Thread::DoMetricsSnapshot() {
   CHECK(IsCurrentThread());
 
-  auto client_ = async_client_init_->client();
-  shared_ptr<YBSession> session = client_->NewSession();
-  session->SetTimeout(15s);
+  auto client = async_client_init_->client();
+  auto session = client->NewSession(15s);
 
   const YBTableName kTableName(
       YQL_DATABASE_CQL, master::kSystemNamespaceName, kMetricsSnapshotsTableName);
 
   client::TableHandle table;
-  RETURN_NOT_OK(table.Open(kTableName, client_));
+  RETURN_NOT_OK(table.Open(kTableName, client));
 
   NMSWriter::EntityMetricsMap table_metrics;
   NMSWriter::MetricsMap server_metrics;
-  NMSWriter nmswriter{&table_metrics, &server_metrics};
-  MetricPrometheusOptions opt;
-  MetricEntityOptions entity_opts;
-  entity_opts.metrics.push_back("*");
-  opt.max_tables_metrics_breakdowns = FLAGS_max_tables_metrics_breakdowns;
+  MetricPrometheusOptions opts;
+  NMSWriter nmswriter(&table_metrics, &server_metrics, opts);
   WARN_NOT_OK(
-      server_->metric_registry()->WriteForPrometheus(&nmswriter, entity_opts, opt),
+      server_->metric_registry()->WriteForPrometheus(&nmswriter, opts),
       "Couldn't write metrics for native metrics storage");
-  for (const auto& kv : server_metrics) {
-    if (tserver_metrics_whitelist_.find(kv.first) != tserver_metrics_whitelist_.end()) {
+  for (const auto& [metric_name, metric_value] : server_metrics) {
+    if (tserver_metrics_whitelist_.contains(metric_name)) {
       RETURN_NOT_OK(DoPrometheusMetricsSnapshot(table, session, "tserver",
-            server_->permanent_uuid(), kv.first, kv.second));
+            server_->permanent_uuid(), metric_name, metric_value));
     }
   }
 
-  if (tserver_metrics_whitelist_.find("node_up") != tserver_metrics_whitelist_.end()) {
+  if (tserver_metrics_whitelist_.contains(kMetricWhitelistItemNodeUp)) {
     RETURN_NOT_OK(DoPrometheusMetricsSnapshot(table, session, "tserver",
                                               server_->permanent_uuid(), "node_up",
                                               1));
   }
 
-  if (tserver_metrics_whitelist_.find("disk_usage") != tserver_metrics_whitelist_.end()) {
+  if (tserver_metrics_whitelist_.contains(kMetricWhitelistItemDiskUsage)) {
     struct statvfs stat;
     set<uint64_t> fs_ids;
     std::vector<std::string> all_data_paths = opts_.fs_opts.data_paths;
@@ -373,16 +482,16 @@ Status MetricsSnapshotter::Thread::DoMetricsSnapshot() {
     }
   }
 
-  if (tserver_metrics_whitelist_.find("cpu_usage") != tserver_metrics_whitelist_.end()) {
+  if (tserver_metrics_whitelist_.contains(kMetricWhitelistItemCpuUsage)) {
     // Store the {total_ticks, user_ticks, and system_ticks}
-    auto cur_ticks = CHECK_RESULT(GetCpuUsage());
+    auto cur_ticks = CHECK_RESULT(MetricsSnapshotter::GetCpuUsage());
     bool get_cpu_success = std::all_of(
         cur_ticks.begin(), cur_ticks.end(), [](bool v) { return v > 0; });
     if (get_cpu_success && first_run_cpu_ticks_) {
       prev_ticks_ = cur_ticks;
       first_run_cpu_ticks_ = false;
       std::this_thread::sleep_for(std::chrono::milliseconds(500));
-      cur_ticks = CHECK_RESULT(GetCpuUsage());
+      cur_ticks = CHECK_RESULT(MetricsSnapshotter::GetCpuUsage());
       get_cpu_success = std::all_of(
           cur_ticks.begin(), cur_ticks.end(), [](bool v) { return v > 0; });
     }
@@ -391,6 +500,7 @@ Status MetricsSnapshotter::Thread::DoMetricsSnapshot() {
       uint64_t total_ticks = cur_ticks[0] - prev_ticks_[0];
       uint64_t user_ticks = cur_ticks[1] - prev_ticks_[1];
       uint64_t system_ticks = cur_ticks[2] - prev_ticks_[2];
+      prev_ticks_ = cur_ticks;
       if (total_ticks <= 0) {
         YB_LOG_EVERY_N_SECS(ERROR, 120) << Format("Failed to calculate CPU usage - "
                                                  "invalid total CPU ticks: $0.", total_ticks);
@@ -419,11 +529,15 @@ Status MetricsSnapshotter::Thread::DoMetricsSnapshot() {
     }
   }
 
-  for (const auto& kv : table_metrics) {
-    for (const auto& vkv : kv.second) {
-      if (table_metrics_whitelist_.find(vkv.first) != table_metrics_whitelist_.end()) {
-        RETURN_NOT_OK(DoPrometheusMetricsSnapshot(table, session, "table", kv.first, vkv.first,
-              vkv.second));
+  if (tserver_metrics_whitelist_.contains(kMetricWhitelistItemYsqlConnMgr)) {
+    RETURN_NOT_OK(DoYsqlConnMgrMetricsSnapshot(table, session));
+  }
+
+  for (const auto& [table_id, table_metrics] : table_metrics) {
+    for (const auto& [metric_name, metric_value] : table_metrics) {
+      if (table_metrics_whitelist_.contains(metric_name)) {
+        RETURN_NOT_OK(DoPrometheusMetricsSnapshot(table, session, "table", table_id, metric_name,
+              metric_value));
       }
     }
   }
@@ -432,7 +546,49 @@ Status MetricsSnapshotter::Thread::DoMetricsSnapshot() {
   return Status::OK();
 }
 
-Result<vector<uint64_t>> MetricsSnapshotter::Thread::GetCpuUsage() {
+Result<vector<uint64_t>> MetricsSnapshotter::GetMemoryUsage() {
+  uint64_t total_memory = 0, free_memory = 0, available_memory = 0;
+#ifdef __APPLE__
+  // Implementation for APPLE OS
+  // Retrieve physical memory information using sysctl
+  int mib[2];
+  mib[0] = CTL_HW;
+  mib[1] = HW_MEMSIZE;
+  int64_t physical_memory;
+  size_t length = sizeof(physical_memory);
+  if (sysctl(mib, 2, &physical_memory, &length, NULL, 0) != 0) {
+    return STATUS(RuntimeError, "Failed to retrieve physical memory information");
+  }
+  total_memory = physical_memory;
+  free_memory = 0; // Not available on macOS
+  available_memory = 0; // Not available on macOS
+#else
+  // Implementation for Linux
+  FILE* file = fopen("/proc/meminfo", "r");
+  if (!file) {
+    return STATUS(RuntimeError, "Failed to open /proc/meminfo");
+  }
+  char line[128];
+  while (fgets(line, sizeof(line), file)) {
+    if (strncmp(line, "MemTotal:", 9) == 0) {
+      sscanf(line + 9, "%lu", &total_memory);
+    } else if (strncmp(line, "MemFree:", 8) == 0) {
+      sscanf(line + 8, "%lu", &free_memory);
+    } else if (strncmp(line, "MemAvailable:", 13) == 0) {
+      sscanf(line + 13, "%lu", &available_memory);
+    }
+  }
+  fclose(file);
+  // proc meminfo reports in KB, convert to bytes
+  total_memory *= 1024;
+  free_memory *= 1024;
+  available_memory *= 1024;
+#endif
+  vector<uint64_t> ret = {total_memory, free_memory, available_memory};
+  return ret;
+}
+
+Result<vector<uint64_t>> MetricsSnapshotter::GetCpuUsage() {
   uint64_t total_ticks = 0, total_user_ticks = 0, total_system_ticks = 0;
 #ifdef __APPLE__
   host_cpu_load_info_data_t cpuinfo;
@@ -464,13 +620,13 @@ Result<vector<uint64_t>> MetricsSnapshotter::Thread::GetCpuUsage() {
     YB_LOG_EVERY_N_SECS(WARNING, 120) << Format("Failed to scan /proc/stat for cpu ticks. ",
                                                "Expected 4 inputs but got $0.", scanned);
   } else {
-    if (fclose(file)) {
-      YB_LOG_EVERY_N_SECS(WARNING, 120) << "Failed to close /proc/stat with errno: "
-                                        << strerror(errno);
-    }
     total_ticks = user_ticks + user_nice_ticks + system_ticks + idle_ticks;
     total_user_ticks = user_ticks + user_nice_ticks;
     total_system_ticks = system_ticks;
+  }
+  if (fclose(file)) {
+    YB_LOG_EVERY_N_SECS(WARNING, 120) << "Failed to close /proc/stat with errno: "
+                                      << strerror(errno);
   }
 #endif
   vector<uint64_t> ret = {total_ticks, total_user_ticks, total_system_ticks};
@@ -536,7 +692,7 @@ Status MetricsSnapshotter::Thread::Stop() {
   {
     MutexLock l(mutex_);
     should_run_ = false;
-    cond_.Signal();
+    YB_PROFILE(cond_.Signal());
   }
   RETURN_NOT_OK(ThreadJoiner(thread_.get()).Join());
   thread_ = nullptr;

@@ -1,68 +1,132 @@
 ---
-title: Horizontal Scalability
-headerTitle: Horizontal Scalability
+title: Horizontal scalability
+headerTitle: Horizontal scalability
 linkTitle: Horizontal scalability
-description: Horizontal Scalability in YugabyteDB.
-headcontent: Horizontal Scalability in YugabyteDB.
-image: /images/section_icons/explore/linear_scalability.png
+description: Horizontal scalability in YugabyteDB.
+headcontent: Handle larger workloads by adding nodes to your cluster
 menu:
   stable:
     identifier: explore-scalability
     parent: explore
     weight: 220
+showRightNav: true
 type: indexpage
 ---
-A YugabyteDB cluster can be scaled horizontally (to increase the aggregate vCPUs, memory and disk in the database cluster) by dynamically adding nodes to a running cluster, or by increasing the number of pods in the `yb-tserver` StatefulSet in the case of Kubernetes deployments.
 
-A YugabyteDB cluster is scaled out so that it can handle:
+Being able to scale a distributed system is essential to reliably and efficiently meeting the increasing demands of users, workloads, and data. Scalability is central to the design and maintenance of distributed systems. You need it to ensure systems can handle increasing workloads, provide high availability, optimize resource usage, adapt to changing requirements, and accommodate future growth.
 
-* More transactions per second
-* Higher number of concurrent client connections
-* Larger datasets
+Depending on your business, you may need to scale for a variety of reasons:
 
-{{< note title="Note" >}}
+- **Growing user base**. Your application becomes popular, users love your app, and the user base is expanding.
+- **Seasonal traffic**. Occasionally, you have to handle a lot more transactions per second than usual. Black Friday and Cyber Monday retail traffic, or streaming for special events like the Superbowl or World Cup, for example.
+- **Growing datasets**. For example, you have an IoT app or an audit database that keeps growing rapidly daily. These systems have to handle a high volume of writes regularly.
+- **Changing business priorities**. Scaling needs are often unpredictable. To take one example, retail priorities shifted radically when Covid entered the picture. With a database that can scale, you can pivot quickly when the business environment shifts.
+- **New geographies**. Your user base expands to new regions, and you need to add to your presence globally by adding more data centers in different continents.
 
-A YugabyteDB cluster can be dynamically *scaled out* by adding nodes (or increasing the number of pods in the case of Kubernetes). It can also be *scaled in* dynamically by draining all the data from existing cluster nodes (or pods), and subsequently removing them from the cluster.
+Being able to scale seamlessly is as important as being able to scale. Scaling needs to be operationally simple and completely transparent to the applications. With YugabyteDB, you can start small and add nodes as needed. You can scale your data, reads, and writes without disrupting ongoing applications. As your needs grow, YugabyteDB automatically shards data and scales out. You can also scale up your cluster for short-term needs and then scale down after the need is over.
 
-{{</note >}}
+## Ways to scale
 
-### How scalability works
+There are 2 common ways to scale, namely **vertical** and **horizontal**. YugabyteDB supports both. In vertical scaling, you enhance the capabilities of your existing nodes by increasing CPU, memory, storage, and so on. With horizontal scaling, you add more nodes of the same type to your cluster. Horizontal scaling is the most common type of scaling in YugabyteDB. As YugabyteDB is distributed, scaling is operationally straightforward and performed without any service disruption.
 
-Every table in YugabyteDB is transparently sharded using the primary key of the table, each of these shards are called *tablets*. Each tablet consists of a set of rows in a table. In YugabyteDB, tables are automatically split into tablets. This is done at time of creating the table if possible. Tablets can also be split dynamically.
+{{<lead link="./horizontal-vs-vertical-scaling/">}}
+Learn about the pros and cons of [horizontal vs vertical scaling](./horizontal-vs-vertical-scaling/).
+{{</lead>}}
 
-The table below summarizes the support for scalability and sharding across YSQL and YCQL APIs.
+## How scaling works
 
-| <span style="font-size:20px;">Property</span> | <span style="font-size:20px;">YSQL</span> | <span style="font-size:20px;">YCQL</span> | <span style="font-size:20px;">Comments</span> |
-|--------------------------------------------------|-------------|----------|----------|
-| <span style="font-size:16px;">[Scale transactions per sec](scaling-transactions/)</span> | <span style="font-size:16px;">Yes</span> | <span style="font-size:16px;">Yes</span> | Scale out the cluster to handle a higher number of concurrent transactions per second. |
-| <span style="font-size:16px;">[Data distribution support](sharding-data/)</span> | <span style="font-size:16px;">Hash sharding, <br/>  Range sharding</span>  | <span style="font-size:16px;">Hash sharding</span> | Sharding is used to distributed data across nodes of clusters. <br/> Tables can be pre-split at creation time, and dynamically split at runtime. |
+To get a better idea of the effort and time you will need to scale your systems, it's helpful to understand a few basic concepts that describe how YugabyteDB scales. Let's go over them quickly.
 
-The various features are explained in these sections:
+### Sharding
 
-<div class="row">
+Data distribution is critical in scaling. In YugabyteDB, data is [split (sharded)](./data-distribution/) into tablets. A tablet is effectively a piece of a table and these tablets are placed on various nodes. The mapping of a row of a table to a tablet is deterministic and the system knows exactly which tablet holds a specific row.
 
-   <div class="col-12 col-md-6 col-lg-12 col-xl-6">
-    <a class="section-link icon-offset" href="scaling-transactions/">
-      <div class="head">
-        <img class="icon" src="/images/section_icons/explore/linear_scalability.png" aria-hidden="true" />
-        <div class="title">Scaling transactions per second</div>
-      </div>
-      <div class="body">
-        Scale out the cluster to handle a higher number of concurrent transactions per sec.
-      </div>
-    </a>
-  </div>
+{{<lead link="../../architecture/docdb-sharding/sharding/">}}
+Learn about [hash and range sharding](../../architecture/docdb-sharding/sharding/).
+{{</lead>}}
 
-  <div class="col-12 col-md-6 col-lg-12 col-xl-6">
-    <a class="section-link icon-offset" href="sharding-data/">
-      <div class="head">
-        <img class="icon" src="/images/section_icons/explore/auto_sharding.png" aria-hidden="true" />
-        <div class="title">Sharding (distributing) data across nodes</div>
-      </div>
-      <div class="body">
-        Automatic data distribution across nodes of the cluster using transparent sharding of tables.
-      </div>
-    </a>
-  </div>
+{{<lead link="./data-distribution/#tablet-splitting">}}
+For an illustration of how tablets are split, see [Tablet splitting](./data-distribution/#tablet-splitting).
+{{</lead>}}
 
-</div>
+### Rebalancing
+
+As your data grows, tablets are split and moved across the different nodes in the cluster to maintain an equal distribution of data across the nodes. This process is known as _Rebalancing_. Data is moved automatically, without any interruption in service.
+
+{{<lead link="./data-distribution/#rebalancing">}}
+For an illustration of how tablets are rebalanced, see [Rebalancing](./data-distribution/#rebalancing).
+{{</lead>}}
+
+### Adding nodes
+
+When more [nodes are added](./node-addition), some tablets are automatically [rebalanced](./data-distribution/#rebalancing) to the new nodes, and the entire cluster can therefore handle more transactions and queries in parallel, thus increasing its capacity to handle larger workloads.
+
+{{<lead link="node-addition/">}}
+For an illustration of what happens when nodes are added to a cluster, see [Adding nodes](node-addition/).
+{{</lead>}}
+
+## When to scale
+
+To know when to scale, monitor metrics provided for CPU, memory, and disk space. Set up alerts on these metrics to give you ample time to plan and react.
+
+For best results, keep steady state resource usage under 60%, and take strong action at 75%, in particular for disk space. If CPU or memory is high, the system will slow; if disk usage approaches limits, usage on followers also increases, and moving and recovering data takes time.
+
+[YugabyteDB Anywhere](../../yugabyte-platform/alerts-monitoring/) and [YugabyteDB Aeon](../../yugabyte-cloud/cloud-monitor/) both include metrics dashboards and configurable alerts to keep you notified of changes.
+
+{{<lead link="../observability/">}}
+Learn about the various metrics than you can monitor in [Observability](../observability/).
+{{</lead>}}
+
+## Learn more
+
+{{<index/block>}}
+
+  {{<index/item
+    title="Distribute data across nodes"
+    body="Automatic data distribution across a universe's nodes using transparent sharding of tables."
+    href="data-distribution/"
+    icon="fa-thin fa-share-nodes">}}
+
+  {{<index/item
+    title="Horizontal vs vertical scaling"
+    body="Understand the differences between horizontal and vertical scaling."
+    href="horizontal-vs-vertical-scaling/"
+    icon="fa-thin fa-circle-nodes">}}
+
+  {{<index/item
+    title="Scale out by adding nodes"
+    body="Seamlessly scale your cluster on demand by adding new nodes to the cluster."
+    href="node-addition/"
+    icon="fa-thin fa-circle-plus">}}
+
+  {{<index/item
+    title="Reads"
+    body="See how reads scale in YugabyteDB."
+    href="scaling-reads/"
+    icon="fa-thin fa-book-open-reader">}}
+
+  {{<index/item
+    title="Writes"
+    body="See how writes scale in YugabyteDB."
+    href="scaling-writes/"
+    icon="fa-thin fa-pen">}}
+
+  {{<index/item
+    title="Transactions"
+    body="See how transactions scale in YugabyteDB."
+    href="scaling-transactions/"
+    icon="fa-thin fa-money-from-bracket">}}
+
+  {{<index/item
+    title="Large datasets"
+    body="See how large datasets scale in YugabyteDB."
+    href="scaling-large-datasets/"
+    icon="fa-thin fa-weight-hanging">}}
+
+  {{<index/item
+    title="Scale out a universe"
+    body="Try it out for yourself by following an example."
+    href="scaling-universe/"
+    icon="fa-thin fa-circle-nodes">}}
+
+{{</index/block>}}

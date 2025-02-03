@@ -1,3 +1,6 @@
+-- avoid bit-exact output here because operations may not be bit-exact.
+SET extra_float_digits = 0;
+
 -- Create new tables
 CREATE TABLE x(a int PRIMARY KEY, b text);
 CREATE TABLE y(a int PRIMARY KEY, b text);
@@ -86,6 +89,23 @@ create temp table prtx1_3 partition of prtx1 for values from (21) to (31);
 insert into prtx1 select 1 + i%30, i, i
   from generate_series(1,1000) i;
 analyze prtx1;
+
+-- Verify analyze works after dropping a table column.
+ALTER TABLE x DROP COLUMN b;
+ANALYZE x;
+SELECT
+  relname,
+  reltuples,
+  staattnum,
+  stanullfrac,
+  stawidth,
+  stadistinct
+FROM
+  pg_class LEFT JOIN pg_statistic ON pg_class.oid = starelid
+WHERE
+  relname = 'x'
+ORDER BY
+  relname, staattnum;
 
 -- Cleanup
 DROP TABLE x;

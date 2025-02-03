@@ -17,15 +17,15 @@ import java.util.Map;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.yb.minicluster.MiniYBClusterBuilder;
-import org.yb.util.YBTestRunnerNonTsanOnly;
+import org.yb.YBTestRunner;
 
 import com.google.common.collect.ImmutableMap;
 
 /**
  * Runs the pg_regress test suite on YB code.
  */
-@RunWith(value=YBTestRunnerNonTsanOnly.class)
-public class TestPgRegressAnalyze extends BasePgSQLTest {
+@RunWith(value=YBTestRunner.class)
+public class TestPgRegressAnalyze extends BasePgRegressTest {
 
   private Map<String, String> commonTserverFlags = ImmutableMap.of(
       "ysql_beta_features", "1");

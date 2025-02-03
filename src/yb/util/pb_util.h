@@ -33,16 +33,58 @@
 // Utilities for dealing with protocol buffers.
 // These are mostly just functions similar to what are found in the protobuf
 // library itself, but using yb::faststring instances instead of STL strings.
-#ifndef YB_UTIL_PB_UTIL_H
-#define YB_UTIL_PB_UTIL_H
+#pragma once
 
 #include <string>
 
+#include <google/protobuf/repeated_field.h>
 #include <gtest/gtest_prod.h>
 
 #include "yb/util/faststring.h"
 #include "yb/util/slice.h"
 #include "yb/util/status_fwd.h"
+
+// Check that the provided fields have been set in the protobuf. If the check fails, this returns
+// an InvalidArgument Status who's message containing the list of missing fields.
+//
+// Ex: SCHECK_PB_FIELDS_SET(req, field_1, field_2, field_3);
+#define SCHECK_PB_FIELDS_SET(pb, ...) \
+  do { \
+    std::vector<std::string> _missing_fields; \
+    BOOST_PP_SEQ_FOR_EACH( \
+        INTERNAL_SCHECK_PB_FIELD_SET, (pb), BOOST_PP_VARIADIC_TO_SEQ(__VA_ARGS__)) \
+    SCHECK_FORMAT( \
+        _missing_fields.empty(), InvalidArgument, "Missing required arguments: $0", \
+        _missing_fields); \
+  } while (0)
+
+#define INTERNAL_SCHECK_PB_FIELD_SET(i, pb, field) \
+  if (!pb.BOOST_PP_CAT(has_, field)()) { \
+    _missing_fields.emplace_back(BOOST_PP_STRINGIZE(field)); \
+  }
+
+// Check that the provided fields are not empty in the protobuf.
+// This uses the empty() function for fields that support it (string and repeated types). For
+// repeated types all elements in the list are also checked individually. If the check fails, this
+// returns an InvalidArgument Status who's message containing the list of
+// empty fields. If the type does not implement empty() then it is treated as not empty.
+// SCHECK_PB_FIELDS_SET must be used for these types.
+//
+// Ex: SCHECK_PB_FIELDS_NOT_EMPTY(req, field_1, field_2, field_3);
+#define SCHECK_PB_FIELDS_NOT_EMPTY(pb, ...) \
+  do { \
+    std::vector<std::string> _missing_fields; \
+    BOOST_PP_SEQ_FOR_EACH( \
+        INTERNAL_SCHECK_PB_FIELD_NOT_EMPTY, (pb), BOOST_PP_VARIADIC_TO_SEQ(__VA_ARGS__)) \
+    SCHECK_FORMAT( \
+        _missing_fields.empty(), InvalidArgument, "Empty required arguments: $0", \
+        _missing_fields); \
+  } while (0)
+
+#define INTERNAL_SCHECK_PB_FIELD_NOT_EMPTY(i, pb, field) \
+  if (yb::pb_util_internal::IsPbFieldEmpty(pb.field())) { \
+    _missing_fields.emplace_back(BOOST_PP_STRINGIZE(field)); \
+  }
 
 namespace google {
 namespace protobuf {
@@ -52,13 +94,48 @@ class FileDescriptorSet;
 class MessageLite;
 class Message;
 
-template <class T>
-class RepeatedPtrField;
-
 } // namespace protobuf
 } // namespace google
 
 namespace yb {
+
+namespace pb_util_internal {
+template <class T>
+concept TypeWithEmpty = requires(const T& t) { empty(t); };
+
+template <class T>
+concept TypeWithoutEmpty = !TypeWithEmpty<T>;  // NOLINT
+
+template <TypeWithoutEmpty T>
+bool IsPbFieldEmpty(const T& field) {
+  return false;
+}
+
+template <TypeWithEmpty T>
+bool IsPbFieldEmpty(const T& field) {
+  return field.empty();
+}
+
+template <typename T>
+bool IsPbFieldEmpty(const google::protobuf::RepeatedField<T>& repeated_field) {
+  // RepeatedField only has basic types which do not implement empty().
+  return repeated_field.empty();
+}
+
+template <typename T>
+bool IsPbFieldEmpty(const google::protobuf::RepeatedPtrField<T>& repeated_field) {
+  if (repeated_field.empty()) {
+    return true;
+  }
+  for (const auto& field : repeated_field) {
+    if (IsPbFieldEmpty(field)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+}  // namespace pb_util_internal
 
 class Env;
 class RandomAccessFile;
@@ -69,6 +146,8 @@ class WritableFile;
 namespace pb_util {
 
 using google::protobuf::MessageLite;
+
+static const char* const kTmpTemplateSuffix = ".tmp.XXXXXX";
 
 enum SyncMode {
   SYNC,
@@ -105,6 +184,20 @@ Result<T> ParseFromSlice(const Slice& slice) {
   return result;
 }
 
+template <typename T>
+std::string JoinRepeatedPBs(const google::protobuf::RepeatedPtrField<T>& pbs) {
+  std::string result;
+  bool first = true;
+  for (const auto& pb : pbs) {
+    if (!first) {
+      result += ", ";
+    }
+    result += pb.ShortDebugString();
+    first = false;
+  }
+  return result;
+}
+
 // Load a protobuf from the given path.
 Status ReadPBFromPath(Env* env, const std::string& path, MessageLite* msg);
 
@@ -116,6 +209,16 @@ Status WritePBToPath(Env* env, const std::string& path, const MessageLite& msg, 
 // Truncate any 'bytes' or 'string' fields of this message to max_len.
 // The text "<truncated>" is appended to any such truncated fields.
 void TruncateFields(google::protobuf::Message* message, int max_len);
+
+// Form a path ends with kTmpTemplateSuffix.
+inline std::string MakeTempPath(const std::string& path) {
+  return path + kTmpTemplateSuffix;
+}
+
+// Is the file ends with kTmpTemplateSuffix.
+inline bool IsTempFile(const std::string& path) {
+  return path.ends_with(kTmpTemplateSuffix);
+}
 
 // A protobuf "container" has the following format (all integers in
 // little-endian byte order):
@@ -302,7 +405,7 @@ class ReadablePBContainerFile {
   // If 'eofOK' is EOF_OK, an EOF is returned as-is. Otherwise, it is
   // considered to be an invalid short read and returned as an error.
   Status ValidateAndRead(size_t length, EofOK eofOK,
-                                 Slice* result, std::unique_ptr<uint8_t[]>* scratch);
+                         Slice* result, std::unique_ptr<uint8_t[]>* scratch);
 
   size_t offset_;
 
@@ -351,5 +454,3 @@ bool ArePBsEqual(const google::protobuf::Message& prev_pb,
 using RepeatedBytes = google::protobuf::RepeatedPtrField<std::string>;
 
 } // namespace yb
-
-#endif // YB_UTIL_PB_UTIL_H

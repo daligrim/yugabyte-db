@@ -4,11 +4,9 @@ package com.yugabyte.yw.forms;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
-import com.yugabyte.yw.commissioner.Common;
 import com.yugabyte.yw.common.PlatformServiceException;
-import com.yugabyte.yw.models.AccessKey;
 import com.yugabyte.yw.models.Universe;
-import java.util.UUID;
+import com.yugabyte.yw.models.helpers.NodeDetails.NodeState;
 import play.mvc.Http.Status;
 
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -16,22 +14,17 @@ import play.mvc.Http.Status;
 public class SystemdUpgradeParams extends UpgradeTaskParams {
 
   @Override
-  public void verifyParams(Universe universe) {
-    super.verifyParams(universe);
+  public void verifyParams(Universe universe, boolean isFirstTry) {
+    verifyParams(universe, null, isFirstTry);
+  }
+
+  @Override
+  public void verifyParams(Universe universe, NodeState nodeState, boolean isFirstTry) {
+    super.verifyParams(universe, nodeState, isFirstTry);
 
     if (upgradeOption != UpgradeOption.ROLLING_UPGRADE) {
       throw new PlatformServiceException(
           Status.BAD_REQUEST, "Only ROLLING_UPGRADE option is supported for systemd upgrades.");
-    }
-
-    UserIntent userIntent = universe.getUniverseDetails().getPrimaryCluster().userIntent;
-    if (userIntent.providerType == Common.CloudType.onprem) {
-      AccessKey accessKey =
-          AccessKey.getOrBadRequest(UUID.fromString(userIntent.provider), userIntent.accessKeyCode);
-      if (accessKey.getKeyInfo().skipProvisioning) {
-        throw new PlatformServiceException(
-            Status.BAD_REQUEST, "Cannot upgrade systemd for manually provisioned universes");
-      }
     }
   }
 

@@ -33,9 +33,10 @@
 #include <condition_variable>
 #include <mutex>
 
-#include <glog/logging.h>
+#include "yb/util/logging.h"
 #include <gtest/gtest.h>
 
+#include "yb/util/test_thread_holder.h"
 #include "yb/util/test_util.h"
 
 using namespace std::literals;
@@ -83,6 +84,14 @@ TEST(TestMonoTime, TestComparison) {
   ASSERT_TRUE(mil.LessThan(sec));
   ASSERT_TRUE(mil.MoreThan(nano));
   ASSERT_TRUE(sec.MoreThan(mil));
+
+  ASSERT_TRUE(IsInitialized(CoarseMonoClock::Now()));
+  ASSERT_FALSE(IsInitialized(CoarseTimePoint::min()));
+  ASSERT_TRUE(IsInitialized(CoarseTimePoint::max()));
+
+  ASSERT_FALSE(IsExtremeValue(CoarseMonoClock::Now()));
+  ASSERT_TRUE(IsExtremeValue(CoarseTimePoint::min()));
+  ASSERT_TRUE(IsExtremeValue(CoarseTimePoint::max()));
 }
 
 TEST(TestMonoTime, TestTimeVal) {
@@ -267,6 +276,62 @@ TEST(TestMonoTime, TestSubtractDelta) {
   start_copy.SubtractDelta(delta);
   ASSERT_EQ(start_copy, start - delta);
   ASSERT_EQ(start_copy + delta, start);
+}
+
+TEST(TestMonoTime, ToStringRelativeToNow) {
+  auto now = CoarseMonoClock::Now();
+
+  auto t = now + 2s;
+  ASSERT_EQ(Format("$0 (2.000s from now)", t), ToStringRelativeToNow(t, now));
+  ASSERT_EQ("2.000s from now", ToStringRelativeToNowOnly(t, now));
+
+  t = now;
+  ASSERT_EQ(Format("$0 (now)", t), ToStringRelativeToNow(t, now));
+  ASSERT_EQ("now", ToStringRelativeToNowOnly(t, now));
+
+  t = now - 2s;
+  ASSERT_EQ(Format("$0 (2.000s ago)", t), ToStringRelativeToNow(t, now));
+  ASSERT_EQ("2.000s ago", ToStringRelativeToNowOnly(t, now));
+
+  ASSERT_EQ("-inf", ToStringRelativeToNow(CoarseTimePoint::min(), now));
+  ASSERT_EQ("+inf", ToStringRelativeToNow(CoarseTimePoint::max(), now));
+
+  ASSERT_EQ(ToString(t), ToStringRelativeToNow(t, CoarseTimePoint::min()));
+  ASSERT_EQ(ToString(t), ToStringRelativeToNow(t, CoarseTimePoint::max()));
+}
+
+// Make sure the MonoTime::Now() value does not move backwards.
+// Run multiple threads to increase the chance of catching the issue.
+// Run for 30 seconds.
+TEST(TestMonoTime, DontMoveBackwards) {
+  // Make sure we are using a steady clock for MonoTime.
+  ASSERT_TRUE(std::chrono::steady_clock::is_steady);
+
+  LOG(WARNING) << "Now: " << MonoTime::Now().ToSteadyTimePoint().time_since_epoch().count();
+
+  std::atomic<bool> stop_flag{false};
+
+  auto t = [&stop_flag]() {
+    auto old = MonoTime::Now();
+    while (!stop_flag.load(std::memory_order_acquire)) {
+      auto now = MonoTime::Now();
+      ASSERT_GE(now, old) << "Time moved back!! "
+                          << " Old:" << old.ToSteadyTimePoint().time_since_epoch().count()
+                          << ", Now:" << old.ToSteadyTimePoint().time_since_epoch().count();
+      old = now;
+    }
+  };
+
+  TestThreadHolder holder;
+  holder.AddThreadFunctor(t);
+  holder.AddThreadFunctor(t);
+  holder.AddThreadFunctor(t);
+  holder.AddThreadFunctor(t);
+
+  SleepFor(MonoDelta::FromSeconds(30));
+  stop_flag.store(true, std::memory_order_release);
+
+  holder.JoinAll();
 }
 
 } // namespace yb

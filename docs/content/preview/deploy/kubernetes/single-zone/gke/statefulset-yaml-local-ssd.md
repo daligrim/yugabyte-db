@@ -17,19 +17,19 @@ type: docs
 <ul class="nav nav-tabs-alt nav-tabs-yb">
   <li >
     <a href="../helm-chart/" class="nav-link">
-      <i class="fas fa-cubes" aria-hidden="true"></i>
+      <i class="fa-regular fa-dharmachakra" aria-hidden="true"></i>
       Helm Chart
     </a>
   </li>
   <li >
     <a href="../statefulset-yaml/" class="nav-link">
-      <i class="fas fa-cubes" aria-hidden="true"></i>
+      <i class="fa-solid fa-cubes" aria-hidden="true"></i>
       YAML (remote disk)
     </a>
   </li>
    <li >
     <a href="../statefulset-yaml-local-ssd/" class="nav-link active">
-      <i class="fas fa-cubes" aria-hidden="true"></i>
+      <i class="fa-solid fa-cubes" aria-hidden="true"></i>
       YAML (local disk)
     </a>
   </li>
@@ -70,11 +70,13 @@ Each cluster brings up three nodes each of the type `n1-standard-1` for the Kube
   ...
   ```
 
-- Create a Kubernetes cluster on GKE by running the following in order to create a cluster in the desired zone:
+- Create a private Kubernetes cluster on GKE in the desired zone by running the following.
 
   ```sh
-  gcloud container clusters create yugabyte --zone us-west1-b
+  gcloud container clusters create cluster_name --enable-private-nodes --zone us-west1-b
   ```
+
+  Note that you must set up Cloud NAT for a private Kubernetes cluster in Google Cloud to ensure that your cluster can access the internet while its nodes do not have public IP addresses. Refer to [Configuring Private Google Access and Cloud NAT in Google Cloud Platform (GCP)](https://kloudkraft.medium.com/configuring-private-google-access-and-cloud-nat-in-google-cloud-platform-gcp-3c4406b590b3).
 
 - List the available cluster by running the following command:
 
@@ -85,7 +87,7 @@ Each cluster brings up three nodes each of the type `n1-standard-1` for the Kube
   ```output
   NAME      LOCATION    MASTER_VERSION  MASTER_IP       MACHINE_TYPE   NODE_VERSION  NUM_NODES  STATUS
   yugabyte  us-west1-b  1.8.7-gke.1     35.199.164.253  n1-standard-1  1.8.7-gke.1   3          RUNNING
-  
+
   Created [https://container.googleapis.com/v1/projects/yugabyte/zones/us-west1-b/clusters/yugabyte].
   ```
 
@@ -174,7 +176,7 @@ The following `nodeSelector` snippet in the YAML file instructs the Kubernetes s
     cloud.google.com/gke-local-ssd: "true"
 ```
 
-Also note that you instruct the scheduler to place the various pods in the `yb-master` or `yb-tserver` services on different physical nodes with the `antiAffinity` hint:
+Also note that you instruct the scheduler to place the various pods in the yb-master or yb-tserver services on different physical nodes with the `antiAffinity` hint:
 
 ```yaml
   spec:
@@ -249,7 +251,7 @@ Filesystem      Size  Used Avail Use% Mounted on
 ...
 ```
 
-You can connect to the `ycqlsh` shell on this universe by running the following command:
+You can connect to the ycqlsh shell on this universe by running the following command:
 
 ```sh
 kubectl exec -it yb-tserver-0 -- ycqlsh yb-tserver-0

@@ -13,14 +13,12 @@
 
 // Provides mappings for argument and return types between YB C API and its C++ implementation.
 
-#ifndef YB_YQL_PGGATE_TYPE_MAPPING_H
-#define YB_YQL_PGGATE_TYPE_MAPPING_H
-
-#include "yb/common/ybc-internal.h"
-#include "yb/common/ybc_util.h"
+#pragma once
 
 #include "yb/util/status_fwd.h"
 
+#include "yb/yql/pggate/util/ybc-internal.h"
+#include "yb/yql/pggate/util/ybc_util.h"
 #include "yb/yql/pggate/ybc_pg_typedefs.h"
 
 namespace yb {
@@ -39,10 +37,10 @@ template<typename c_type> struct ReturnTypeMapper {
   }
 };
 
-template<> struct ReturnTypeMapper<YBCStatus> {
+template<> struct ReturnTypeMapper<YbcStatus> {
   typedef Status cxx_ret_type;
 
-  static YBCStatus ToC(cxx_ret_type cxx_value) {
+  static YbcStatus ToC(cxx_ret_type cxx_value) {
     return ::yb::ToYBCStatus(cxx_value);
   }
 };
@@ -66,5 +64,3 @@ template<typename c_type> struct ArgTypeMapper {
 
 } // namespace pggate
 } // namespace yb
-
-#endif  // YB_YQL_PGGATE_TYPE_MAPPING_H

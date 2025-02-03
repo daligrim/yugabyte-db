@@ -1,4 +1,4 @@
-// Copyright (c) YugaByte, Inc.
+// Copyright (c) YugabyteDB, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
 // in compliance with the License.  You may obtain a copy of the License at
@@ -14,20 +14,20 @@ package org.yb.pgsql;
 
 import org.junit.Test;
 import org.junit.runner.RunWith;
-import org.yb.util.YBTestRunnerNonTsanOnly;
+import org.yb.YBTestRunner;
 
 /**
  * Runs the pg_regress test suite on YB code.
  */
-@RunWith(value=YBTestRunnerNonTsanOnly.class)
-public class TestPgRegressTypesNumeric extends BasePgSQLTest {
+@RunWith(value=YBTestRunner.class)
+public class TestPgRegressTypesNumeric extends BasePgRegressTest {
   @Override
   public int getTestMethodTimeoutSec() {
     return 1800;
   }
 
   @Test
-  public void testPgRegressTypes() throws Exception {
-    runPgRegressTest("yb_pg_types_numeric_serial_schedule");
+  public void schedule() throws Exception {
+    runPgRegressTest("yb_types_numeric_schedule");
   }
 }

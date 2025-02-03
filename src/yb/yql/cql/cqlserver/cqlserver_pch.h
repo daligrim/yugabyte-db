@@ -19,6 +19,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/uio.h>
 #include <time.h>
@@ -33,6 +34,7 @@
 #include <cfloat>
 #include <chrono>
 #include <cmath>
+#include <compare>
 #include <condition_variable>
 #include <cstdarg>
 #include <cstddef>
@@ -43,6 +45,7 @@
 #include <functional>
 #include <future>
 #include <iosfwd>
+#include <iterator>
 #include <limits>
 #include <list>
 #include <map>
@@ -74,6 +77,7 @@
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/atomic.hpp>
 #include <boost/bind.hpp>
+#include <boost/circular_buffer.hpp>
 #include <boost/compute/detail/lru_cache.hpp>
 #include <boost/container/small_vector.hpp>
 #include <boost/container_hash/hash.hpp>
@@ -84,8 +88,12 @@
 #include <boost/function/function_fwd.hpp>
 #include <boost/functional/hash.hpp>
 #include <boost/functional/hash/hash.hpp>
+#include <boost/icl/discrete_interval.hpp>
+#include <boost/icl/interval_set.hpp>
+#include <boost/interprocess/ipc/message_queue.hpp>
 #include <boost/intrusive/list.hpp>
 #include <boost/iterator/transform_iterator.hpp>
+#include <boost/lockfree/queue.hpp>
 #include <boost/mpl/and.hpp>
 #include <boost/mpl/if.hpp>
 #include <boost/multi_index/hashed_index.hpp>
@@ -106,7 +114,9 @@
 #include <boost/preprocessor/seq/transform.hpp>
 #include <boost/preprocessor/stringize.hpp>
 #include <boost/preprocessor/variadic/to_seq.hpp>
+#include <boost/range/any_range.hpp>
 #include <boost/range/iterator_range.hpp>
+#include <boost/range/iterator_range_core.hpp>
 #include <boost/signals2/dummy_mutex.hpp>
 #include <boost/smart_ptr/detail/yield_k.hpp>
 #include <boost/system/error_code.hpp>
@@ -131,6 +141,7 @@
 #include <google/protobuf/generated_message_table_driven.h>
 #include <google/protobuf/generated_message_util.h>
 #include <google/protobuf/io/coded_stream.h>
+#include <google/protobuf/map.h>
 #include <google/protobuf/map_entry.h>
 #include <google/protobuf/map_field_inl.h>
 #include <google/protobuf/message.h>
@@ -143,6 +154,9 @@
 #include <gtest/gtest_prod.h>
 #include <rapidjson/document.h>
 
+#include "yb/common/opid.fwd.h"
+#include "yb/common/opid.h"
+#include "yb/common/opid.pb.h"
 #include "yb/gutil/atomicops.h"
 #include "yb/gutil/bind.h"
 #include "yb/gutil/bind_internal.h"
@@ -156,6 +170,7 @@
 #include "yb/gutil/integral_types.h"
 #include "yb/gutil/logging-inl.h"
 #include "yb/gutil/macros.h"
+#include "yb/gutil/map-util.h"
 #include "yb/gutil/mathlimits.h"
 #include "yb/gutil/once.h"
 #include "yb/gutil/port.h"
@@ -179,6 +194,7 @@
 #include "yb/gutil/threading/thread_collision_warner.h"
 #include "yb/gutil/type_traits.h"
 #include "yb/gutil/walltime.h"
+#include "yb/util/aggregate_stats.h"
 #include "yb/util/async_util.h"
 #include "yb/util/atomic.h"
 #include "yb/util/blocking_queue.h"
@@ -187,6 +203,7 @@
 #include "yb/util/cast.h"
 #include "yb/util/coding_consts.h"
 #include "yb/util/compare_util.h"
+#include "yb/util/concurrent_pod.h"
 #include "yb/util/condition_variable.h"
 #include "yb/util/countdown_latch.h"
 #include "yb/util/cross_thread_mutex.h"
@@ -202,8 +219,14 @@
 #include "yb/util/ev_util.h"
 #include "yb/util/faststring.h"
 #include "yb/util/file_system.h"
-#include "yb/util/flag_tags.h"
+#include "yb/util/flags.h"
+#include "yb/util/flags/auto_flags.h"
+#include "yb/util/flags/flag_tags.h"
+#include "yb/util/flags/flags_callback.h"
 #include "yb/util/format.h"
+#include "yb/util/hash_util.h"
+#include "yb/util/hdr_histogram.h"
+#include "yb/util/high_water_mark.h"
 #include "yb/util/io.h"
 #include "yb/util/jsonreader.h"
 #include "yb/util/jsonwriter.h"
@@ -229,12 +252,12 @@
 #include "yb/util/net/inetaddress.h"
 #include "yb/util/net/net_fwd.h"
 #include "yb/util/net/net_util.h"
+#include "yb/util/net/rate_limiter.h"
 #include "yb/util/net/sockaddr.h"
 #include "yb/util/net/socket.h"
+#include "yb/util/numbered_deque.h"
 #include "yb/util/object_pool.h"
 #include "yb/util/operation_counter.h"
-#include "yb/util/opid.fwd.h"
-#include "yb/util/opid.h"
 #include "yb/util/path_util.h"
 #include "yb/util/physical_time.h"
 #include "yb/util/port_picker.h"
@@ -255,14 +278,19 @@
 #include "yb/util/status_fwd.h"
 #include "yb/util/status_log.h"
 #include "yb/util/std_util.h"
+#include "yb/util/stopwatch.h"
+#include "yb/util/string_trim.h"
 #include "yb/util/string_util.h"
 #include "yb/util/striped64.h"
 #include "yb/util/strongly_typed_bool.h"
 #include "yb/util/strongly_typed_string.h"
 #include "yb/util/strongly_typed_uuid.h"
 #include "yb/util/subprocess.h"
+#include "yb/util/tcmalloc_util.h"
 #include "yb/util/test_macros.h"
 #include "yb/util/test_util.h"
+#include "yb/util/thread.h"
+#include "yb/util/thread_annotations_util.h"
 #include "yb/util/threadlocal.h"
 #include "yb/util/threadpool.h"
 #include "yb/util/timestamp.h"
@@ -270,8 +298,10 @@
 #include "yb/util/trace.h"
 #include "yb/util/tsan_util.h"
 #include "yb/util/type_traits.h"
+#include "yb/util/uint_set.h"
 #include "yb/util/ulimit.h"
 #include "yb/util/uuid.h"
 #include "yb/util/varint.h"
 #include "yb/util/web_callback_registry.h"
+#include "yb/util/write_buffer.h"
 #include "yb/util/yb_partition.h"

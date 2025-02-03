@@ -11,24 +11,34 @@
 // under the License.
 //
 
-#ifndef YB_DOCDB_PGSQL_OPERATION_H
-#define YB_DOCDB_PGSQL_OPERATION_H
+#pragma once
+
+#include <functional>
+#include <utility>
+
+#include <boost/container/small_vector.hpp>
 
 #include "yb/common/pgsql_protocol.pb.h"
 
 #include "yb/docdb/doc_expr.h"
-#include "yb/docdb/doc_key.h"
 #include "yb/docdb/doc_operation.h"
+#include "yb/docdb/doc_read_context.h"
 #include "yb/docdb/intent_aware_iterator.h"
 #include "yb/docdb/ql_rowwise_iterator_interface.h"
 
-namespace yb {
+#include "yb/dockv/doc_key.h"
+#include "yb/dockv/pg_row.h"
+#include "yb/dockv/reader_projection.h"
 
-class IndexInfo;
+#include "yb/util/operation_counter.h"
+#include "yb/util/strongly_typed_bool.h"
+#include "yb/util/write_buffer.h"
 
-namespace docdb {
+namespace yb::docdb {
 
 YB_STRONGLY_TYPED_BOOL(IsUpsert);
+
+bool ShouldYsqlPackRow(bool has_cotable_id);
 
 class PgsqlWriteOperation :
     public DocOperationBase<DocOperationType::PGSQL_WRITE_OPERATION, PgsqlWriteRequestPB>,
@@ -36,11 +46,8 @@ class PgsqlWriteOperation :
  public:
   PgsqlWriteOperation(std::reference_wrapper<const PgsqlWriteRequestPB> request,
                       DocReadContextPtr doc_read_context,
-                      const TransactionOperationContext& txn_op_context)
-      : DocOperationBase(request),
-        doc_read_context_(std::move(doc_read_context)),
-        txn_op_context_(txn_op_context) {
-  }
+                      const TransactionOperationContext& txn_op_context,
+                      rpc::Sidecars* sidecars);
 
   // Initialize PgsqlWriteOperation. Content of request will be swapped out by the constructor.
   Status Init(PgsqlResponsePB* response);
@@ -53,22 +60,14 @@ class PgsqlWriteOperation :
   const PgsqlWriteRequestPB& request() const { return request_; }
   PgsqlResponsePB* response() const { return response_; }
 
-  const faststring& result_buffer() const { return result_buffer_; }
-
-  bool result_is_single_empty_row() const {
-    return result_rows_ == 1 && result_buffer_.size() == sizeof(int64_t);
-  }
-
   Result<bool> HasDuplicateUniqueIndexValue(const DocOperationApplyData& data);
+  Result<bool> HasDuplicateUniqueIndexValueBackward(const DocOperationApplyData& data);
   Result<bool> HasDuplicateUniqueIndexValue(
       const DocOperationApplyData& data,
-      yb::docdb::Direction direction);
-  Result<bool> HasDuplicateUniqueIndexValue(
-      const DocOperationApplyData& data,
-      ReadHybridTime read_time);
+      const ReadHybridTime& read_time);
   Result<HybridTime> FindOldestOverwrittenTimestamp(
       IntentAwareIterator* iter,
-      const SubDocKey& sub_doc_key,
+      const dockv::SubDocKey& sub_doc_key,
       HybridTime min_hybrid_time);
 
   // Execute write.
@@ -87,14 +86,19 @@ class PgsqlWriteOperation :
   Status ApplyUpdate(const DocOperationApplyData& data);
   Status ApplyDelete(const DocOperationApplyData& data, const bool is_persist_needed);
   Status ApplyTruncateColocated(const DocOperationApplyData& data);
+  Status ApplyFetchSequence(const DocOperationApplyData& data);
 
-  Status DeleteRow(const DocPath& row_path, DocWriteBatch* doc_write_batch,
-                   const ReadHybridTime& read_ht, CoarseTimePoint deadline);
+  Status DeleteRow(const dockv::DocPath& row_path, DocWriteBatch* doc_write_batch,
+                   const ReadOperationData& read_operation_data);
 
   // Reading current row before operating on it.
-  Status ReadColumns(const DocOperationApplyData& data, QLTableRow* table_row);
+  // Returns true if row was present.
+  Result<bool> ReadRow(const DocOperationApplyData& data, dockv::PgTableRow* table_row);
+  Result<bool> ReadRow(
+      const DocOperationApplyData& data, const dockv::DocKey& doc_key,
+      dockv::PgTableRow* table_row);
 
-  Status PopulateResultSet(const QLTableRow& table_row);
+  Status PopulateResultSet(const dockv::PgTableRow* table_row);
 
   // Reading path to operate on.
   Status GetDocPaths(GetDocPathsMode mode,
@@ -103,18 +107,31 @@ class PgsqlWriteOperation :
 
   class RowPackContext;
 
+  template <typename Value>
+  Status DoInsertColumn(
+      const DocOperationApplyData& data, ColumnId column_id, const ColumnSchema& column,
+      Value&& column_value, RowPackContext* pack_context);
+
   Status InsertColumn(
-      const DocOperationApplyData& data, const QLTableRow& table_row,
-      const PgsqlColumnValuePB& column_value, RowPackContext* pack_context);
+      const DocOperationApplyData& data, const PgsqlColumnValuePB& column_value,
+      RowPackContext* pack_context);
+
+  template <typename Value>
+  Status DoUpdateColumn(
+      const DocOperationApplyData& data, ColumnId column_id, const ColumnSchema& column,
+      Value&& value, RowPackContext* pack_context);
 
   Status UpdateColumn(
-      const DocOperationApplyData& data, const QLTableRow& table_row,
-      const PgsqlColumnValuePB& column_value, QLTableRow* returning_table_row,
-      QLExprResult* result, RowPackContext* pack_context);
+      const DocOperationApplyData& data, const dockv::PgTableRow& table_row,
+      const PgsqlColumnValuePB& column_value, dockv::PgTableRow* returning_table_row,
+      qlexpr::QLExprResult* result, RowPackContext* pack_context);
+
+  const dockv::ReaderProjection& projection() const;
 
   //------------------------------------------------------------------------------------------------
   // Context.
   DocReadContextPtr doc_read_context_;
+  mutable std::optional<dockv::ReaderProjection> projection_;
   const TransactionOperationContext txn_op_context_;
 
   // Input arguments.
@@ -124,23 +141,41 @@ class PgsqlWriteOperation :
   // UPDATE, DELETE, INSERT operations should return total number of new or changed rows.
 
   // Doc key and encoded doc key for the primary key.
-  boost::optional<DocKey> doc_key_;
+  dockv::DocKey doc_key_;
   RefCntPrefix encoded_doc_key_;
 
   // Rows result requested.
+  rpc::Sidecars* const sidecars_;
+
   int64_t result_rows_ = 0;
-  faststring result_buffer_;
+  WriteBufferPos row_num_pos_;
+  WriteBuffer* write_buffer_ = nullptr;
+  const bool ysql_skip_row_lock_for_update_;
+};
+
+struct PgsqlReadOperationData {
+  const ReadOperationData& read_operation_data;
+  bool is_explicit_request_read_time;
+  const PgsqlReadRequestPB& request;
+  const DocReadContext& doc_read_context;
+  const DocReadContext* index_doc_read_context;
+  const TransactionOperationContext& txn_op_context;
+  const YQLStorageIf& ql_storage;
+  const ScopedRWOperation& pending_op;
+  VectorIndexPtr vector_index;
 };
 
 class PgsqlReadOperation : public DocExprExecutor {
  public:
   // Construct and access methods.
-  PgsqlReadOperation(const PgsqlReadRequestPB& request,
-                     const TransactionOperationContext& txn_op_context)
-      : request_(request), txn_op_context_(txn_op_context) {
+  PgsqlReadOperation(std::reference_wrapper<const PgsqlReadOperationData> data,
+                     WriteBuffer* result_buffer,
+                     HybridTime* restart_read_ht)
+      : data_(data), request_(data_.request), result_buffer_(result_buffer),
+        restart_read_ht_(restart_read_ht) {
   }
 
-  const PgsqlReadRequestPB& request() const { return request_; }
+  const PgsqlReadRequestPB& request() const { return data_.request; }
   PgsqlResponsePB& response() { return response_; }
 
   // Driver of the execution for READ operators for the given conditions in Protobuf request.
@@ -154,75 +189,105 @@ class PgsqlReadOperation : public DocExprExecutor {
   // - Batch argument: The query condition is represented by many sets of values. For example, a
   //   batch protobuf will carry many ybctids.
   //     SELECT ... WHERE ybctid IN (y1, y2, y3)
-  Result<size_t> Execute(const YQLStorageIf& ql_storage,
-                         CoarseTimePoint deadline,
-                         const ReadHybridTime& read_time,
-                         bool is_explicit_request_read_time,
-                         const DocReadContext& doc_read_context,
-                         const DocReadContext* index_doc_read_context,
-                         faststring *result_buffer,
-                         HybridTime *restart_read_ht);
+  Result<size_t> Execute();
 
-  Status GetTupleId(QLValuePB *result) const override;
-
-  Status GetIntents(const Schema& schema, KeyValueWriteBatchPB* out);
+  Status GetSpecialColumn(ColumnIdRep column_id, QLValuePB* result);
 
  private:
   // Execute a READ operator for a given scalar argument.
-  Result<size_t> ExecuteScalar(const YQLStorageIf& ql_storage,
-                               CoarseTimePoint deadline,
-                               const ReadHybridTime& read_time,
-                               bool is_explicit_request_read_time,
-                               const DocReadContext& doc_read_context,
-                               const DocReadContext *index_doc_read_context,
-                               faststring *result_buffer,
-                               HybridTime *restart_read_ht,
-                               bool *has_paging_state);
+  Result<std::tuple<size_t, bool>> ExecuteScalar();
 
-  // Execute a READ operator for a given batch of ybctids.
-  Result<size_t> ExecuteBatchYbctid(const YQLStorageIf& ql_storage,
-                                    CoarseTimePoint deadline,
-                                    const ReadHybridTime& read_time,
-                                    const DocReadContext& doc_read_context,
-                                    faststring *result_buffer,
-                                    HybridTime *restart_read_ht);
+  // Execute a READ operator for a given vector search.
+  Result<std::tuple<size_t, bool>> ExecuteVectorSearch(
+      const DocReadContext& doc_read_context, const PgVectorReadOptionsPB& options);
 
-  Result<size_t> ExecuteSample(const YQLStorageIf& ql_storage,
-                               CoarseTimePoint deadline,
-                               const ReadHybridTime& read_time,
-                               bool is_explicit_request_read_time,
-                               const DocReadContext& doc_read_context,
-                               faststring *result_buffer,
-                               HybridTime *restart_read_ht,
-                               bool *has_paging_state);
+  // Execute a READ operator for a given batch of keys.
+  template <class KeyProvider>
+  Result<size_t> ExecuteBatchKeys(KeyProvider& key_provider);
 
-  Status PopulateResultSet(const QLTableRow& table_row,
-                                   faststring *result_buffer);
+  Result<std::tuple<size_t, bool>> ExecuteSample();
 
-  Status EvalAggregate(const QLTableRow& table_row);
+  Result<std::tuple<size_t, bool>> ExecuteSampleBlockBased();
 
-  Status PopulateAggregate(const QLTableRow& table_row,
-                                   faststring *result_buffer);
+  void BindReadTimeToPagingState(const ReadHybridTime& read_time);
+
+  Status PopulateResultSet(const dockv::PgTableRow& table_row,
+                           WriteBuffer *result_buffer);
+
+  Status EvalAggregate(const dockv::PgTableRow& table_row);
+
+  Status PopulateAggregate(WriteBuffer *result_buffer);
 
   // Checks whether we have processed enough rows for a page and sets the appropriate paging
   // state in the response object.
-  Status SetPagingStateIfNecessary(const YQLRowwiseIteratorIf* iter,
-                                           size_t fetched_rows,
-                                           const size_t row_count_limit,
-                                           const bool scan_time_exceeded,
-                                           const Schema& schema,
-                                           const ReadHybridTime& read_time,
-                                           bool *has_paging_state);
+  Result<bool> SetPagingState(
+      YQLRowwiseIteratorIf* iter, const Schema& schema, const ReadHybridTime& read_time);
+
+  Result<size_t> ExecuteVectorLSMSearch(const PgVectorReadOptionsPB& options);
+
+  void InitTargetEncoders(
+      const google::protobuf::RepeatedPtrField<PgsqlExpressionPB>& targets,
+      const dockv::PgTableRow& table_row);
 
   //------------------------------------------------------------------------------------------------
+  const PgsqlReadOperationData& data_;
   const PgsqlReadRequestPB& request_;
-  const TransactionOperationContext txn_op_context_;
+  WriteBuffer* const result_buffer_;
+  HybridTime* const restart_read_ht_;
+
+  boost::container::small_vector<dockv::PgWireEncoderEntry, 0x10> target_encoders_;
   PgsqlResponsePB response_;
   YQLRowwiseIteratorIf::UniPtr table_iter_;
   YQLRowwiseIteratorIf::UniPtr index_iter_;
+  uint64_t scanned_table_rows_ = 0;
+  uint64_t scanned_index_rows_ = 0;
+  Status delayed_failure_;
 };
 
-}  // namespace docdb
-}  // namespace yb
+Status GetIntents(
+    const PgsqlReadRequestPB& request, const Schema& schema, IsolationLevel level,
+    LWKeyValueWriteBatchPB* out);
 
-#endif // YB_DOCDB_PGSQL_OPERATION_H
+class PgsqlLockOperation :
+    public DocOperationBase<DocOperationType::PGSQL_LOCK_OPERATION, PgsqlLockRequestPB> {
+ public:
+  PgsqlLockOperation(std::reference_wrapper<const PgsqlLockRequestPB> request,
+                     const TransactionOperationContext& txn_op_context);
+
+  bool RequireReadSnapshot() const override {
+    return false;
+  }
+
+  const PgsqlLockRequestPB& request() const { return request_; }
+  PgsqlResponsePB* response() const { return response_; }
+
+  // Init doc_key_ and encoded_doc_key_.
+  Status Init(PgsqlResponsePB* response, const DocReadContextPtr& doc_read_context);
+
+  Status Apply(const DocOperationApplyData& data) override;
+
+  // Reading path to operate on.
+  Status GetDocPaths(GetDocPathsMode mode,
+                     DocPathsToLock *paths,
+                     IsolationLevel *level) const override;
+
+  std::string ToString() const override;
+
+  dockv::IntentTypeSet GetIntentTypes(IsolationLevel isolation_level) const override;
+
+ private:
+  void ClearResponse() override;
+
+  Result<bool> LockExists(const DocOperationApplyData& data);
+
+  const TransactionOperationContext txn_op_context_;
+
+  // Input arguments.
+  PgsqlResponsePB* response_ = nullptr;
+
+  // The key of the advisory lock to be locked.
+  dockv::DocKey doc_key_;
+  RefCntPrefix encoded_doc_key_;
+};
+
+}  // namespace yb::docdb

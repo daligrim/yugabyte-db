@@ -2,31 +2,52 @@ package helpers
 
 import (
     "bytes"
+    "encoding/json"
     "fmt"
     "io/ioutil"
+    "net"
     "net/http"
     "regexp"
     "time"
 )
 
-type GFlagsFuture struct {
-    GFlags map[string]string
-    Error error
+type GFlag struct {
+    Name  string `json:"name"`
+    Value string `json:"value"`
+    Type  string `json:"type"`
 }
 
-func GetGFlagsFuture(hostName string, isMaster bool, future chan GFlagsFuture) {
-    port := "9000"
+type GFlagsFuture struct {
+    GFlags map[string]string
+    Error  error
+}
+
+type GFlagsResponse struct {
+    Flags []GFlag `json:"flags"`
+}
+
+type GFlagsJsonFuture struct {
+    GFlags []GFlag
+    Error  error
+}
+
+func (h *HelperContainer) GetGFlagsFuture(
+    hostName string,
+    isMaster bool,
+    future chan GFlagsFuture,
+) {
+    port := TserverUIPort
     if isMaster {
-        port = "7000"
+        port = MasterUIPort
     }
-    gFlags := GFlagsFuture {
+    gFlags := GFlagsFuture{
         GFlags: map[string]string{},
-        Error: nil,
+        Error:  nil,
     }
     httpClient := &http.Client{
         Timeout: time.Second * 10,
     }
-    url := fmt.Sprintf("http://%s:%s/varz?raw=1", hostName, port)
+    url := fmt.Sprintf("http://%s/varz?raw=1", net.JoinHostPort(hostName, port))
     resp, err := httpClient.Get(url)
     if err != nil {
         gFlags.Error = err
@@ -54,5 +75,44 @@ func GetGFlagsFuture(hostName string, isMaster bool, future chan GFlagsFuture) {
             gFlags.GFlags[string(v[1])] = string(v[2])
         }
     }
+    future <- gFlags
+}
+
+func (h *HelperContainer) GetGFlagsJsonFuture(
+    hostName string,
+    isMaster bool,
+    future chan GFlagsJsonFuture,
+) {
+
+    port := TserverUIPort
+    if isMaster {
+        port = MasterUIPort
+    }
+
+    gFlags := GFlagsJsonFuture{
+        GFlags: []GFlag{},
+        Error:  nil,
+    }
+    httpClient := &http.Client{
+        Timeout: time.Second * 10,
+    }
+    url := fmt.Sprintf("http://%s/api/v1/varz", net.JoinHostPort(hostName, port))
+    resp, err := httpClient.Get(url)
+    if err != nil {
+        gFlags.Error = err
+        future <- gFlags
+        return
+    }
+    defer resp.Body.Close()
+    body, err := ioutil.ReadAll(resp.Body)
+    if err != nil {
+        gFlags.Error = err
+        future <- gFlags
+        return
+    }
+    flagsResponse := GFlagsResponse{}
+    err = json.Unmarshal(body, &flagsResponse)
+    gFlags.GFlags = flagsResponse.Flags
+    gFlags.Error = err
     future <- gFlags
 }

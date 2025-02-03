@@ -7,23 +7,33 @@ menu:
   stable:
     identifier: yb-ctl
     parent: admin
-    weight: 2410
+    weight: 90
 type: docs
+rightNav:
+  hideH4: true
 ---
 
-The `yb-ctl` utility, located in the bin directory of YugabyteDB home, provides a simple command line interface for administering local clusters used for development and learning. It invokes the [`yb-tserver`](../../reference/configuration/yb-tserver/) and [`yb-master`](../../reference/configuration/yb-master/) servers to perform the necessary orchestration.
+## Overview
 
-{{< note title="Note" >}}
+The yb-ctl utility provides a command line interface for administering local clusters used for development and learning. It invokes the [yb-tserver](../../reference/configuration/yb-tserver/) and [yb-master](../../reference/configuration/yb-master/) servers to perform the necessary orchestration.
 
-- yb-ctl is meant for managing local clusters only. This means that a single host machine like a local laptop is used to simulate YugabyteDB clusters even though the YugabyteDB cluster can have 3 nodes or more. For creating multi-host clusters, follow the instructions in the [Deploy](../../deploy/) section.
+yb-ctl is meant for managing local clusters only. This means that a single host machine like a local laptop is used to simulate YugabyteDB clusters even though the YugabyteDB cluster can have 3 nodes or more. For creating multi-host clusters, follow the instructions in the [Deploy](../../deploy/) section.
 
-- yb-ctl can manage a cluster if and only if it was initially created via yb-ctl. This means that clusters created through any other means including those in the [Deploy](../../deploy/) section cannot be administered using yb-ctl.
+yb-ctl can manage a cluster if and only if it was initially created via yb-ctl. This means that clusters created through any other means including those in the [Deploy](../../deploy/) section cannot be administered using yb-ctl.
 
-{{< /note >}}
+{{% note title="Running on macOS" %}}
+
+Running YugabyteDB on macOS requires additional settings. For more information, refer to [Running on macOS](#running-on-macos).
+
+{{% /note %}}
+
+### Installation
+
+yb-ctl is installed with YugabyteDB and is located in the `bin` directory of the YugabyteDB home directory.
 
 ## Syntax
 
-Run `yb-ctl` commands from the YugabyteDB home directory.
+Run yb-ctl commands from the YugabyteDB home directory.
 
 ```sh
 ./bin/yb-ctl [ command ] [ flag1, flag2, ... ]
@@ -105,12 +115,6 @@ Restarts the specified node in a running cluster. It also takes an optional flag
 
 For details and examples, see [Restart node with placement information](#restart-node-with-placement-information).
 
-##### setup_redis
-
-Enables YugabyteDB support for the Redis-compatible YEDIS API.
-
-For details and examples, see [Initialize the YEDIS API](#initialize-the-yedis-api).
-
 ## Flags
 
 ##### --help, -h
@@ -119,7 +123,7 @@ Shows the help message and then exits.
 
 ##### --binary_dir
 
-Specifies the directory in which to find the YugabyteDB `yb-master` and `yb-tserver` binary files.
+Specifies the directory in which to find the YugabyteDB yb-master and yb-tserver binary files.
 
 Default: `<yugabyte-installation-dir>/bin/`
 
@@ -145,7 +149,7 @@ For details and examples, see [Create a local cluster with custom flags](#create
 
 **Example**
 
-To enable [YSQL authentication](../../secure/enable-authentication/ysql/), you can use the `--tserver_flags` flag to add the `yb-tserver` [`--ysql_enable-auth`](../yb-tserver/#ysql-enable-auth) flag to the `yb-ctl create | start | restart` commands.
+To enable [YSQL authentication](../../secure/enable-authentication/authentication-ysql/), you can use the `--tserver_flags` flag to add the yb-tserver [`--ysql_enable_auth`](../../reference/configuration/yb-tserver/#ysql-enable-auth) flag to the `yb-ctl create | start | restart` commands.
 
 ```sh
 $./bin/yb-ctl create --tserver_flags "ysql_enable_auth=true"
@@ -162,7 +166,7 @@ and [Wipe and restart with placement info flags](#wipe-and-restart-with-placemen
 
 ##### --replication_factor, -rf
 
-Specifies the number of replicas for each tablet. This parameter is also known as Replication Factor (RF). Should be an odd number so that a majority consensus can be established. A miniumum value of `3` is needed to create a fault-tolerant cluster since `1` signifies that there is no only 1 replica with no fault tolerance.
+Specifies the number of replicas for each tablet. This parameter is also known as Replication Factor (RF). Should be an odd number so that a majority consensus can be established. A minimum value of `3` is needed to create a fault-tolerant cluster as `1` signifies that there is no only 1 replica with no fault tolerance.
 
 This value also sets the default number of YB-Master servers.
 
@@ -188,7 +192,7 @@ Default: `2`
 
 ##### --timeout-yb-admin-sec
 
-Timeout, in seconds, for operations that call `yb-admin` and wait on the cluster.
+Timeout, in seconds, for operations that call yb-admin and wait on the cluster.
 
 ##### --timeout-processes-running-sec
 
@@ -198,15 +202,42 @@ Timeout, in seconds, for operations that wait on the cluster.
 
 Flag to log internal debug messages to `stderr`.
 
-## Create a local cluster
+## Using yb-ctl
+
+### Running on macOS
+
+#### Port conflicts
+
+macOS Monterey enables AirPlay receiving by default, which listens on port 7000. This conflicts with YugabyteDB and causes `yb-ctl start` to fail. Use the [--master_flags](#master-flags) flag when you start the cluster to change the default port number, as follows:
+
+```sh
+./bin/yb-ctl start --master_flags "webserver_port=7001"
+```
+
+Alternatively, you can disable AirPlay receiving, then start YugabyteDB normally, and then, optionally, re-enable AirPlay receiving.
+
+#### Loopback addresses
+
+On macOS, every additional node after the first needs a loopback address configured to simulate the use of multiple hosts or nodes. For example, for a three-node cluster, you add two additional addresses as follows:
+
+```sh
+sudo ifconfig lo0 alias 127.0.0.2
+sudo ifconfig lo0 alias 127.0.0.3
+```
+
+The loopback addresses do not persist upon rebooting your computer.
+
+### Create a local cluster
 
 To create a local YugabyteDB cluster for development and learning, use the `yb-ctl create` command.
 
-In order to ensure that all of the replicas for a given tablet can be placed on different nodes, the number of nodes created with the initial create command is always equal to the replication factor.  To expand or shrink the cluster, use the [`add_node`](#add-nodes) and [`remove_node`](#stop-remove-nodes) commands.
+To ensure that all of the replicas for a given tablet can be placed on different nodes, the number of nodes created with the initial create command is always equal to the replication factor. To expand or shrink the cluster, use the [add_node](#add-nodes) and [remove_node](#stop-and-remove-nodes) commands.
 
-Each of these initial nodes run a `yb-tserver` server and a `yb-master` server. Note that the number of YB-Master servers in a cluster must equal the replication factor for the cluster to be considered operating normally.
+Each of these initial nodes run a yb-tserver server and a yb-master server. Note that the number of YB-Master servers in a cluster must equal the replication factor for the cluster to be considered operating normally.
 
-### Create a local 1-node cluster with replication factor of 1
+If you are running YugabyteDB on your local computer, you can't run more than one cluster at a time. To set up a new local YugabyteDB cluster using yb-ctl, first [destroy the currently running cluster](#destroy-a-local-cluster).
+
+#### Create a local 1-node cluster with replication factor of 1
 
 ```sh
 $ ./bin/yb-ctl create
@@ -214,9 +245,9 @@ $ ./bin/yb-ctl create
 
 Note that the default replication factor is 1.
 
-### Create a 4-node cluster with replication factor of 3
+#### Create a 4-node cluster with replication factor of 3
 
-First create 3-node cluster with replication factor of `3`.
+First create a 3-node cluster with replication factor of `3`.
 
 ```sh
 $ ./bin/yb-ctl --rf 3 create
@@ -228,15 +259,142 @@ Use `yb-ctl add_node` command to add a node and make it a 4-node cluster.
 $ ./bin/yb-ctl add_node
 ```
 
-### Create a 5-node cluster with replication factor of 5
+#### Create a 5-node cluster with replication factor of 5
 
 ```sh
 $ ./bin/yb-ctl --rf 5 create
 ```
 
+### Destroy a local cluster
+
+The following command stops all the nodes and deletes the data directory of the cluster.
+
+```sh
+$ ./bin/yb-ctl destroy
+```
+
+### Enable external access
+
+There are essentially two modes with yb-ctl:
+
+- 1-node RF1 cluster where the bind IP address for all ports can be bound to `0.0.0.0` using the `listen_ip` flag. This is the mode you use if you want to have external access for the database APIs and admin UIs.
+
+    ```sh
+    $ ./bin/yb-ctl create --listen_ip=0.0.0.0
+    ```
+
+- Multi-node (say 3-node RF3) cluster where the bind IP addresses are the loopback IP addresses since binding to `0.0.0.0` is no longer possible. Hence, this mode is only meant for internal access.
+
+### Check cluster status
+
+To get the status of your local cluster, including the Admin UI URLs for the YB-Master and YB-TServer, run the `yb-ctl status` command.
+
+```sh
+$ ./bin/yb-ctl status
+```
+
+Following is the output shown for a 3-node RF3 cluster.
+
+```output
+----------------------------------------------------------------------------------------------------
+| Node Count: 3 | Replication Factor: 3                                                            |
+----------------------------------------------------------------------------------------------------
+| JDBC                : jdbc:postgresql://127.0.0.1:5433/yugabyte                                  |
+| YSQL Shell          : bin/ysqlsh                                                                 |
+| YCQL Shell          : bin/ycqlsh                                                                 |
+| Web UI              : http://127.0.0.1:7000/                                                     |
+| Cluster Data        : /Users/testuser12/yugabyte-data                                            |
+----------------------------------------------------------------------------------------------------
+----------------------------------------------------------------------------------------------------
+| Node 1: yb-tserver (pid 27389), yb-master (pid 27380)                                            |
+----------------------------------------------------------------------------------------------------
+| JDBC                : jdbc:postgresql://127.0.0.1:5433/yugabyte                                  |
+| YSQL Shell          : bin/ysqlsh                                                                 |
+| YCQL Shell          : bin/ycqlsh                                                                 |
+| data-dir[0]         : /Users/testuser12/yugabyte-data/node-1/disk-1/yb-data                      |
+| yb-tserver Logs     : /Users/testuser12/yugabyte-data/node-1/disk-1/yb-data/tserver/logs         |
+| yb-master Logs      : /Users/testuser12/yugabyte-data/node-1/disk-1/yb-data/master/logs          |
+----------------------------------------------------------------------------------------------------
+----------------------------------------------------------------------------------------------------
+| Node 2: yb-tserver (pid 27392), yb-master (pid 27383)                                            |
+----------------------------------------------------------------------------------------------------
+| JDBC                : jdbc:postgresql://127.0.0.2:5433/yugabyte                                  |
+| YSQL Shell          : bin/ysqlsh -h 127.0.0.2                                                    |
+| YCQL Shell          : bin/ycqlsh 127.0.0.2                                                       |
+| data-dir[0]         : /Users/testuser12/yugabyte-data/node-2/disk-1/yb-data                      |
+| yb-tserver Logs     : /Users/testuser12/yugabyte-data/node-2/disk-1/yb-data/tserver/logs         |
+| yb-master Logs      : /Users/testuser12/yugabyte-data/node-2/disk-1/yb-data/master/logs          |
+----------------------------------------------------------------------------------------------------
+----------------------------------------------------------------------------------------------------
+| Node 3: yb-tserver (pid 27395), yb-master (pid 27386)                                            |
+----------------------------------------------------------------------------------------------------
+| JDBC                : jdbc:postgresql://127.0.0.3:5433/yugabyte                                  |
+| YSQL Shell          : bin/ysqlsh -h 127.0.0.3                                                    |
+| YCQL Shell          : bin/ycqlsh 127.0.0.3                                                       |
+| data-dir[0]         : /Users/testuser12/yugabyte-data/node-3/disk-1/yb-data                      |
+| yb-tserver Logs     : /Users/testuser12/yugabyte-data/node-3/disk-1/yb-data/tserver/logs         |
+| yb-master Logs      : /Users/testuser12/yugabyte-data/node-3/disk-1/yb-data/master/logs          |
+----------------------------------------------------------------------------------------------------
+```
+
+### Start and stop an existing cluster
+
+Start the existing cluster, or create and start a cluster (if one doesn't exist) by running the `yb-ctl start` command.
+
+```sh
+$ ./bin/yb-ctl start
+```
+
+Stop a cluster so that you can start it later by running the `yb-ctl stop` command.
+
+```sh
+$ ./bin/yb-ctl stop
+```
+
+### Add and remove nodes
+
+#### Add nodes
+
+This will start a new YB-TServer server and give it a new `node_id` for tracking purposes.
+
+```sh
+$ ./bin/yb-ctl add_node
+```
+
+#### Stop and remove nodes
+
+We can stop a node by executing the `yb-ctl stop` command. The command takes the `node_id` of the node that has to be removed as input. Stop node command expects a node id which denotes the index of the server that needs to be stopped. It also takes an optional flag `--master`, which denotes that the server is a yb-master.
+
+```sh
+$ ./bin/yb-ctl stop_node 3
+```
+
+We can also pass an optional flag `--master`, which denotes that the server is a yb-master.
+
+```sh
+$ ./bin/yb-ctl stop_node 3 --master
+```
+
+Currently `stop_node` and `remove_node` implement exactly the same behavior. So they can be used interchangeably.
+
+#### Test failure of a node
+
+You can test the failure of a node in a 3-node RF3 cluster by killing 1 instance of yb-tserver and 1 instance of yb-master by using the following commands.
+
+```sh
+./bin/yb-ctl destroy
+./bin/yb-ctl --rf 3 create
+./bin/yb-ctl stop_node 3
+./bin/yb-ctl stop_node 3 --master
+./bin/yb-ctl start_node 3
+./bin/yb-ctl start_node 3 --master
+```
+
+The command `./bin/yb-ctl start_node 3` starts the third YB-TServer. This displays an error, though the command succeeds. This is because only 2 YB-Masters are present in the cluster at this point. This is not an error in the cluster configuration but rather a warning to highlight that the cluster is under-replicated and does not have enough YB-Masters to ensure continued fault tolerance. See [issue 3506](https://github.com/yugabyte/yugabyte-db/issues/3506).
+
 ## Default directories for local clusters
 
-YugabyteDB clusters created with the `yb-ctl` utility are created locally on the same host and simulate a distributed multi-host cluster.
+YugabyteDB clusters created using the yb-ctl utility are created locally on the same host and simulate a distributed multi-host cluster.
 
 ### Data directory
 
@@ -276,159 +434,20 @@ tserver.out
 yb-data/
 ```
 
-### Logs
+#### Logs
 
 YB-Master logs are added in the following location:
 
 ```sh
-yugabyte-data/node-#/disk-#/yb-data/master.out
+yugabyte-data/node-#/disk-#/master.out
 yugabyte-data/node-#/disk-#/yb-data/master/logs
 ```
 
 YB-TServer logs are added in the following location:
 
 ```sh
-yugabyte-data/node-#/disk-#/yb-data/tserver.out
+yugabyte-data/node-#/disk-#/tserver.out
 yugabyte-data/node-#/disk-#/yb-data/tserver/logs
-```
-
-## Enable external access
-
-There are essentially two modes with yb-ctl.
-
-- 1-node RF1 cluster where the bind IP address for all ports can be bound to `0.0.0.0` using the `listen_ip` flag. This is the mode you use if you want to have external access for the database APIs and admin UIs.
-
-```sh
-$ ./bin/yb-ctl create --listen_ip=0.0.0.0
-```
-
-- Multi-node (say 3-node RF3) cluster where the bind IP addresses are the loopback IP addresses since binding to `0.0.0.0` is no longer possible. Hence, this mode is only meant for internal access.
-
-## Check cluster status
-
-To get the status of your local cluster, including the Admin UI URLs for the YB-Master and YB-TServer, run the `yb-ctl status` command.
-
-```sh
-$ ./bin/yb-ctl status
-```
-
-Following is the output shown for a 3-node RF3 cluster.
-
-```output
-----------------------------------------------------------------------------------------------------
-| Node Count: 3 | Replication Factor: 3                                                            |
-----------------------------------------------------------------------------------------------------
-| JDBC                : jdbc:postgresql://127.0.0.1:5433/yugabyte                                  |
-| YSQL Shell          : bin/ysqlsh                                                                 |
-| YCQL Shell          : bin/ycqlsh                                                                 |
-| YEDIS Shell         : bin/redis-cli                                                              |
-| Web UI              : http://127.0.0.1:7000/                                                     |
-| Cluster Data        : /Users/testuser12/yugabyte-data                                            |
-----------------------------------------------------------------------------------------------------
-----------------------------------------------------------------------------------------------------
-| Node 1: yb-tserver (pid 27389), yb-master (pid 27380)                                            |
-----------------------------------------------------------------------------------------------------
-| JDBC                : jdbc:postgresql://127.0.0.1:5433/yugabyte                                  |
-| YSQL Shell          : bin/ysqlsh                                                                 |
-| YCQL Shell          : bin/ycqlsh                                                                 |
-| YEDIS Shell         : bin/redis-cli                                                              |
-| data-dir[0]         : /Users/testuser12/yugabyte-data/node-1/disk-1/yb-data                      |
-| yb-tserver Logs     : /Users/testuser12/yugabyte-data/node-1/disk-1/yb-data/tserver/logs         |
-| yb-master Logs      : /Users/testuser12/yugabyte-data/node-1/disk-1/yb-data/master/logs          |
-----------------------------------------------------------------------------------------------------
-----------------------------------------------------------------------------------------------------
-| Node 2: yb-tserver (pid 27392), yb-master (pid 27383)                                            |
-----------------------------------------------------------------------------------------------------
-| JDBC                : jdbc:postgresql://127.0.0.2:5433/yugabyte                                  |
-| YSQL Shell          : bin/ysqlsh -h 127.0.0.2                                                    |
-| YCQL Shell          : bin/ycqlsh 127.0.0.2                                                       |
-| YEDIS Shell         : bin/redis-cli -h 127.0.0.2                                                 |
-| data-dir[0]         : /Users/testuser12/yugabyte-data/node-2/disk-1/yb-data                      |
-| yb-tserver Logs     : /Users/testuser12/yugabyte-data/node-2/disk-1/yb-data/tserver/logs         |
-| yb-master Logs      : /Users/testuser12/yugabyte-data/node-2/disk-1/yb-data/master/logs          |
-----------------------------------------------------------------------------------------------------
-----------------------------------------------------------------------------------------------------
-| Node 3: yb-tserver (pid 27395), yb-master (pid 27386)                                            |
-----------------------------------------------------------------------------------------------------
-| JDBC                : jdbc:postgresql://127.0.0.3:5433/yugabyte                                  |
-| YSQL Shell          : bin/ysqlsh -h 127.0.0.3                                                    |
-| YCQL Shell          : bin/ycqlsh 127.0.0.3                                                       |
-| YEDIS Shell         : bin/redis-cli -h 127.0.0.3                                                 |
-| data-dir[0]         : /Users/testuser12/yugabyte-data/node-3/disk-1/yb-data                      |
-| yb-tserver Logs     : /Users/testuser12/yugabyte-data/node-3/disk-1/yb-data/tserver/logs         |
-| yb-master Logs      : /Users/testuser12/yugabyte-data/node-3/disk-1/yb-data/master/logs          |
-----------------------------------------------------------------------------------------------------
-```
-
-## Start and stop an existing cluster
-
-Start the existing cluster, or create and start a cluster (if one doesn't exist) by running the `yb-ctl start` command.
-
-```sh
-$ ./bin/yb-ctl start
-```
-
-Stop a cluster so that you can start it later by running the `yb-ctl stop` command.
-
-```sh
-$ ./bin/yb-ctl stop
-```
-
-## Add and remove nodes
-
-### Add nodes
-
-This will start a new YB-TServer server and give it a new `node_id` for tracking purposes.
-
-```sh
-$ ./bin/yb-ctl add_node
-```
-
-### Stop and remove nodes
-
-We can stop a node by executing the `yb-ctl stop` command. The command takes the `node_id` of the node that has to be removed as input. Stop node command expects a node id which denotes the index of the server that needs to be stopped. It also takes an optional flag `--master`, which denotes that the server is a yb-master.
-
-```sh
-$ ./bin/yb-ctl stop_node 3
-```
-
-We can also pass an optional flag `--master`, which denotes that the server is a yb-master.
-
-```sh
-$ ./bin/yb-ctl stop_node 3 --master
-```
-
-Currently `stop_node` and `remove_node` implement exactly the same behavior. So they can be used interchangeably.
-
-## Test failure of a node
-
-You can test the failure of a node in a 3-node RF3 cluster by killing 1 instance of yb-tserver and 1 instance of yb-master by using the following commands.
-
-```sh
-./bin/yb-ctl destroy
-./bin/yb-ctl --rf 3 create
-./bin/yb-ctl stop_node 3
-./bin/yb-ctl stop_node 3 --master
-./bin/yb-ctl start_node 3
-./bin/yb-ctl start_node 3 --master
-```
-
-The command `./bin/yb-ctl start_node 3` will start yb-tserver3. However, it will throw an error even though the command will succeed. This is because there are only 2 yb-masters present in the cluster at this point. This is not an error in the cluster configuration but rather a warning to highlight that the cluster is under-replicated and does not have enough yb-masters to ensure continued fault tolerance. Following [GitHub issue](https://github.com/yugabyte/yugabyte-db/issues/4156) tracks the work to convert this error into a user-friendly warning.
-
-## Initialize the YEDIS API
-
-The `setup_redis` command to initialize YugabyteDB's Redis-compatible YEDIS API.
-
-```sh
-$ ./bin/yb-ctl setup_redis
-```
-
-## Destroy a local cluster
-
-This command stops all the nodes and deletes the data directory of the cluster.
-
-```sh
-$ ./bin/yb-ctl destroy
 ```
 
 ## Advanced commands
@@ -451,7 +470,7 @@ $ ./bin/yb-ctl add_node --placement_info "cloud1.region1.zone1"
 
 ### Create a local cluster with custom flags
 
-When you use `yb-ctl`, you can pass "custom" flags (flags unavailable directly in `yb-ctl`) to the YB-Master and YB-TServer servers.
+When you use yb-ctl, you can pass "custom" flags (flags unavailable directly in yb-ctl) to the YB-Master and YB-TServer servers.
 
 ```sh
 $ ./bin/yb-ctl --rf 1 create --master_flags "log_cache_size_limit_mb=128,log_min_seconds_to_retain=20,master_backup_svc_queue_length=70" --tserver_flags "log_inject_latency=false,log_segment_size_mb=128,raft_heartbeat_interval_ms=1000"

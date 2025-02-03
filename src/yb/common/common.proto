@@ -44,6 +44,7 @@ package yb;
 option java_package = "org.yb";
 
 import "yb/common/common_types.proto";
+import "yb/common/common_net.proto";
 import "yb/common/transaction.proto";
 import "yb/common/value.proto";
 
@@ -65,7 +66,7 @@ import "yb/common/value.proto";
 //                                    field_names = ["firstname", "lastname", "ssn"]}
 
 message QLTypePB {
-  optional DataType main = 1;
+  optional PersistentDataType main = 1;
   repeated QLTypePB params = 2;
 
   // Fields for user-defined types
@@ -102,6 +103,11 @@ message ColumnSchemaPB {
   // To be safe, it's left here for now.
   // JSON attribute (for c->'a'->>'b' case).
   repeated QLJsonOperationPB OBSOLETE_json_operations = 13;
+  // If set, it means that this column is in process of being dropped by an ongoing DDL transaction.
+  // If that DDL transaction commits, this column will be dropped, otherwise this field will be
+  // unset again.
+  optional bool marked_for_deletion = 15;
+  optional QLValuePB missing_value = 16;
 }
 
 message ColocatedTableIdentifierPB {
@@ -114,13 +120,39 @@ message ColocatedTableIdentifierPB {
   }
 }
 
+enum PgVectorDistanceType {
+  INVALID_DIST = 0;
+  DIST_L2 = 1;
+  DIST_IP = 2;
+  DIST_COSINE = 3;
+}
+
+enum PgVectorIndexType {
+  UNKNOWN_IDX = 0;
+  DUMMY = 1;
+  IVFFLAT = 2;
+  HNSW = 3;
+}
+
+message PgVectorIdxOptionsPB {
+  optional PgVectorDistanceType dist_type = 1;
+  optional PgVectorIndexType idx_type = 2;
+  optional uint32 dimensions = 3;
+  optional uint32 column_id = 4;
+}
+
+message PgVectorReadOptionsPB {
+  required QLValuePB vector = 1;
+  required int32 prefetch_size = 2;
+}
+
 message TablePropertiesPB {
   optional uint64 default_time_to_live = 1;
   optional bool contain_counters = 2;
   optional bool is_transactional = 3 [default = false];
 
-  // The table id of the table that this table is co-partitioned with.
-  optional bytes copartition_table_id = 4;
+  // Reserved for deprecated copartition_table_id for abandoned copartitioning feature.
+  reserved 4;
 
   // For index table only: consistency with respect to the indexed table.
   optional YBConsistencyLevel consistency_level = 5 [ default = STRONG ];
@@ -152,6 +184,8 @@ message TablePropertiesPB {
   // Used to distinguish which algorithm should be used for partition key and bounds generation,
   // value == 0 stands for the default buggy algorithm for range partitioning case, see #12189.
   optional uint32 partitioning_version = 11;
+
+  optional PgReplicaIdentity ysql_replica_identity = 12;
 }
 
 message SchemaPB {
@@ -226,6 +260,13 @@ message IndexInfoPB {
 
   // Where clause for partial index.
   optional WherePredicateSpecPB where_predicate_spec = 33;
+
+  // When the backfill job on this index is cleared, this field is set to the number of indexed
+  // table rows processed by the backfill job. The (default) value is zero, otherwise.
+  // For partial indexes, this includes non-matching rows of the indexed table.
+  optional uint64 num_rows_processed_by_backfill_job = 34;
+
+  optional PgVectorIdxOptionsPB vector_idx_options = 35;
 }
 
 // The possible order modes for clients.
@@ -326,21 +367,39 @@ message PartitionPB {
   optional bytes partition_key_end = 3;
 }
 
-// This enum matches enum LockWaitPolicy defined in src/include/nodes/lockoptions.h.
-// The "Lock" prefix is removed to keep this generic for any intent in conflict_resolution.cc (not
-// just those written for Pg's explicit row locks).
+// This enum matches enum LockWaitPolicy defined in src/include/nodes/lockoptions.h and applies only
+// to explicit row-level locking policies.
+//
+// NOTE: WAIT_ERROR implies no-wait semantics in Postgres i.e., if a conflicting lock is held,
+// fail self's transaction. However, in YSQL, the WAIT_ERROR enum maps to the Fail-on-Conflict
+// conflict management policy (where we may fail other transactions depending on priority, as
+// described in conflict_resolution.h). It doesn't map to no-wait semantics because they aren't yet
+// supported by docdb.
+//
+// But, note that NOWAIT clause is supported for READ COMMITTED isolation level when no other
+// isolation's transactions are active. YSQL acheives that without relying on no-wait semantics from
+// the tserver. This is done by leveraging the fact that the Fail-on-Conflict policy for read
+// committed transactions are effectively no-wait semantics because all read committed transactions
+// have the same kHighest priority.
+//
+// TODO(concurrency-control):
+//   When NOWAIT support is to be extended for REPEATABLE READ and SERIALIZABLE isolation level, we
+//   would require using WAIT_ERROR to rightly mean the no-wait policy and another enum to represent
+//   the Fail-on-Conflict policy.
+//
+// YSQL specifies WaitPolicy explicitly only for reads via PgsqlReadRequestPB that take explicit
+// row-level locks.
 enum WaitPolicy
 {
-  // Wait for the intent to become available (default behavior)
+  // Maps to Wait-on-Conflict conflict management policy as defined in conflict_resolution.h
   WAIT_BLOCK = 0;
 
-  // Skip operation if intents can't be locked (SKIP LOCKED)
+  // Maps to Skip-on-Conflict conflict management policy as defined in conflict_resolution.h
+  // This is needed for the SKIP LOCKED clause
   WAIT_SKIP = 1;
 
-  // Raise an error if a intent cannot be locked (NOWAIT)
-  // Abort self if conflicting with a higher priority txn. Else abort the other txn. This is
-  // default behaviour as of date.
-  WAIT_ERROR = 2;
+  // Maps to Fail-on-Conflict conflict management policy as defined in conflict_resolution.h
+  WAIT_ERROR= 2;
 }
 
 message TransactionMetadataPB {
@@ -349,7 +408,13 @@ message TransactionMetadataPB {
   optional string status_tablet = 3;
   optional fixed64 priority = 4;
 
+  // Stores the time at which this transaction was taken by pg_client_session from the transaction
+  // pool. Serves as a lower bound on the ht at which the first RPC which may write intents for this
+  // transaction would have been issued to a tserver.
   optional fixed64 start_hybrid_time = 5;
+
+  // Stores the time at which the transaction was initiated from postgres' perspective.
+  optional int64 pg_txn_start_us = 9;
 
   // Stores time when metadata was written to provisional records RocksDB on a
   // participating tablet. So it could be used for cleanup.
@@ -358,6 +423,9 @@ message TransactionMetadataPB {
   // Stores whether the transaction is local or global; treated as global if not present
   // for backwards compatability.
   optional TransactionLocality locality = 7;
+
+  // Reserved for deprecated xcluster field external_transaction.
+  reserved 8;
 }
 
 // See ReadHybridTime for explation of this message.
@@ -368,6 +436,16 @@ message ReadHybridTimePB {
 
   optional fixed64 global_limit_ht = 3;
 
+  // When a transaction reads data, all committed writes of other transactions with a timestamp
+  // <= read_ht are visible.
+  //
+  // However, a transaction's reads should be able to see all provisional writes from the same
+  // transaction irrespective of read_ht, except some based on additional constraints for YSQL (as
+  // described in src/yb/yql/pggate/README). The query layer uses in_txn_limit_ht to meet these
+  // constraints. If in_txn_limit_ht is set, any operation will not be able to read provisional
+  // writes from the same transaction which have a write timestamp higher than the in_txn_limit_ht.
+  //
+  // src/yb/yql/pggate/README also explains how this works along with YSQL's buffering logic.
   optional fixed64 in_txn_limit_ht = 4;
 
   optional fixed64 local_limit_ht = 5;
@@ -531,4 +609,133 @@ message DeletePlanPB {
   optional string key_conditions = 3;
   optional string filter = 4;
   optional int32 output_width = 5;
+}
+
+message TServerDBCatalogVersionInfo {
+  optional uint32 db_oid = 1;
+  optional int32 shm_index = 2;
+}
+
+message DatumMessagePB {
+  optional string column_name = 1;
+  optional int64 column_type = 2;
+  oneof datum {
+    int32 datum_int32 = 3;
+    int64 datum_int64 = 4;
+    float datum_float = 5;
+    double datum_double = 6;
+    bool datum_bool = 7;
+    string datum_string = 8;
+    bytes datum_bytes = 9;
+    bool datum_missing = 10;
+  }
+  oneof cdc_column_type {
+    QLTypePB cql_type = 11;
+    int64 pg_type = 12;
+  }
+  oneof cdc_datum {
+    PgDatumPB pg_value = 13;
+    QLValuePB cql_value = 14;
+    // We send the datum as QLValuePB if the client is Walsender.
+    // The Walsender does the conversion from QLValuePB to the PG datum.
+    QLValuePB pg_ql_value = 15;
+  }
+  // This is applicable only for YSQL table columns.
+  optional int32 col_attr_num = 16;
+}
+
+message PgDatumPB {
+  oneof datum {
+    int32 datum_int32 = 1;
+    int64 datum_int64 = 2;
+    float datum_float = 3;
+    double datum_double = 4;
+    bool datum_bool = 5;
+    string datum_string = 6;
+    bytes datum_bytes = 7;
+    bool datum_missing = 8;
+  }
+}
+
+// The type of LSN type which will be used with the replication slot and stream metadata.
+enum ReplicationSlotLsnType {
+  ReplicationSlotLsnType_UNSPECIFIED = 0;
+  ReplicationSlotLsnType_SEQUENCE = 1;
+  ReplicationSlotLsnType_HYBRID_TIME = 2;
+}
+
+message AshMetadataPB {
+  // The root level request id. i.e. the request id
+  // corresponding to the call from the application to YSQL-Pg/YCQL
+  // if set, should be 16 bytes in length.
+  optional bytes root_request_id = 1;
+  // The client which sent the request to YSQL-Pg/YCQL.
+  optional HostPortPB client_host_port = 2;
+  // The address family of the client host
+  optional uint32 addr_family = 7;
+  // The uuid of the local tserver which received the request from the client.
+  // i.e. the local tserver running the YSQL-Pg backend/YCQL proxy. if set,
+  // should be 16 bytes in length.
+  optional bytes top_level_node_id = 3;
+  // The request id for the "current" rpc. This may be different than
+  // the root level request id. e.g. consider a write-rpc sent by the local
+  // TServer to the destination TServer.
+  optional int64 rpc_request_id = 4;
+  // Query id as seen on pg_stat_statements to identify identical normalized queries.
+  optional uint64 query_id = 5;
+  // Deprecated session_id
+  reserved 6;
+  // pid of the YSQL/YCQL backend which is executing the query. TServer pid for
+  // background activities
+  optional int32 pid = 9;
+  // PG database OID. This will be 0 for YCQL.
+  optional uint32 database_id = 8;
+}
+
+// Some optional/additional fields that is collected in addition to the wait
+// statement Depending on the wait-state we may choose to persist at most one of
+// these into the yb_active_universe_history.wait_event_aux field.
+message AshAuxDataPB {
+  optional string tablet_id = 1;
+  optional string table_id = 2;
+  optional string method = 3;
+}
+
+// Represents the wait-state tracked for a given incoming rpc/request.
+message WaitStateInfoPB {
+  // The metadata is rarely modified.
+  optional AshMetadataPB metadata = 1;
+  // Represents the state of the curreent rpc/request when it was polled.
+  optional uint32 wait_state_code = 2;
+  // Some additional information that may be persisted as
+  // yb_active_universe_history.wait_event_aux
+  optional AshAuxDataPB aux_info = 3;
+  // A string representation of wait_state_code for easy human consumption.
+  optional string wait_state_code_as_string = 4;
+}
+
+// This message should be used for specifying stream creation options for CDCSDK streams.
+message CDCSDKStreamCreateOptionsPB {
+  optional
+      CDCSDKDynamicTablesOption cdcsdk_dynamic_tables_option = 1 [default = DYNAMIC_TABLES_ENABLED];
+  optional ReplicationSlotLsnType lsn_type = 12 [default = ReplicationSlotLsnType_SEQUENCE];
+}
+
+message TserverMetricsInfoPB {
+  required string name = 1;
+  required string value = 2;
+}
+
+// See ql_rocksdb_storage.cc for details on each method.
+enum DocDbBlocksSamplingMethod {
+  SPLIT_INTERSECTING_BLOCKS = 0;
+  SPLIT_INTERSECTING_BLOCKS_V3 = 1;
+  COMBINE_INTERSECTING_BLOCKS = 2;
+}
+
+// See yb_sampling_algorithm flag description.
+// Should be in sync with YbcSamplingAlgorithmEnum in GUC (ybc_util.h).
+enum YsqlSamplingAlgorithm {
+  FULL_TABLE_SCAN = 0;
+  BLOCK_BASED_SAMPLING = 1;
 }

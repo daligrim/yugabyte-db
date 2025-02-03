@@ -4,75 +4,63 @@ headerTitle: CREATE SEQUENCE
 linkTitle: CREATE SEQUENCE
 description: Use the CREATE SEQUENCE statement to create a sequence in the current schema.
 menu:
-  preview:
+  preview_api:
     identifier: ddl_create_sequence
     parent: statements
-aliases:
-  - /preview/api/ysql/commands/ddl_create_sequence/
 type: docs
 ---
 
 ## Synopsis
 
-Use the `CREATE SEQUENCE` statement to create a sequence in the current schema.
+Use the CREATE SEQUENCE statement to create a sequence in the current schema.
 
 ## Syntax
 
-<ul class="nav nav-tabs nav-tabs-yb">
-  <li >
-    <a href="#grammar" class="nav-link active" id="grammar-tab" data-toggle="tab" role="tab" aria-controls="grammar" aria-selected="true">
-      <i class="fas fa-file-alt" aria-hidden="true"></i>
-      Grammar
-    </a>
-  </li>
-  <li>
-    <a href="#diagram" class="nav-link" id="diagram-tab" data-toggle="tab" role="tab" aria-controls="diagram" aria-selected="false">
-      <i class="fas fa-project-diagram" aria-hidden="true"></i>
-      Diagram
-    </a>
-  </li>
-</ul>
-
-<div class="tab-content">
-  <div id="grammar" class="tab-pane fade show active" role="tabpanel" aria-labelledby="grammar-tab">
-  {{% includeMarkdown "../../syntax_resources/the-sql-language/statements/create_sequence,sequence_name,sequence_options.grammar.md" %}}
-  </div>
-  <div id="diagram" class="tab-pane fade" role="tabpanel" aria-labelledby="diagram-tab">
-  {{% includeMarkdown "../../syntax_resources/the-sql-language/statements/create_sequence,sequence_name,sequence_options.diagram.md" %}}
-  </div>
-</div>
+{{%ebnf%}}
+  create_sequence,
+  sequence_name,
+  sequence_options
+{{%/ebnf%}}
 
 ## Semantics
 
-### *create_sequence*
-
-#### CREATE SEQUENCE *sequence_name* [ IF NOT EXISTS ]
-
-Specify the name of the sequence (*sequence_name*). An error is raised if a sequence with that name already exists in the current schema and `IF NOT EXISTS` is not specified.
+Specify the name of the sequence (*sequence_name*). An error is raised if a sequence with that name already exists in the current schema and IF NOT EXISTS is not specified.
 
 The sequence name must be distinct from any other sequences, tables, indexes, views, or foreign tables in the same schema.
 
 ### *sequence_options*
 
-#### INCREMENT BY *increment*
+#### TEMPORARY or TEMP
+
+Using this qualifier will create a temporary sequence. Temporary sequences are visible only in the current client session in which they are created and are automatically dropped at the end of the session. See the section [Creating and using temporary schema-objects](../../creating-and-using-temporary-schema-objects/).
+
+#### UNLOGGED
+
+Currently the *UNLOGGED* option is ignored. It's handled as *LOGGED* default persistence.
+
+#### AS *seq_data_type*
+
+Specifies the data type of the sequence. This automatically determines the minimum and maximum values of the sequence. Valid types are `smallint`, `integer`, and `bigint`. Default is `bigint`.
+
+#### INCREMENT BY *int_literal*
 
 Specify the *increment* value to add to the current sequence value to create a new value. The default value is `1`. A positive number
 
-#### MINVALUE *minvalue* | NO MINVALUE
+#### MINVALUE *int_literal* | NO MINVALUE
 
  Specify the minimum value allowed in the sequence. If this value is reached (in a sequence with a negative increment), `nextval()` will return an error. If `NO MINVALUE` is specified, the default value will be used. Default is 1.
 
-#### MAXVALUE *maxvalue* | NO MAXVALUE
+#### MAXVALUE *int_literal* | NO MAXVALUE
 
-Specify the maximum value allowed in the sequence. If this value is reached, `nextval()` will return an error. If `NO MAXVALUE` is specified, the default will be used. Default is `2<sup>63</sup> - 1`.
+Specify the maximum value allowed in the sequence. If this value is reached, `nextval()` will return an error. If `NO MAXVALUE` is specified, the default will be used. Default is `2⁶³-1`.
 
-#### START WITH *start*
+#### START WITH *int_literal*
 
 Specify the first value in the sequence. `start` cannot be less than `minvalue`. Default is `1`.
 
-#### CACHE *cache*
+#### CACHE *int_literal*
 
-Specify how many numbers from the sequence to cache in the client. Default is `1`.
+Specify how many numbers from the sequence to cache in the client. Default is `100`.
 
 When YB-TServer [ysql_sequence_cache_minval](../../../../../reference/configuration/yb-tserver/#ysql-sequence-cache-minval) configuration flag is not explicitly turned off (set to `0`), the maximum value of the flag and the cache clause will be used.
 
@@ -90,20 +78,20 @@ Stores the last value used or the next value to be used.
 
 ### *is_called*
 
-Stores whether `last_val` has been used. If false, `last_val` is the next value in the sequence. Otherwise, `last_val` + `INCREMENT` is the next one.
+Stores whether `last_val` has been used. If false, `last_val` is the next value in the sequence. Otherwise, `last_val` + INCREMENT is the next one.
 
-By default (when `INCREMENT` is 1), each call to `nextval()` updates `last_val` for that sequence. In YSQL, the table holding the sequence's data is replicated as opposed to being in the local file system. Each update to this table requires two RPCs (and will be optimized to one RPC in the future), In any case, the latency experienced by a call to `nextval()` in YSQL will be significantly higher than the same operation in Postgres. To avoid such performance degradation, Yugabyte recommends using a cache value with a value large enough. Cached values are stored in the memory of the local node, and retrieving such values avoids any RPCs, so the latency of one cache allocation can be amortized over all the numbers allocated for the cache.
+By default (when INCREMENT is 1), each call to `nextval()` updates `last_val` for that sequence. In YSQL, the table holding the sequence's data is replicated as opposed to being in the local file system. Each update to this table requires two RPCs (and will be optimized to one RPC in the future), In any case, the latency experienced by a call to `nextval()` in YSQL will be significantly higher than the same operation in PostgreSQL. To avoid such performance degradation, Yugabyte recommends using a cache value with a value large enough. Cached values are stored in the memory of the local node, and retrieving such values avoids any RPCs, so the latency of one cache allocation can be amortized over all the numbers allocated for the cache.
 
-`SERIAL` types create a sequence with a cache with default value of 1. So `SERIAL` types should be avoided, and their equivalent statement should be used.
-Instead of creating a table with a `SERIAL` type like this:
+SERIAL types create a sequence with a cache with default value of 1. So SERIAL types should be avoided, and their equivalent statement should be used.
+Instead of creating a table with a SERIAL type like this:
 
-```
+```sql
 CREATE TABLE t(k SERIAL)
 ```
 
-You should create a sequence with a large enough cache first, and then set the column that you want to have a serial type to `DEFAULT` to `nextval()` of the sequence.
+You should create a sequence with a large enough cache first, and then set the column that you want to have a serial type to DEFAULT to `nextval()` of the sequence.
 
-```
+```sql
 CREATE SEQUENCE t_k_seq CACHE 10000;
 CREATE TABLE t(k integer NOT NULL DEFAULT nextval('t_k_seq'));
 ```
@@ -112,21 +100,21 @@ CREATE TABLE t(k integer NOT NULL DEFAULT nextval('t_k_seq'));
 
 Create a simple sequence that increments by 1 every time `nextval()` is called.
 
-```plpgsql
+```sql
 yugabyte=# CREATE SEQUENCE s;
 ```
 
-```
+```sql
 CREATE SEQUENCE
 ```
 
 Call `nextval()`.
 
-```plpgsql
+```sql
 yugabyte=# SELECT nextval('s');
 ```
 
-```
+```output
  nextval
 ---------
        1
@@ -135,21 +123,21 @@ yugabyte=# SELECT nextval('s');
 
 Create a sequence with a cache of 10,000 values.
 
-```plpgsql
+```sql
 yugabyte=# CREATE SEQUENCE s2 CACHE 10000;
 ```
 
-```
+```sql
 CREATE SEQUENCE
 ```
 
 In the same session, select `nextval()`.
 
-```plpgsql
+```sql
 SELECT nextval('s2');
 ```
 
-```
+```output
  nextval
 ---------
        1
@@ -158,11 +146,11 @@ SELECT nextval('s2');
 
 In a different session, select `nextval()`.
 
-```plpgsql
+```sql
 SELECT nextval('s2');
 ```
 
-```
+```output
 nextval
 ---------
    10001
@@ -171,19 +159,19 @@ nextval
 
 Create a sequence that starts at 0. MINVALUE also has to be changed from its default 1 to something less than or equal to 0.
 
-```plpgsql
+```sql
 CREATE SEQUENCE s3 START 0 MINVALUE 0;
 ```
 
-```
+```output
 CREATE SEQUENCE
 ```
 
-```plpgsql
+```sql
 SELECT nextval('s3');
 ```
 
-```
+```output
 nextval
 ---------
        0
@@ -194,7 +182,7 @@ nextval
 
 - [`ALTER SEQUENCE`](../ddl_alter_sequence)
 - [`DROP SEQUENCE`](../ddl_drop_sequence)
-- [`currval()`](../../../exprs/func_currval)
-- [`lastval()`](../../../exprs/func_lastval)
-- [`nextval()`](../../../exprs/func_nextval)
-- [`setval()`](../../../exprs/func_setval)
+- [`currval()`](../../../exprs/sequence_functions/func_currval)
+- [`lastval()`](../../../exprs/sequence_functions/func_lastval)
+- [`nextval()`](../../../exprs/sequence_functions/func_nextval)
+- [`setval()`](../../../exprs/sequence_functions/func_setval)

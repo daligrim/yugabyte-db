@@ -31,7 +31,6 @@
 #
 
 set(YB_PCH_PREFIX consensus)
-set(YB_PCH_DEP_LIBS opid_proto)
 
 #########################################
 # consensus_metadata_proto
@@ -57,6 +56,7 @@ ADD_YB_LIBRARY(consensus_metadata_proto
 
 YRPC_GENERATE(
   CONSENSUS_YRPC_SRCS CONSENSUS_YRPC_HDRS CONSENSUS_YRPC_TGTS
+  MESSAGES TRUE
   SOURCE_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../..
   BINARY_ROOT ${CMAKE_CURRENT_BINARY_DIR}/../..
   NO_SERVICE_PROTO_FILES consensus_types.proto
@@ -80,17 +80,18 @@ ADD_YB_LIBRARY(consensus_proto
 ADD_YB_LIBRARY(
   consensus_error
   SRCS consensus_error.cc
-  DEPS consensus_proto yb_util)
+  DEPS consensus_proto yb_ash yb_util)
 
 #########################################
 # log_proto
 #########################################
 
-PROTOBUF_GENERATE_CPP(
+YRPC_GENERATE(
   LOG_PROTO_SRCS LOG_PROTO_HDRS LOG_PROTO_TGTS
+  MESSAGES TRUE
   SOURCE_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../..
   BINARY_ROOT ${CMAKE_CURRENT_BINARY_DIR}/../..
-  PROTO_FILES log.proto)
+  NO_SERVICE_PROTO_FILES log.proto)
 
 add_library(log_proto ${LOG_PROTO_SRCS} ${LOG_PROTO_HDRS})
 
@@ -104,7 +105,6 @@ set(LOG_SRCS
   log_index.cc
   log_reader.cc
   log_metrics.cc
-  ${LOG_SRCS_EXTENSIONS}
 )
 
 add_library(log ${LOG_SRCS})
@@ -136,7 +136,12 @@ set(CONSENSUS_SRCS
   retryable_requests.cc)
 
 ADD_YB_LIBRARY(consensus SRCS ${CONSENSUS_SRCS})
+
 add_dependencies(consensus gen_src_yb_rpc_any_proto)
+add_dependencies(consensus cdc_service_proto)
+add_dependencies(consensus gen_src_yb_master_master_client_proto)
+add_dependencies(consensus gen_src_yb_master_master_types_proto)
+add_dependencies(consensus gen_src_yb_tserver_tserver_service_proto)
 
 target_link_libraries(consensus
   consensus_error
@@ -179,5 +184,6 @@ ADD_YB_TEST(raft_consensus-test)
 add_executable(log-dump log-dump.cc)
 target_link_libraries(log-dump
   log
+  yb_docdb
   ${YB_BASE_LIBS})
 add_dependencies(log-dump gen_src_yb_rpc_any_proto)

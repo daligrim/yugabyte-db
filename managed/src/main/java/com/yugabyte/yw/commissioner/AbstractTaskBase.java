@@ -5,6 +5,7 @@ package com.yugabyte.yw.commissioner;
 import static com.yugabyte.yw.common.PlatformExecutorFactory.SHUTDOWN_TIMEOUT_MINUTES;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.google.api.client.util.Throwables;
 import com.google.common.util.concurrent.MoreExecutors;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import com.typesafe.config.Config;
@@ -13,31 +14,41 @@ import com.yugabyte.yw.commissioner.TaskExecutor.SubTaskGroup;
 import com.yugabyte.yw.commissioner.TaskExecutor.TaskCache;
 import com.yugabyte.yw.commissioner.UserTaskDetails.SubTaskGroupType;
 import com.yugabyte.yw.common.ConfigHelper;
+import com.yugabyte.yw.common.ImageBundleUtil;
+import com.yugabyte.yw.common.NodeManager;
+import com.yugabyte.yw.common.NodeUIApiHelper;
+import com.yugabyte.yw.common.NodeUniverseManager;
 import com.yugabyte.yw.common.PlatformExecutorFactory;
+import com.yugabyte.yw.common.ReleaseManager;
 import com.yugabyte.yw.common.RestoreManagerYb;
 import com.yugabyte.yw.common.ShellResponse;
 import com.yugabyte.yw.common.TableManager;
 import com.yugabyte.yw.common.TableManagerYb;
+import com.yugabyte.yw.common.UnrecoverableException;
 import com.yugabyte.yw.common.Util;
+import com.yugabyte.yw.common.YsqlQueryExecutor;
 import com.yugabyte.yw.common.alerts.AlertConfigurationService;
+import com.yugabyte.yw.common.backuprestore.BackupHelper;
+import com.yugabyte.yw.common.config.RuntimeConfGetter;
 import com.yugabyte.yw.common.config.RuntimeConfigFactory;
+import com.yugabyte.yw.common.gflags.AutoFlagUtil;
+import com.yugabyte.yw.common.gflags.GFlagsValidation;
+import com.yugabyte.yw.common.inject.StaticInjectorHolder;
 import com.yugabyte.yw.common.metrics.MetricService;
 import com.yugabyte.yw.common.services.YBClientService;
 import com.yugabyte.yw.forms.ITaskParams;
-import com.yugabyte.yw.forms.UniverseDefinitionTaskParams;
-import com.yugabyte.yw.models.TaskInfo;
-import com.yugabyte.yw.models.Universe.UniverseUpdater;
-import com.yugabyte.yw.models.helpers.NodeDetails;
-import com.yugabyte.yw.models.helpers.NodeStatus;
+import com.yugabyte.yw.models.helpers.TaskType;
 import java.time.Duration;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Function;
+import java.util.function.Supplier;
 import javax.inject.Inject;
 import lombok.extern.slf4j.Slf4j;
 import play.Application;
-import play.api.Play;
 import play.libs.Json;
 
 @Slf4j
@@ -45,26 +56,27 @@ public abstract class AbstractTaskBase implements ITask {
 
   private static final String SLEEP_DISABLED_PATH = "yb.tasks.disabled_timeouts";
 
+  // The threadpool on which the subtasks are executed.
+  private ExecutorService subTaskExecutor;
+
   // The params for this task.
   protected ITaskParams taskParams;
 
-  // The threadpool on which the tasks are executed.
-  protected ExecutorService executor;
-
   // The UUID of this task.
-  protected UUID taskUUID;
+  private UUID taskUUID;
 
   // The UUID of the top-level user-facing task at the top of Task tree. Eg. CreateUniverse, etc.
-  protected UUID userTaskUUID;
+  private UUID userTaskUUID;
 
   // A field used to send additional information with prometheus metric associated with this task
   public String taskInfo = "";
 
-  protected final Application application;
+  private final Application application;
   protected final play.Environment environment;
   protected final Config config;
   protected final ConfigHelper configHelper;
   protected final RuntimeConfigFactory runtimeConfigFactory;
+  protected final RuntimeConfGetter confGetter;
   protected final MetricService metricService;
   protected final AlertConfigurationService alertConfigurationService;
   protected final YBClientService ybService;
@@ -73,6 +85,17 @@ public abstract class AbstractTaskBase implements ITask {
   protected final TableManagerYb tableManagerYb;
   private final PlatformExecutorFactory platformExecutorFactory;
   private final TaskExecutor taskExecutor;
+  private final Commissioner commissioner;
+  protected final HealthChecker healthChecker;
+  protected final NodeManager nodeManager;
+  protected final BackupHelper backupHelper;
+  protected final AutoFlagUtil autoFlagUtil;
+  protected final NodeUIApiHelper nodeUIApiHelper;
+  protected final ImageBundleUtil imageBundleUtil;
+  protected final ReleaseManager releaseManager;
+  protected final YsqlQueryExecutor ysqlQueryExecutor;
+  protected final GFlagsValidation gFlagsValidation;
+  protected final NodeUniverseManager nodeUniverseManager;
 
   @Inject
   protected AbstractTaskBase(BaseTaskDependencies baseTaskDependencies) {
@@ -81,6 +104,7 @@ public abstract class AbstractTaskBase implements ITask {
     this.config = baseTaskDependencies.getConfig();
     this.configHelper = baseTaskDependencies.getConfigHelper();
     this.runtimeConfigFactory = baseTaskDependencies.getRuntimeConfigFactory();
+    this.confGetter = baseTaskDependencies.getConfGetter();
     this.metricService = baseTaskDependencies.getMetricService();
     this.alertConfigurationService = baseTaskDependencies.getAlertConfigurationService();
     this.ybService = baseTaskDependencies.getYbService();
@@ -89,6 +113,17 @@ public abstract class AbstractTaskBase implements ITask {
     this.tableManagerYb = baseTaskDependencies.getTableManagerYb();
     this.platformExecutorFactory = baseTaskDependencies.getExecutorFactory();
     this.taskExecutor = baseTaskDependencies.getTaskExecutor();
+    this.commissioner = baseTaskDependencies.getCommissioner();
+    this.healthChecker = baseTaskDependencies.getHealthChecker();
+    this.nodeManager = baseTaskDependencies.getNodeManager();
+    this.backupHelper = baseTaskDependencies.getBackupHelper();
+    this.autoFlagUtil = baseTaskDependencies.getAutoFlagUtil();
+    this.nodeUIApiHelper = baseTaskDependencies.getNodeUIApiHelper();
+    this.imageBundleUtil = baseTaskDependencies.getImageBundleUtil();
+    this.releaseManager = baseTaskDependencies.getReleaseManager();
+    this.ysqlQueryExecutor = baseTaskDependencies.getYsqlQueryExecutor();
+    this.gFlagsValidation = baseTaskDependencies.getGFlagsValidation();
+    this.nodeUniverseManager = baseTaskDependencies.getNodeUniverseManager();
   }
 
   protected ITaskParams taskParams() {
@@ -106,32 +141,46 @@ public abstract class AbstractTaskBase implements ITask {
   }
 
   @Override
-  public JsonNode getTaskDetails() {
+  public JsonNode getTaskParams() {
     return Json.toJson(taskParams);
   }
 
   @Override
   public String toString() {
-    return getName() + " : details=" + getTaskDetails();
+    return getName() + " : params=" + getTaskParams();
   }
 
   @Override
   public abstract void run();
 
   @Override
-  public void terminate() {
-    if (executor != null && !executor.isShutdown()) {
-      MoreExecutors.shutdownAndAwaitTermination(
-          executor, SHUTDOWN_TIMEOUT_MINUTES, TimeUnit.MINUTES);
+  public synchronized void terminate() {
+    if (getUserTaskUUID().equals(getTaskUUID())) {
+      if (subTaskExecutor != null && !subTaskExecutor.isShutdown()) {
+        log.info("Shutting down executor with name: {}", getExecutorPoolName());
+        MoreExecutors.shutdownAndAwaitTermination(
+            subTaskExecutor, SHUTDOWN_TIMEOUT_MINUTES, TimeUnit.MINUTES);
+        subTaskExecutor = null;
+      }
     }
   }
 
-  // Create an task pool which can handle an unbounded number of tasks, while using an initial set
-  // of threads which get spawned upto TASK_THREADS limit.
-  public void createThreadpool() {
+  /** Override this if a custom task executor is needed. */
+  protected ExecutorService createSubTaskExecutorService() {
     ThreadFactory namedThreadFactory =
         new ThreadFactoryBuilder().setNameFormat("TaskPool-" + getName() + "-%d").build();
-    executor = platformExecutorFactory.createExecutor("task", namedThreadFactory);
+    return platformExecutorFactory.createExecutor(getExecutorPoolName(), namedThreadFactory);
+  }
+
+  protected synchronized ExecutorService getOrCreateSubTaskExecutorService() {
+    if (subTaskExecutor == null) {
+      subTaskExecutor = createSubTaskExecutorService();
+    }
+    return subTaskExecutor;
+  }
+
+  protected String getExecutorPoolName() {
+    return "task";
   }
 
   @Override
@@ -146,7 +195,15 @@ public abstract class AbstractTaskBase implements ITask {
 
   @Override
   public boolean isFirstTry() {
-    return taskParams().getPreviousTaskUUID() == null;
+    return taskParams() == null || taskParams().getPreviousTaskUUID() == null;
+  }
+
+  @Override
+  public void validateParams(boolean isFirstTry) {}
+
+  @Override
+  public Duration getQueueWaitTime(TaskType taskType, ITaskParams taskParams) {
+    return null;
   }
 
   /**
@@ -159,43 +216,14 @@ public abstract class AbstractTaskBase implements ITask {
     return Util.convertStringToJson(response.message);
   }
 
-  public UniverseUpdater nodeStateUpdater(
-      final UUID universeUUID, final String nodeName, final NodeStatus nodeStatus) {
-    UniverseUpdater updater =
-        universe -> {
-          UniverseDefinitionTaskParams universeDetails = universe.getUniverseDetails();
-          NodeDetails node = universe.getNode(nodeName);
-          if (node == null) {
-            return;
-          }
-          NodeStatus currentStatus = NodeStatus.fromNode(node);
-          log.info(
-              "Changing node {} state from {} to {} in universe {}.",
-              nodeName,
-              currentStatus,
-              nodeStatus,
-              universeUUID);
-          nodeStatus.fillNodeStates(node);
-          if (nodeStatus.getNodeState() == NodeDetails.NodeState.Decommissioned) {
-            node.cloudInfo.private_ip = null;
-            node.cloudInfo.public_ip = null;
-          }
-
-          // Update the node details.
-          universeDetails.nodeDetailsSet.add(node);
-          universe.setUniverseDetails(universeDetails);
-        };
-    return updater;
-  }
-
   /**
    * Creates task with appropriate dependency injection
    *
    * @param taskClass task class
    * @return Task instance with injected dependencies
    */
-  public static <T> T createTask(Class<T> taskClass) {
-    return Play.current().injector().instanceOf(taskClass);
+  public static <T extends ITask> T createTask(Class<T> taskClass) {
+    return StaticInjectorHolder.injector().instanceOf(TaskExecutor.class).createTask(taskClass);
   }
 
   public int getSleepMultiplier() {
@@ -210,19 +238,54 @@ public abstract class AbstractTaskBase implements ITask {
     return taskExecutor;
   }
 
+  protected Commissioner getCommissioner() {
+    return commissioner;
+  }
+
   // Returns the RunnableTask instance to which SubTaskGroup instances can be added and run.
   protected RunnableTask getRunnableTask() {
     return getTaskExecutor().getRunnableTask(userTaskUUID);
   }
 
-  // Returns a SubTaskGroup to which subtasks can be added.
-  protected SubTaskGroup createSubTaskGroup(String name) {
-    return createSubTaskGroup(name, SubTaskGroupType.Invalid);
+  /**
+   * Clears current task queue and runs tasks added by lambda.
+   *
+   * @param setTaskQueueRunnable
+   */
+  protected void setTaskQueueAndRun(Runnable setTaskQueueRunnable) {
+    getRunnableTask().reset();
+    setTaskQueueRunnable.run();
+    getRunnableTask().runSubTasks();
   }
 
-  protected SubTaskGroup createSubTaskGroup(String name, SubTaskGroupType subTaskGroupType) {
-    SubTaskGroup subTaskGroup = getTaskExecutor().createSubTaskGroup(name, subTaskGroupType, false);
-    subTaskGroup.setSubTaskExecutor(executor);
+  /**
+   * @deprecated Use {@link #createSubTaskGroup(String, SubTaskGroupType)} instead to set a default
+   *     SubTaskGroupType. This will be removed.
+   */
+  @Deprecated
+  protected SubTaskGroup createSubTaskGroup(String name) {
+    return createSubTaskGroup(name, SubTaskGroupType.Configuring);
+  }
+
+  /**
+   * @deprecated Use {@link #createSubTaskGroup(String, SubTaskGroupType, boolean)} instead to set a
+   *     default SubTaskGroupType. This will be removed.
+   */
+  @Deprecated
+  protected SubTaskGroup createSubTaskGroup(String name, boolean ignoreErrors) {
+    return createSubTaskGroup(name, SubTaskGroupType.Configuring, ignoreErrors);
+  }
+
+  protected SubTaskGroup createSubTaskGroup(String name, SubTaskGroupType defaultSubTaskGroupType) {
+    return createSubTaskGroup(name, defaultSubTaskGroupType, false);
+  }
+
+  // Returns a SubTaskGroup to which subtasks can be added.
+  protected SubTaskGroup createSubTaskGroup(
+      String name, SubTaskGroupType defaultSubTaskGroupType, boolean ignoreErrors) {
+    SubTaskGroup subTaskGroup =
+        getTaskExecutor().createSubTaskGroup(name, defaultSubTaskGroupType, ignoreErrors);
+    subTaskGroup.setSubTaskExecutor(getOrCreateSubTaskExecutorService());
     return subTaskGroup;
   }
 
@@ -230,6 +293,82 @@ public abstract class AbstractTaskBase implements ITask {
   // signal is received. It can be a replacement for Thread.sleep in subtasks.
   protected void waitFor(Duration duration) {
     getRunnableTask().waitFor(duration);
+  }
+
+  protected boolean doWithExponentialTimeout(
+      long initialDelayMs, long maxDelayMs, long totalDelayMs, Supplier<Boolean> funct) {
+    AtomicInteger iteration = new AtomicInteger();
+    return doWithModifyingTimeout(
+        (prevDelay) ->
+            Util.getExponentialBackoffDelayMs(
+                initialDelayMs, maxDelayMs, iteration.getAndIncrement()),
+        totalDelayMs,
+        funct);
+  }
+
+  protected boolean doWithModifyingTimeout(
+      Function<Long, Long> delayFunct, long totalDelayMs, Supplier<Boolean> funct) {
+    long currentDelayMs = 0;
+    long startTime = System.currentTimeMillis();
+    do {
+      if (funct.get()) {
+        return true;
+      }
+      currentDelayMs = delayFunct.apply(currentDelayMs);
+      log.debug(
+          "Waiting for {} ms between retries, total delay remaining {} ms",
+          currentDelayMs,
+          (startTime + totalDelayMs - System.currentTimeMillis()));
+      waitFor(Duration.ofMillis(currentDelayMs));
+    } while (System.currentTimeMillis() < startTime + totalDelayMs);
+    return false;
+  }
+
+  protected boolean doWithConstTimeout(long delayMs, long totalDelayMs, Supplier<Boolean> funct) {
+    return doWithModifyingTimeout((prevDelay) -> delayMs, totalDelayMs, funct);
+  }
+
+  /**
+   * This function retries a function with a modifiable delay between retries. The function will
+   * retry on any exception but will not retry if the exception is an UnrecoverableException.
+   *
+   * @param delayFunct Function to calculate the delay between retries
+   * @param totalDelayMs Total delay to wait before giving up
+   * @param funct Function to retry; must abide by the Runnable interface
+   * @throws RuntimeException If the function does not succeed before the total delay, or if an
+   *     UnrecoverableException is thrown.
+   */
+  protected void doWithModifyingTimeout(
+      Function<Long, Long> delayFunct, long totalDelayMs, Runnable funct) throws RuntimeException {
+    long currentDelayMs = 0;
+    long startTime = System.currentTimeMillis();
+    while (true) {
+      currentDelayMs = delayFunct.apply(currentDelayMs);
+      try {
+        funct.run();
+        return;
+      } catch (UnrecoverableException e) {
+        log.error(
+            "Won't retry; Unrecoverable error while running the function: {}", e.getMessage());
+        throw e;
+      } catch (Exception e) {
+        if (System.currentTimeMillis() < startTime + totalDelayMs - currentDelayMs) {
+          log.warn("Will retry; Error while running the function: {}", e.getMessage());
+        } else {
+          log.error("Retry timed out; Error while running the function: {}", e.getMessage());
+          Throwables.propagate(e);
+        }
+      }
+      log.debug(
+          "Waiting for {} ms between retry, total delay remaining {} ms",
+          currentDelayMs,
+          totalDelayMs - (System.currentTimeMillis() - startTime));
+      waitFor(Duration.ofMillis(currentDelayMs));
+    }
+  }
+
+  protected void doWithConstTimeout(long delayMs, long totalDelayMs, Runnable funct) {
+    doWithModifyingTimeout((prevDelay) -> delayMs, totalDelayMs, funct);
   }
 
   protected UUID getUserTaskUUID() {
@@ -242,5 +381,9 @@ public abstract class AbstractTaskBase implements ITask {
 
   protected TaskCache getTaskCache() {
     return getRunnableTask().getTaskCache();
+  }
+
+  protected <T> T getInstanceOf(Class<T> clazz) {
+    return application.injector().instanceOf(clazz);
   }
 }

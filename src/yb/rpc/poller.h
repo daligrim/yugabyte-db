@@ -11,8 +11,7 @@
 // under the License.
 //
 
-#ifndef YB_RPC_POLLER_H
-#define YB_RPC_POLLER_H
+#pragma once
 
 #include <condition_variable>
 
@@ -23,8 +22,7 @@
 #include "yb/util/status_fwd.h"
 #include "yb/util/monotime.h"
 
-namespace yb {
-namespace rpc {
+namespace yb::rpc {
 
 // Utility class to invoke specified callback with defined interval using scheduler.
 // TODO Add separate test for poller.
@@ -38,8 +36,15 @@ class Poller {
   Poller(Poller&&) = delete;
   void operator=(Poller&&) = delete;
 
+  void Start(Scheduler& scheduler, MonoDelta interval) {
+    Start(&scheduler, interval);
+  }
+
   void Start(Scheduler* scheduler, MonoDelta interval);
   void Shutdown();
+
+  void Pause();
+  void Resume();
 
  private:
   void Schedule() REQUIRES(mutex_);
@@ -52,16 +57,13 @@ class Poller {
   const std::string log_prefix_;
   const std::function<void()> callback_;
 
-  Scheduler* scheduler_ = nullptr;
-  MonoDelta interval_;
-
   std::mutex mutex_;
+  Scheduler* scheduler_ GUARDED_BY(mutex_) = nullptr;
+  MonoDelta interval_ GUARDED_BY(mutex_);
   bool closing_ GUARDED_BY(mutex_) = false;
   rpc::ScheduledTaskId poll_task_id_ GUARDED_BY(mutex_);
   std::condition_variable cond_ GUARDED_BY(mutex_);
+  bool paused_ GUARDED_BY(mutex_) = false;
 };
 
-} // namespace rpc
-} // namespace yb
-
-#endif // YB_RPC_POLLER_H
+} // namespace yb::rpc

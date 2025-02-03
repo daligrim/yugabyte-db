@@ -11,8 +11,7 @@
 // under the License.
 //
 
-#ifndef YB_MASTER_MASTER_TABLET_SERVICE_H
-#define YB_MASTER_MASTER_TABLET_SERVICE_H
+#pragma once
 
 #include "yb/master/master_fwd.h"
 #include "yb/master/master_tserver.h"
@@ -47,14 +46,31 @@ class MasterTabletServiceImpl : public tserver::TabletServiceImpl {
                 tserver::ChecksumResponsePB* resp,
                 rpc::RpcContext context) override;
 
-  void IsTabletServerReady(const tserver::IsTabletServerReadyRequestPB* req,
-                           tserver::IsTabletServerReadyResponsePB* resp,
-                           rpc::RpcContext context) override;
+  void IsTabletServerReady(
+      const tserver::IsTabletServerReadyRequestPB* req,
+      tserver::IsTabletServerReadyResponsePB* resp, rpc::RpcContext context) override;
+
+  void ListMasterServers(
+      const tserver::ListMasterServersRequestPB* req, tserver::ListMasterServersResponsePB* resp,
+      rpc::RpcContext context) override;
+
+  void AcquireObjectLocks(
+      const tserver::AcquireObjectLockRequestPB* req, tserver::AcquireObjectLockResponsePB* resp,
+      rpc::RpcContext context) override;
+
+  void ReleaseObjectLocks(
+      const tserver::ReleaseObjectLockRequestPB* req, tserver::ReleaseObjectLockResponsePB* resp,
+      rpc::RpcContext context) override;
+
+  void AdminExecutePgsql(
+      const tserver::AdminExecutePgsqlRequestPB* req, tserver::AdminExecutePgsqlResponsePB* resp,
+      rpc::RpcContext context) override;
 
  private:
   Result<std::shared_ptr<tablet::AbstractTablet>> GetTabletForRead(
     const TabletId& tablet_id, tablet::TabletPeerPtr tablet_peer,
-    YBConsistencyLevel consistency_level, tserver::AllowSplitTablet allow_split_tablet) override;
+    YBConsistencyLevel consistency_level, tserver::AllowSplitTablet allow_split_tablet,
+    tserver::ReadResponsePB* resp) override;
 
   Master *const master_;
   DISALLOW_COPY_AND_ASSIGN(MasterTabletServiceImpl);
@@ -62,4 +78,3 @@ class MasterTabletServiceImpl : public tserver::TabletServiceImpl {
 
 } // namespace master
 } // namespace yb
-#endif // YB_MASTER_MASTER_TABLET_SERVICE_H
